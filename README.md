@@ -23,8 +23,9 @@ retained as a compatibility entry point. The primary launcher enables the
 extended workflow only when no CLI, repository, or global setting explicitly
 sets `extended_workflow.enabled`; the compatibility launcher preserves the
 upstream disabled default. The visible distribution version is
-`v0.147.1-alpha-1`. Automatic updates are disabled so this fork cannot silently
-replace itself with an official Codex package.
+`v0.147.1-alpha-1`. Automatic app-server updates are disabled in the extended
+product mode so this fork cannot silently replace itself with an official Codex
+package; the compatibility `codex` launcher retains upstream behavior.
 
 Prepare a repository safely with a preview first:
 
@@ -41,8 +42,9 @@ codex-extended-workflow resume <session-id>
 ```
 
 MultiAgentV2 also exposes `close_agent`: the main agent uses it after a
-subagent result has been accepted or terminally rejected to cascade-close that
-agent's descendants and release concurrency slots.
+subagent result has been accepted or terminally rejected to shut that agent's
+subtree down, preserve descendant lifecycle state for authorized resume, and
+release concurrency slots.
 
 See [Extended workflow architecture and configuration](./EXTENDED_WORKFLOW.md)
 for the classifier, expert/reviewer contracts, budget semantics, severity

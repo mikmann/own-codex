@@ -10,6 +10,8 @@ use tokio::fs;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DaemonSettings {
     pub(crate) remote_control_enabled: bool,
+    #[serde(default)]
+    pub(crate) extended_workflow_default_enabled: bool,
 }
 
 impl DaemonSettings {
@@ -44,7 +46,7 @@ impl DaemonSettings {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
 
@@ -55,9 +57,22 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&DaemonSettings {
                 remote_control_enabled: true,
+                extended_workflow_default_enabled: true,
             })
             .expect("serialize"),
-            r#"{"remoteControlEnabled":true}"#
+            r#"{"remoteControlEnabled":true,"extendedWorkflowDefaultEnabled":true}"#
+        );
+    }
+
+    #[test]
+    fn legacy_settings_default_to_compatibility_product_mode() {
+        assert_eq!(
+            serde_json::from_str::<DaemonSettings>(r#"{"remoteControlEnabled":true}"#)
+                .expect("deserialize legacy settings"),
+            DaemonSettings {
+                remote_control_enabled: true,
+                extended_workflow_default_enabled: false,
+            }
         );
     }
 }

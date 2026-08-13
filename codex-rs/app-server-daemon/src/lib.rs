@@ -75,6 +75,17 @@ pub struct BootstrapOptions {
     pub remote_control_enabled: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DaemonProductDefaults {
+    pub extended_workflow_default_enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProductModeRequirement {
+    Persisted,
+    Match(DaemonProductDefaults),
+}
+
 /// Passively probes an existing app-server socket and returns its reported
 /// app-server version.
 pub async fn probe_app_server_version(socket_path: &Path) -> Result<String> {
@@ -190,18 +201,45 @@ enum RestartDecision {
 
 pub async fn run(command: LifecycleCommand) -> Result<LifecycleOutput> {
     ensure_supported_platform()?;
-    Daemon::from_environment()?.run(command).await
+    Daemon::from_environment()?
+        .run(command, ProductModeRequirement::Persisted)
+        .await
+}
+
+pub async fn run_with_product_defaults(
+    command: LifecycleCommand,
+    product_defaults: DaemonProductDefaults,
+) -> Result<LifecycleOutput> {
+    ensure_supported_platform()?;
+    Daemon::from_environment()?
+        .run(command, ProductModeRequirement::Match(product_defaults))
+        .await
 }
 
 pub async fn bootstrap(options: BootstrapOptions) -> Result<BootstrapOutput> {
+    bootstrap_with_product_defaults(options, DaemonProductDefaults::default()).await
+}
+
+pub async fn bootstrap_with_product_defaults(
+    options: BootstrapOptions,
+    product_defaults: DaemonProductDefaults,
+) -> Result<BootstrapOutput> {
     ensure_supported_platform()?;
-    Daemon::from_environment()?.bootstrap(options).await
+    Daemon::from_environment()?
+        .bootstrap(options, product_defaults)
+        .await
 }
 
 pub async fn ensure_remote_control_ready() -> Result<RemoteControlReadyOutput> {
+    ensure_remote_control_ready_with_product_defaults(DaemonProductDefaults::default()).await
+}
+
+pub async fn ensure_remote_control_ready_with_product_defaults(
+    product_defaults: DaemonProductDefaults,
+) -> Result<RemoteControlReadyOutput> {
     ensure_supported_platform()?;
     Daemon::from_environment()?
-        .ensure_remote_control_ready()
+        .ensure_remote_control_ready(product_defaults)
         .await
 }
 
@@ -222,13 +260,35 @@ pub async fn enable_remote_control_on_socket(
 /// Starts a manual pairing session through an already-running daemon app-server.
 pub async fn start_remote_control_pairing() -> Result<RemoteControlPairingStartResponse> {
     ensure_supported_platform()?;
-    let daemon = Daemon::from_environment()?;
-    remote_control_client::start_pairing(&daemon.socket_path).await
+    Daemon::from_environment()?
+        .start_remote_control_pairing(ProductModeRequirement::Persisted)
+        .await
+}
+
+pub async fn start_remote_control_pairing_with_product_defaults(
+    product_defaults: DaemonProductDefaults,
+) -> Result<RemoteControlPairingStartResponse> {
+    ensure_supported_platform()?;
+    Daemon::from_environment()?
+        .start_remote_control_pairing(ProductModeRequirement::Match(product_defaults))
+        .await
 }
 
 pub async fn set_remote_control(mode: RemoteControlMode) -> Result<RemoteControlOutput> {
     ensure_supported_platform()?;
-    Daemon::from_environment()?.set_remote_control(mode).await
+    Daemon::from_environment()?
+        .set_remote_control(mode, ProductModeRequirement::Persisted)
+        .await
+}
+
+pub async fn set_remote_control_with_product_defaults(
+    mode: RemoteControlMode,
+    product_defaults: DaemonProductDefaults,
+) -> Result<RemoteControlOutput> {
+    ensure_supported_platform()?;
+    Daemon::from_environment()?
+        .set_remote_control(mode, ProductModeRequirement::Match(product_defaults))
+        .await
 }
 
 pub async fn run_pid_update_loop(
@@ -276,14 +336,20 @@ impl Daemon {
         })
     }
 
-    async fn run(&self, command: LifecycleCommand) -> Result<LifecycleOutput> {
+    async fn run(
+        &self,
+        command: LifecycleCommand,
+        product_mode_requirement: ProductModeRequirement,
+    ) -> Result<LifecycleOutput> {
         match command {
             LifecycleCommand::Start => {
                 let _operation_lock = self.acquire_operation_lock().await?;
+                self.ensure_product_mode(product_mode_requirement).await?;
                 self.start().await
             }
             LifecycleCommand::Restart => {
                 let _operation_lock = self.acquire_operation_lock().await?;
+                self.ensure_product_mode(product_mode_requirement).await?;
                 self.restart().await
             }
             LifecycleCommand::Stop => {
@@ -319,7 +385,7 @@ impl Daemon {
                 .await);
         }
 
-        self.ensure_managed_codex_bin()?;
+        self.ensure_managed_codex_bin(&settings).await?;
         let pid = self.start_managed_backend(&settings).await?;
         let info = self.wait_until_ready().await?;
         Ok(self
@@ -342,7 +408,7 @@ impl Daemon {
             ));
         }
 
-        self.ensure_managed_codex_bin()?;
+        self.ensure_managed_codex_bin(&settings).await?;
         if let Some(backend) = self.running_backend_instance(&settings).await? {
             backend.stop().await?;
         }
@@ -486,15 +552,31 @@ impl Daemon {
         ));
     }
 
-    async fn bootstrap(&self, options: BootstrapOptions) -> Result<BootstrapOutput> {
+    async fn bootstrap(
+        &self,
+        options: BootstrapOptions,
+        product_defaults: DaemonProductDefaults,
+    ) -> Result<BootstrapOutput> {
         let _operation_lock = self.acquire_operation_lock().await?;
-        self.bootstrap_locked(options).await
+        self.bootstrap_locked(options, product_defaults).await
     }
 
-    async fn ensure_remote_control_started(&self) -> Result<RemoteControlStartOutput> {
+    async fn ensure_remote_control_started(
+        &self,
+        product_defaults: DaemonProductDefaults,
+    ) -> Result<RemoteControlStartOutput> {
         let _operation_lock = self.acquire_operation_lock().await?;
         let settings = self.load_settings().await?;
-        if self.is_bootstrapped(&settings).await? {
+        if self.is_bootstrapped(&settings).await?
+            && settings.extended_workflow_default_enabled
+                == product_defaults.extended_workflow_default_enabled
+        {
+            if settings.extended_workflow_default_enabled {
+                let updater = backend::pid_update_loop_backend(self.backend_paths(&settings));
+                if updater.is_starting_or_running().await? {
+                    updater.stop().await?;
+                }
+            }
             let _ = self
                 .set_remote_control_locked(RemoteControlMode::Enabled)
                 .await?;
@@ -503,15 +585,21 @@ impl Daemon {
         }
 
         let output = self
-            .bootstrap_locked(BootstrapOptions {
-                remote_control_enabled: true,
-            })
+            .bootstrap_locked(
+                BootstrapOptions {
+                    remote_control_enabled: true,
+                },
+                product_defaults,
+            )
             .await?;
         Ok(RemoteControlStartOutput::Bootstrap(output))
     }
 
-    async fn ensure_remote_control_ready(&self) -> Result<RemoteControlReadyOutput> {
-        let daemon = self.ensure_remote_control_started().await?;
+    async fn ensure_remote_control_ready(
+        &self,
+        product_defaults: DaemonProductDefaults,
+    ) -> Result<RemoteControlReadyOutput> {
+        let daemon = self.ensure_remote_control_started(product_defaults).await?;
         let remote_control =
             remote_control_client::enable_remote_control(&self.socket_path).await?;
         Ok(RemoteControlReadyOutput {
@@ -520,9 +608,46 @@ impl Daemon {
         })
     }
 
-    async fn set_remote_control(&self, mode: RemoteControlMode) -> Result<RemoteControlOutput> {
+    async fn start_remote_control_pairing(
+        &self,
+        product_mode_requirement: ProductModeRequirement,
+    ) -> Result<RemoteControlPairingStartResponse> {
         let _operation_lock = self.acquire_operation_lock().await?;
+        self.ensure_product_mode(product_mode_requirement).await?;
+        remote_control_client::start_pairing(&self.socket_path).await
+    }
+
+    async fn set_remote_control(
+        &self,
+        mode: RemoteControlMode,
+        product_mode_requirement: ProductModeRequirement,
+    ) -> Result<RemoteControlOutput> {
+        let _operation_lock = self.acquire_operation_lock().await?;
+        self.ensure_product_mode(product_mode_requirement).await?;
         self.set_remote_control_locked(mode).await
+    }
+
+    async fn ensure_product_mode(
+        &self,
+        product_mode_requirement: ProductModeRequirement,
+    ) -> Result<()> {
+        let ProductModeRequirement::Match(product_defaults) = product_mode_requirement else {
+            return Ok(());
+        };
+        let settings = self.load_settings().await?;
+        if settings.extended_workflow_default_enabled
+            != product_defaults.extended_workflow_default_enabled
+        {
+            let expected_mode = if product_defaults.extended_workflow_default_enabled {
+                "codex-extended-workflow"
+            } else {
+                "codex compatibility"
+            };
+            return Err(anyhow!(
+                "app-server daemon is configured for a different product mode; run `app-server daemon bootstrap` with {expected_mode} before starting or reconfiguring it"
+            ));
+        }
+        Ok(())
     }
 
     async fn set_remote_control_locked(
@@ -568,7 +693,7 @@ impl Daemon {
         settings.save(&self.settings_file).await?;
 
         let app_server_version = if let Some(backend) = backend {
-            self.ensure_managed_codex_bin()?;
+            self.ensure_managed_codex_bin(&settings).await?;
             backend.stop().await?;
             let _ = self.start_managed_backend(&settings).await?;
             Some(self.wait_until_ready().await?.app_server_version)
@@ -584,12 +709,16 @@ impl Daemon {
         ))
     }
 
-    async fn bootstrap_locked(&self, options: BootstrapOptions) -> Result<BootstrapOutput> {
-        self.ensure_managed_codex_bin()?;
-
+    async fn bootstrap_locked(
+        &self,
+        options: BootstrapOptions,
+        product_defaults: DaemonProductDefaults,
+    ) -> Result<BootstrapOutput> {
         let settings = DaemonSettings {
             remote_control_enabled: options.remote_control_enabled,
+            extended_workflow_default_enabled: product_defaults.extended_workflow_default_enabled,
         };
+        self.ensure_managed_codex_bin(&settings).await?;
         if client::probe(&self.socket_path).await.is_ok()
             && self.running_backend(&settings).await?.is_none()
         {
@@ -609,14 +738,16 @@ impl Daemon {
         if updater.is_starting_or_running().await? {
             updater.stop().await?;
         }
-        updater.start().await?;
+        if !settings.extended_workflow_default_enabled {
+            updater.start().await?;
+        }
 
         let info = self.wait_until_ready().await?;
         let managed_codex_version = self.managed_codex_version_best_effort().await;
         Ok(BootstrapOutput {
             status: BootstrapStatus::Bootstrapped,
             backend: BackendKind::Pid,
-            auto_update_enabled: true,
+            auto_update_enabled: !settings.extended_workflow_default_enabled,
             remote_control_enabled: settings.remote_control_enabled,
             managed_codex_path: self.managed_codex_bin.clone(),
             managed_codex_version,
@@ -660,23 +791,43 @@ impl Daemon {
     }
 
     async fn is_bootstrapped(&self, settings: &DaemonSettings) -> Result<bool> {
-        let updater = backend::pid_update_loop_backend(self.backend_paths(settings));
-        updater.is_starting_or_running().await
+        if settings.extended_workflow_default_enabled {
+            Ok(self.running_backend_instance(settings).await?.is_some())
+        } else {
+            let updater = backend::pid_update_loop_backend(self.backend_paths(settings));
+            updater.is_starting_or_running().await
+        }
     }
 
-    fn ensure_managed_codex_bin(&self) -> Result<()> {
-        if self.managed_codex_bin.is_file() {
-            return Ok(());
-        }
-
+    async fn ensure_managed_codex_bin(&self, settings: &DaemonSettings) -> Result<()> {
         let managed_codex_path = self.managed_codex_bin.display();
-        Err(anyhow!(
-            "managed standalone Codex install not found at {managed_codex_path}\n\n\
-             This command requires the standalone install managed by the Codex installer, because \
-             the daemon starts and updates app-server from that fixed path.\n\n\
-             Install it with:\n  curl -fsSL https://chatgpt.com/codex/install.sh | sh\n\n\
-             Then rerun the command you just tried."
-        ))
+        if !self.managed_codex_bin.is_file() {
+            if settings.extended_workflow_default_enabled {
+                return Err(anyhow!(
+                    "managed codex-extended-workflow install not found at {managed_codex_path}; install this fork's exact v{} standalone artifact before starting the daemon",
+                    env!("CARGO_PKG_VERSION")
+                ));
+            }
+            return Err(anyhow!(
+                "managed standalone Codex install not found at {managed_codex_path}\n\n\
+                 This command requires the standalone install managed by the Codex installer, because \
+                 the compatibility daemon starts and updates app-server from that fixed path.\n\n\
+                 Install it with:\n  curl -fsSL https://chatgpt.com/codex/install.sh | sh\n\n\
+                 Then rerun the command you just tried."
+            ));
+        }
+        #[cfg(unix)]
+        if settings.extended_workflow_default_enabled {
+            let version = managed_codex_version(&self.managed_codex_bin).await?;
+            let normalized_version = version.strip_prefix('v').unwrap_or(&version);
+            if normalized_version != env!("CARGO_PKG_VERSION") {
+                return Err(anyhow!(
+                    "managed app-server binary at {managed_codex_path} reports version {version}, but codex-extended-workflow requires exact version {}",
+                    env!("CARGO_PKG_VERSION")
+                ));
+            }
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -703,6 +854,7 @@ impl Daemon {
             pid_file: self.pid_file.clone(),
             update_pid_file: self.update_pid_file.clone(),
             remote_control_enabled: settings.remote_control_enabled,
+            extended_workflow_default_enabled: settings.extended_workflow_default_enabled,
         }
     }
 
@@ -976,7 +1128,7 @@ mod tests {
         let bootstrap_output = BootstrapOutput {
             status: BootstrapStatus::Bootstrapped,
             backend: BackendKind::Pid,
-            auto_update_enabled: true,
+            auto_update_enabled: false,
             remote_control_enabled: true,
             managed_codex_path: "codex".into(),
             managed_codex_version: Some("1.2.3".to_string()),
@@ -991,7 +1143,7 @@ mod tests {
             serde_json::json!({
                 "status": "bootstrapped",
                 "backend": "pid",
-                "autoUpdateEnabled": true,
+                "autoUpdateEnabled": false,
                 "remoteControlEnabled": true,
                 "managedCodexPath": "codex",
                 "managedCodexVersion": "1.2.3",

@@ -1073,9 +1073,10 @@ async fn cli_main(
                 root_remote_auth_token_env.as_deref(),
                 "mcp-server",
             )?;
-            codex_mcp_server::run_main(
+            codex_mcp_server::run_main_with_loader_overrides(
                 arg0_paths.clone(),
                 root_config_overrides,
+                extended_workflow_loader_overrides(extended_workflow_default_enabled),
                 strict_config || root_strict_config,
             )
             .await?;
@@ -1174,7 +1175,7 @@ async fn cli_main(
                     codex_app_server::run_main_with_transport_options(
                         arg0_paths.clone(),
                         root_config_overrides,
-                        LoaderOverrides::default(),
+                        extended_workflow_loader_overrides(extended_workflow_default_enabled),
                         strict_config,
                         analytics_default_enabled,
                         transport,
@@ -1186,36 +1187,65 @@ async fn cli_main(
                 }
                 Some(AppServerSubcommand::Daemon(daemon_cli)) => match daemon_cli.subcommand {
                     AppServerDaemonSubcommand::Start => {
-                        print_app_server_daemon_output(AppServerLifecycleCommand::Start).await?;
+                        print_app_server_daemon_output(
+                            AppServerLifecycleCommand::Start,
+                            Some(extended_workflow_default_enabled),
+                        )
+                        .await?;
                     }
                     AppServerDaemonSubcommand::Bootstrap(bootstrap_cli) => {
-                        let output =
-                            codex_app_server_daemon::bootstrap(AppServerBootstrapOptions {
+                        let output = codex_app_server_daemon::bootstrap_with_product_defaults(
+                            AppServerBootstrapOptions {
                                 remote_control_enabled: bootstrap_cli.remote_control,
-                            })
-                            .await?;
+                            },
+                            codex_app_server_daemon::DaemonProductDefaults {
+                                extended_workflow_default_enabled,
+                            },
+                        )
+                        .await?;
                         println!("{}", serde_json::to_string(&output)?);
                     }
                     AppServerDaemonSubcommand::Restart => {
-                        print_app_server_daemon_output(AppServerLifecycleCommand::Restart).await?;
+                        print_app_server_daemon_output(
+                            AppServerLifecycleCommand::Restart,
+                            Some(extended_workflow_default_enabled),
+                        )
+                        .await?;
                     }
                     AppServerDaemonSubcommand::EnableRemoteControl => {
-                        print_app_server_remote_control_output(AppServerRemoteControlMode::Enabled)
-                            .await?;
+                        print_app_server_remote_control_output(
+                            AppServerRemoteControlMode::Enabled,
+                            extended_workflow_default_enabled,
+                        )
+                        .await?;
                     }
                     AppServerDaemonSubcommand::DisableRemoteControl => {
                         print_app_server_remote_control_output(
                             AppServerRemoteControlMode::Disabled,
+                            extended_workflow_default_enabled,
                         )
                         .await?;
                     }
                     AppServerDaemonSubcommand::Stop => {
-                        print_app_server_daemon_output(AppServerLifecycleCommand::Stop).await?;
+                        print_app_server_daemon_output(
+                            AppServerLifecycleCommand::Stop,
+                            /*extended_workflow_default_enabled*/ None,
+                        )
+                        .await?;
                     }
                     AppServerDaemonSubcommand::Version => {
-                        print_app_server_daemon_output(AppServerLifecycleCommand::Version).await?;
+                        print_app_server_daemon_output(
+                            AppServerLifecycleCommand::Version,
+                            /*extended_workflow_default_enabled*/ None,
+                        )
+                        .await?;
                     }
                     AppServerDaemonSubcommand::PidUpdateLoop => {
+                        if extended_workflow_default_enabled {
+                            anyhow::bail!(
+                                "automatic app-server updates are disabled in codex-extended-workflow"
+                            );
+                        }
                         let cli_overrides = root_config_overrides
                             .parse_overrides()
                             .map_err(anyhow::Error::msg)?;
@@ -1272,6 +1302,7 @@ async fn cli_main(
                 arg0_paths.clone(),
                 root_config_overrides,
                 psp,
+                extended_workflow_loader_overrides(extended_workflow_default_enabled),
             )
             .await?;
         }
@@ -2007,6 +2038,13 @@ fn loader_overrides_for_profile(
     }
 }
 
+fn extended_workflow_loader_overrides(extended_workflow_default_enabled: bool) -> LoaderOverrides {
+    LoaderOverrides {
+        extended_workflow_default_enabled,
+        ..Default::default()
+    }
+}
+
 fn loader_overrides_for_profile_at_codex_home(
     profile_v2: Option<&ProfileV2Name>,
     codex_home: &std::path::Path,
@@ -2363,8 +2401,22 @@ fn app_server_subcommand_name(subcommand: Option<&AppServerSubcommand>) -> &'sta
     }
 }
 
-async fn print_app_server_daemon_output(command: AppServerLifecycleCommand) -> anyhow::Result<()> {
-    let output = codex_app_server_daemon::run(command).await?;
+async fn print_app_server_daemon_output(
+    command: AppServerLifecycleCommand,
+    extended_workflow_default_enabled: Option<bool>,
+) -> anyhow::Result<()> {
+    let output = match extended_workflow_default_enabled {
+        Some(extended_workflow_default_enabled) => {
+            codex_app_server_daemon::run_with_product_defaults(
+                command,
+                codex_app_server_daemon::DaemonProductDefaults {
+                    extended_workflow_default_enabled,
+                },
+            )
+            .await?
+        }
+        None => codex_app_server_daemon::run(command).await?,
+    };
     println!("{}", serde_json::to_string(&output)?);
     Ok(())
 }
@@ -2385,8 +2437,15 @@ fn updater_http_client_factory(
 
 async fn print_app_server_remote_control_output(
     mode: AppServerRemoteControlMode,
+    extended_workflow_default_enabled: bool,
 ) -> anyhow::Result<()> {
-    let output = codex_app_server_daemon::set_remote_control(mode).await?;
+    let output = codex_app_server_daemon::set_remote_control_with_product_defaults(
+        mode,
+        codex_app_server_daemon::DaemonProductDefaults {
+            extended_workflow_default_enabled,
+        },
+    )
+    .await?;
     println!("{}", serde_json::to_string(&output)?);
     Ok(())
 }
@@ -2452,10 +2511,7 @@ async fn run_interactive_tui(
         codex_tui::run_main(
             interactive.clone(),
             arg0_paths.clone(),
-            codex_config::LoaderOverrides {
-                extended_workflow_default_enabled,
-                ..Default::default()
-            },
+            extended_workflow_loader_overrides(extended_workflow_default_enabled),
             remote_endpoint.clone(),
         )
     };

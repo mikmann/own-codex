@@ -41,12 +41,14 @@ model capability resolver:
   reload/resume.
 - `codex-rs/core/src/tools/handlers/multi_agents_v2/close_agent.rs` adds the
   native V2 `close_agent` lifecycle operation. It accepts a live canonical task
-  name or thread id, rejects root/self targets, cascade-closes descendants,
-  releases concurrency slots, and treats a repeated close by thread id as an
-  idempotent no-op. `agent/control/lifecycle.rs` and the agent graph store use a
-  persisted `Open -> Closing -> Closed` target-edge transition, full ancestor
-  checks, deepest-first shutdown, and resume-time reconciliation. Workflow
-  policy closes an agent only after its result has been accepted or terminally
+  name or thread id, rejects root/self targets, shuts the target subtree down
+  deepest-first, releases concurrency slots, and treats a repeated close by
+  thread id as an idempotent no-op. `agent/control/lifecycle.rs` and the agent
+  graph store persist `Open -> Closing -> Closed` only on the target's incoming
+  edge; descendant edge states are preserved so an authorized legacy resume can
+  still reopen the correct subtree. Full ancestor checks and resume-time
+  reconciliation prevent publication below a closing path. Workflow policy
+  closes an agent only after its result has been accepted or terminally
   rejected, never while the single correction remains available.
 - `codex-rs/protocol/src/protocol.rs` persists the workflow identity and
   read-only flag in backward-compatible thread-spawn metadata. This keeps UI
@@ -243,6 +245,10 @@ window and supported output capabilities. This fork does not claim to impose a
 provider-side hard token cap when the API/runtime cannot do so.
 
 - `context_budget` and profile `token_budget` are advisory planning values.
+  Before a selected subagent starts, the runtime compares its configured
+  `context_budget` with a conservative byte-based estimate of the complete,
+  server-bound task. A task that cannot fit is rejected visibly; the estimate is
+  not presented as an exact provider token count.
 - `round_budget_tokens` and `workflow_budget_tokens` are conservative preflight
   controls. The planner estimates selected subagents and refuses to start a
   round when the configured minimum cannot fit; it reports `budget_blocked`
@@ -326,8 +332,12 @@ compatibility, but `bin/codex-extended-workflow.js` sets the narrowly scoped
 recognizes only the exact value `1`, so the packaged primary command receives
 the extended defaults while `bin/codex.js` remains the disabled-by-default
 compatibility entry point. Rust crate names and other public interfaces remain
-stable. Both launchers report `v0.147.1-alpha-1`.
+stable. App-server, foreground remote control, MCP tool sessions, and the
+TypeScript SDK propagate the same one-shot product default; an explicit
+configuration value still wins. Both launchers report `v0.147.1-alpha-1`.
 
-The official updater and update prompt are hard-disabled in this distribution.
-Installation and publishing are intentionally local-only until an explicit
-release process is requested.
+The official app-server updater and update prompt are hard-disabled when the
+extended product mode is active, preventing a managed daemon from replacing
+this fork with an upstream binary. The compatibility `codex` launcher retains
+the upstream updater behavior. Installation and publishing are intentionally
+local-only until an explicit release process is requested.

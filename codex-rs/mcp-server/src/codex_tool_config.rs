@@ -1,6 +1,7 @@
 //! Configuration object accepted by the `codex` MCP tool-call.
 
 use codex_arg0::Arg0DispatchPaths;
+use codex_config::LoaderOverrides;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
@@ -145,6 +146,15 @@ impl CodexToolCallParam {
         self,
         arg0_paths: Arg0DispatchPaths,
     ) -> std::io::Result<(String, Config)> {
+        self.into_config_with_loader_overrides(arg0_paths, LoaderOverrides::default())
+            .await
+    }
+
+    pub(crate) async fn into_config_with_loader_overrides(
+        self,
+        arg0_paths: Arg0DispatchPaths,
+        loader_overrides: LoaderOverrides,
+    ) -> std::io::Result<(String, Config)> {
         let Self {
             prompt,
             model,
@@ -181,6 +191,7 @@ impl CodexToolCallParam {
         let cfg = ConfigBuilder::default()
             .cli_overrides(cli_overrides)
             .harness_overrides(overrides)
+            .loader_overrides(loader_overrides)
             .build()
             .await?;
 
@@ -384,6 +395,45 @@ mod tests {
             err.to_string().contains("unknown field `profile`"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn per_call_config_inherits_launcher_default_and_explicit_disable_wins() {
+        let temp = tempfile::tempdir().expect("temporary config root");
+        let mut loader_overrides = LoaderOverrides::without_managed_config_for_tests();
+        loader_overrides.user_config_path = Some(
+            temp.path()
+                .join("config.toml")
+                .try_into()
+                .expect("absolute user config path"),
+        );
+        loader_overrides.extended_workflow_default_enabled = true;
+        let base = CodexToolCallParam {
+            prompt: "change the parser".to_string(),
+            cwd: Some(temp.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (_, inherited) = base
+            .clone()
+            .into_config_with_loader_overrides(
+                Arg0DispatchPaths::default(),
+                loader_overrides.clone(),
+            )
+            .await
+            .expect("launcher default config");
+        assert!(inherited.extended_workflow.enabled);
+
+        let (_, disabled) = CodexToolCallParam {
+            config: Some(HashMap::from([(
+                "extended_workflow.enabled".to_string(),
+                serde_json::json!(false),
+            )])),
+            ..base
+        }
+        .into_config_with_loader_overrides(Arg0DispatchPaths::default(), loader_overrides)
+        .await
+        .expect("explicitly disabled config");
+        assert!(!disabled.extended_workflow.enabled);
     }
 
     #[test]

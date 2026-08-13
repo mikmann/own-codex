@@ -42,6 +42,7 @@ export type CodexExecArgs = {
 
 const INTERNAL_ORIGINATOR_ENV = "CODEX_INTERNAL_ORIGINATOR_OVERRIDE";
 const TYPESCRIPT_SDK_ORIGINATOR = "codex_sdk_ts";
+const EXTENDED_WORKFLOW_LAUNCHER_ENV = "CODEX_EXTENDED_WORKFLOW_LAUNCHER";
 const CODEX_NPM_NAMES = ["codex-extended-workflow", "@openai/codex"] as const;
 
 const PLATFORM_PACKAGE_BY_TARGET: Record<string, string> = {
@@ -55,14 +56,19 @@ const PLATFORM_PACKAGE_BY_TARGET: Record<string, string> = {
 
 const moduleRequire = createRequire(import.meta.url);
 
-type CodexPathResolution = {
+type NativePathResolution = {
   executablePath: string;
   pathDirs: string[];
+};
+
+type CodexPathResolution = NativePathResolution & {
+  extendedWorkflowLauncher: boolean;
 };
 
 export class CodexExec {
   private executablePath: string;
   private pathDirs: string[];
+  private extendedWorkflowLauncher: boolean;
   private envOverride?: Record<string, string>;
   private configOverrides?: CodexConfigObject;
 
@@ -74,10 +80,12 @@ export class CodexExec {
     if (executablePath) {
       this.executablePath = executablePath;
       this.pathDirs = [];
+      this.extendedWorkflowLauncher = false;
     } else {
       const resolved = findCodexPath();
       this.executablePath = resolved.executablePath;
       this.pathDirs = resolved.pathDirs;
+      this.extendedWorkflowLauncher = resolved.extendedWorkflowLauncher;
     }
     this.envOverride = env;
     this.configOverrides = configOverrides;
@@ -177,6 +185,7 @@ export class CodexExec {
     if (this.pathDirs.length > 0) {
       prependPathDirs(env, this.pathDirs);
     }
+    applyExtendedWorkflowLauncherEnv(env, this.extendedWorkflowLauncher);
 
     const child = spawn(this.executablePath, commandArgs, {
       env,
@@ -406,14 +415,21 @@ function findCodexPath(): CodexPathResolution {
   }
 
   const codexBinaryName = process.platform === "win32" ? "codex.exe" : "codex";
-  const nativePackage = resolveNativePackage(vendorRoot, targetTriple, codexBinaryName);
+  const nativePackage = resolveNativePackage(
+    vendorRoot,
+    targetTriple,
+    codexBinaryName,
+  );
   if (!nativePackage) {
     throw new Error(
       `Unable to locate Codex CLI binaries for ${targetTriple}. Ensure ${installedPackage.packageName} is installed with optional dependencies.`,
     );
   }
 
-  return nativePackage;
+  return {
+    ...nativePackage,
+    extendedWorkflowLauncher: installedPackage.packageName === "codex-extended-workflow",
+  };
 }
 
 export function resolveInstalledCodexPackage(
@@ -436,7 +452,7 @@ export function resolveNativePackage(
   vendorRoot: string,
   targetTriple: string,
   codexBinaryName: string,
-): CodexPathResolution | null {
+): NativePathResolution | null {
   const packageRoot = path.join(vendorRoot, targetTriple);
   const packageBinaryPath = path.join(packageRoot, "bin", codexBinaryName);
   if (isFile(packageBinaryPath) && isFile(path.join(packageRoot, "codex-package.json"))) {
@@ -455,6 +471,15 @@ export function resolveNativePackage(
   }
 
   return null;
+}
+
+export function applyExtendedWorkflowLauncherEnv(
+  env: Record<string, string>,
+  extendedWorkflowLauncher: boolean,
+): void {
+  if (extendedWorkflowLauncher) {
+    env[EXTENDED_WORKFLOW_LAUNCHER_ENV] = "1";
+  }
 }
 
 function existingDirs(...dirs: string[]): string[] {

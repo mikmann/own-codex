@@ -212,6 +212,21 @@ describe("CodexExec", () => {
     });
   });
 
+  it("sets the launcher marker only for the resolved extended package", async () => {
+    const { applyExtendedWorkflowLauncherEnv } = await import("../src/exec");
+    const extendedEnv = { CUSTOM: "value" };
+    const compatibilityEnv = { CUSTOM: "value" };
+
+    applyExtendedWorkflowLauncherEnv(extendedEnv, true);
+    applyExtendedWorkflowLauncherEnv(compatibilityEnv, false);
+
+    expect(extendedEnv).toEqual({
+      CUSTOM: "value",
+      CODEX_EXTENDED_WORKFLOW_LAUNCHER: "1",
+    });
+    expect(compatibilityEnv).toEqual({ CUSTOM: "value" });
+  });
+
   it("prepends package PATH entries without duplicating them", async () => {
     const { prependPathDirs } = await import("../src/exec");
     const pathDir = path.join(tmpdir(), "codex-path");

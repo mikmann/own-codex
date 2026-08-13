@@ -2,7 +2,11 @@
 
 Embed the Codex agent in your workflows and apps.
 
-The TypeScript SDK wraps the `codex` CLI from `@openai/codex`. It spawns the CLI and exchanges JSONL events over stdin/stdout.
+The TypeScript SDK prefers the `codex-extended-workflow` package and falls back to
+the compatibility `@openai/codex` package. It preserves the resolved package
+identity when starting the shared native payload, then exchanges JSONL events
+over stdin/stdout. An explicitly supplied executable path remains a compatibility
+invocation and does not implicitly enable the extended workflow.
 
 ## Installation
 

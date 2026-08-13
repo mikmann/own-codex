@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use codex_arg0::Arg0DispatchPaths;
+use codex_config::LoaderOverrides;
 use codex_core::StateDbHandle;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
@@ -43,6 +44,7 @@ pub(crate) struct MessageProcessor {
     arg0_paths: Arg0DispatchPaths,
     thread_manager: Arc<ThreadManager>,
     active_turns: Arc<ActiveTurnRegistry>,
+    loader_overrides: LoaderOverrides,
 }
 
 impl MessageProcessor {
@@ -55,6 +57,7 @@ impl MessageProcessor {
         environment_manager: Arc<EnvironmentManager>,
         state_db: Option<StateDbHandle>,
         installation_id: String,
+        loader_overrides: LoaderOverrides,
     ) -> Self {
         let outgoing = Arc::new(outgoing);
         let auth_manager = AuthManager::shared_from_config(
@@ -117,6 +120,7 @@ impl MessageProcessor {
             arg0_paths,
             thread_manager,
             active_turns,
+            loader_overrides,
         }
     }
 
@@ -375,7 +379,13 @@ impl MessageProcessor {
         let arguments = arguments.map(serde_json::Value::Object);
         let (initial_prompt, config): (String, Config) = match arguments {
             Some(json_val) => match serde_json::from_value::<CodexToolCallParam>(json_val) {
-                Ok(tool_cfg) => match tool_cfg.into_config(self.arg0_paths.clone()).await {
+                Ok(tool_cfg) => match tool_cfg
+                    .into_config_with_loader_overrides(
+                        self.arg0_paths.clone(),
+                        self.loader_overrides.clone(),
+                    )
+                    .await
+                {
                     Ok(cfg) => cfg,
                     Err(e) => {
                         let result = CallToolResult::error(vec![rmcp::model::ContentBlock::text(
