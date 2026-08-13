@@ -192,19 +192,6 @@ async fn handle_spawn_agent(
         apply_read_only_child_ceiling(&mut config)?;
     }
 
-    let message = workflow_identity
-        .as_ref()
-        .map_or(message.clone(), |identity| {
-            workflow_contract_message(identity.kind, &message)
-        });
-    if workflow_identity.is_some() {
-        crate::extended_workflow::require_bounded_workflow_text(
-            "complete workflow task contract",
-            &message,
-            crate::extended_workflow::MAX_WORKFLOW_TASK_BYTES,
-        )
-        .map_err(FunctionCallError::RespondToModel)?;
-    }
     let assignment_sha256 = workflow_identity.as_ref().map(|identity| {
         crate::extended_workflow::workflow_assignment_sha256(
             &turn.sub_id,
@@ -428,21 +415,6 @@ struct WorkflowIdentity {
     profile: WorkflowAgentPlan,
     canonical_task: String,
     root_request_sha256: String,
-}
-
-fn workflow_contract_message(kind: WorkflowAgentKind, task: &str) -> String {
-    let contract = match kind {
-        WorkflowAgentKind::Expert => {
-            r#"{"subject":"non-empty string matching the assigned task","summary":"non-empty string","findings":["at least one finding"],"recommendations":["at least one recommendation"],"evidence":[{"file":"repository-relative file","symbol":"function, type, or module","explanation":"how this evidence supports the result"}],"uncertainties":["open question, or an explicit none statement"]}"#
-        }
-        WorkflowAgentKind::Reviewer => {
-            r#"{"subject":"non-empty string matching the assigned task","verdict":"pass | needs_changes | blocked","summary":"non-empty string","findings":[{"severity":"Low | Medium | High | Critical","impact":"local | material | system_wide","likelihood":"unlikely | plausible | expected","recoverability":"easy | costly | irreversible","rationale":"non-empty string","file":"repository-relative file","symbol":"function, type, or module","recommended_fix":"non-empty string","missing_tests":["specific missing test, if any"]}],"evidence":[{"file":"repository-relative file","symbol":"function, type, or module","explanation":"how this evidence supports the verdict"}],"missing_tests":["specific missing test, if any"]}"#
-        }
-    };
-    let marker = crate::extended_workflow::WORKFLOW_RESULT_CONTRACT_MARKER;
-    format!(
-        "{task}{marker}Result contract: Return exactly one JSON object with this shape: {contract}\nDo not wrap it in Markdown or add prose before or after it. All named fields are required; arrays may be empty only when the field text permits it. The parent validates this exact terminal response server-side."
-    )
 }
 
 impl WorkflowIdentity {

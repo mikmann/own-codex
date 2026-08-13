@@ -8,8 +8,10 @@ pub(crate) fn create_plan_workflow_reviewers_tool() -> ToolSpec {
     let properties = BTreeMap::from([(
         "change_summary".to_string(),
         JsonSchema::string(Some(
-            "Compact factual summary of the actual files, symbols, risks, and tests changed."
-                .to_string(),
+            format!(
+                "Compact factual summary of the actual files, symbols, risks, and tests changed. Hard limit: {} UTF-8 bytes.",
+                crate::extended_workflow::MAX_WORKFLOW_CHANGE_SUMMARY_BYTES
+            ),
         ))
         .with_max_length(crate::extended_workflow::MAX_WORKFLOW_CHANGE_SUMMARY_BYTES),
     )]);

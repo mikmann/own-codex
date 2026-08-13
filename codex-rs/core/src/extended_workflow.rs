@@ -23,8 +23,9 @@ const DEFAULT_ESTIMATED_AGENT_TOKENS: u64 = 1_200;
 const MAX_CLASSIFIER_INPUT_CHARS: usize = 32_000;
 pub(crate) const MAX_WORKFLOW_TASK_BYTES: usize = 6_000;
 const MAX_WORKFLOW_ROOT_REQUEST_BYTES: usize = 3_000;
-const MAX_CANONICAL_WORKFLOW_TASK_BYTES: usize = 4_200;
-pub(crate) const MAX_WORKFLOW_CHANGE_SUMMARY_BYTES: usize = 6_000;
+const MAX_CANONICAL_WORKFLOW_TASK_BYTES: usize = 6_000;
+const MAX_COMPLETE_WORKFLOW_TASK_BYTES: usize = 7_000;
+pub(crate) const MAX_WORKFLOW_CHANGE_SUMMARY_BYTES: usize = 1_500;
 pub(crate) const MAX_WORKFLOW_EXPECTED_SUBJECT_BYTES: usize = 4_096;
 pub(crate) const MAX_WORKFLOW_RESULT_ID_BYTES: usize = 256;
 pub(crate) const MAX_WORKFLOW_AGENT_REFERENCE_BYTES: usize = 512;
@@ -163,6 +164,20 @@ pub(crate) fn workflow_assignment_sha256(
     format!("{:x}", hasher.finalize())
 }
 
+fn workflow_contract_message(kind: WorkflowAgentKind, task: &str) -> String {
+    let contract = match kind {
+        WorkflowAgentKind::Expert => {
+            r#"{"subject":"non-empty string matching the assigned task","summary":"non-empty string","findings":["at least one finding"],"recommendations":["at least one recommendation"],"evidence":[{"file":"repository-relative file","symbol":"function, type, or module","explanation":"how this evidence supports the result"}],"uncertainties":["open question, or an explicit none statement"]}"#
+        }
+        WorkflowAgentKind::Reviewer => {
+            r#"{"subject":"non-empty string matching the assigned task","verdict":"pass | needs_changes | blocked","summary":"non-empty string","findings":[{"severity":"Low | Medium | High | Critical","impact":"local | material | system_wide","likelihood":"unlikely | plausible | expected","recoverability":"easy | costly | irreversible","rationale":"non-empty string","file":"repository-relative file","symbol":"function, type, or module","recommended_fix":"non-empty string","missing_tests":["specific missing test, if any"]}],"evidence":[{"file":"repository-relative file","symbol":"function, type, or module","explanation":"how this evidence supports the verdict"}],"missing_tests":["specific missing test, if any"]}"#
+        }
+    };
+    format!(
+        "{task}{WORKFLOW_RESULT_CONTRACT_MARKER}Result contract: Return exactly one JSON object with this shape: {contract}\nDo not wrap it in Markdown or add prose before or after it. All named fields are required; arrays may be empty only when the field text permits it. The parent validates this exact terminal response server-side."
+    )
+}
+
 pub(crate) fn workflow_assignment_subject(message: &str) -> &str {
     let assignment = message
         .rsplit_once(WORKFLOW_RESULT_CONTRACT_MARKER)
@@ -274,6 +289,11 @@ impl WorkflowTurnRuntimeState {
         plan: &WorkflowProcessPlan,
         change_summary: &str,
     ) -> Result<(), String> {
+        require_bounded_workflow_text(
+            "change_summary",
+            change_summary,
+            MAX_WORKFLOW_CHANGE_SUMMARY_BYTES,
+        )?;
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let reviewer_round = WorkflowReviewerRound {
             plan: plan.clone(),
@@ -294,6 +314,11 @@ impl WorkflowTurnRuntimeState {
     }
 
     pub fn reviewer_planning_input(&self, change_summary: &str) -> Result<String, String> {
+        require_bounded_workflow_text(
+            "change_summary",
+            change_summary,
+            MAX_WORKFLOW_CHANGE_SUMMARY_BYTES,
+        )?;
         let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(error) = inner.task_binding_error.as_ref() {
             return Err(error.clone());
@@ -741,7 +766,7 @@ fn spawn_directive_for_task(
         return Err(error.clone());
     }
     let (kind, profile) = selected_profile_for_task(inner, task_name)?;
-    let canonical_task = match kind {
+    let canonical_assignment = match kind {
         WorkflowAgentKind::Expert => format!(
             "Root request SHA-256: {}\nRoot request:\n{}\n\nAssigned expert role: {}\nAnalyze this exact root request from the assigned role. Support the main agent in creating concepts, making decisions, or creating tickets with specialist findings, alternatives, risks, evidence, and recommendations. Work read-only, cite concrete files and symbols, state uncertainties, do not implement changes, and do not present your contribution as the final decision, concept, or ticket.",
             inner.root_request_sha256, inner.root_request, profile.role
@@ -762,15 +787,21 @@ fn spawn_directive_for_task(
     };
     require_bounded_workflow_text(
         "canonical workflow task",
-        &canonical_task,
+        &canonical_assignment,
         MAX_CANONICAL_WORKFLOW_TASK_BYTES,
+    )?;
+    let canonical_task = workflow_contract_message(kind, &canonical_assignment);
+    require_bounded_workflow_text(
+        "complete workflow task contract",
+        &canonical_task,
+        MAX_COMPLETE_WORKFLOW_TASK_BYTES,
     )?;
     let estimated_task_tokens = u64::try_from(canonical_task.len().div_ceil(4)).unwrap_or(u64::MAX);
     if let Some(context_budget) = profile.context_budget
         && estimated_task_tokens > context_budget
     {
         return Err(format!(
-            "workflow profile `{}` has a hard local context ceiling of {context_budget} tokens, but the server-bound task alone is conservatively estimated at {estimated_task_tokens} tokens; no agent was started",
+            "workflow profile `{}` has a hard local context ceiling of {context_budget} tokens, but the complete server-bound task contract is conservatively estimated at {estimated_task_tokens} tokens; no agent was started",
             profile.name
         ));
     }

@@ -520,6 +520,11 @@ fn workflow_spawn_task_is_root_bound_and_context_budgeted() {
     assert!(
         directive
             .canonical_task
+            .contains(WORKFLOW_RESULT_CONTRACT_MARKER)
+    );
+    assert!(
+        directive
+            .canonical_task
             .contains("do not present your contribution as the final decision, concept, or ticket")
     );
 
@@ -536,6 +541,11 @@ fn workflow_spawn_task_is_root_bound_and_context_budgeted() {
         "Verify their purpose, necessity, alignment with the root request and accepted ticket, and functional and technical correctness"
     ));
     assert!(reviewer_directive.canonical_task.contains("work read-only"));
+    assert!(
+        reviewer_directive
+            .canonical_task
+            .contains(WORKFLOW_RESULT_CONTRACT_MARKER)
+    );
     assert!(
         reviewer_directive
             .canonical_task
@@ -558,6 +568,105 @@ fn workflow_spawn_task_is_root_bound_and_context_budgeted() {
             .expect_err("task must exceed one token")
             .contains("no agent was started")
     );
+}
+
+#[test]
+fn maximum_bounded_reviewer_task_is_spawnable_and_context_budget_counts_contract() {
+    let root_prefix = "Implement the workflow. ";
+    let root_request = format!(
+        "{root_prefix}{}",
+        "r".repeat(MAX_WORKFLOW_ROOT_REQUEST_BYTES - root_prefix.len())
+    );
+    let summary_prefix = "CLI security and tests. ";
+    let change_summary = format!(
+        "{summary_prefix}{}",
+        "s".repeat(MAX_WORKFLOW_CHANGE_SUMMARY_BYTES - summary_prefix.len())
+    );
+    let mut config = ExtendedWorkflowConfig::default();
+    for (index, profile) in config.reviewers.profiles.iter_mut().enumerate() {
+        let prefix = format!("role-{index}-");
+        profile.role = format!(
+            "{prefix}{}",
+            "r".repeat(
+                codex_config::extended_workflow::EXTENDED_WORKFLOW_MAX_PROFILE_FIELD_BYTES
+                    - prefix.len()
+            )
+        );
+    }
+
+    let turn_plan = plan_turn(&root_request, TEST_TURN_ID, &config);
+    assert!(!turn_plan.task_binding_blocked);
+    let runtime = WorkflowTurnRuntimeState::new(&turn_plan, &root_request);
+    let planning_input = runtime
+        .reviewer_planning_input(&change_summary)
+        .expect("maximum bounded reviewer planning input");
+    assert!(planning_input.len() <= MAX_WORKFLOW_TASK_BYTES);
+    let reviewer_plan = plan_reviewers(&change_summary, TEST_TURN_ID, &config);
+    runtime
+        .install_reviewers(&reviewer_plan, &change_summary)
+        .expect("maximum bounded reviewer round should install");
+    let reviewer = reviewer_plan.selected.first().expect("selected reviewer");
+    let directive = runtime
+        .spawn_directive_for_task(&reviewer.task_name)
+        .expect("maximum bounded reviewer task should be spawnable");
+    assert!(directive.canonical_task.len() <= MAX_COMPLETE_WORKFLOW_TASK_BYTES);
+    let (assignment, _contract) = directive
+        .canonical_task
+        .rsplit_once(WORKFLOW_RESULT_CONTRACT_MARKER)
+        .expect("complete task should contain the result contract");
+    let assignment_tokens = u64::try_from(assignment.len().div_ceil(4)).expect("token estimate");
+    let complete_tokens =
+        u64::try_from(directive.canonical_task.len().div_ceil(4)).expect("token estimate");
+    assert!(complete_tokens > assignment_tokens);
+
+    for profile in &mut config.reviewers.profiles {
+        profile.context_budget = Some(assignment_tokens);
+    }
+    let constrained_turn_plan = plan_turn(&root_request, TEST_TURN_ID, &config);
+    let constrained_runtime = WorkflowTurnRuntimeState::new(&constrained_turn_plan, &root_request);
+    let constrained_reviewer_plan = plan_reviewers(&change_summary, TEST_TURN_ID, &config);
+    constrained_runtime
+        .install_reviewers(&constrained_reviewer_plan, &change_summary)
+        .expect("constrained reviewer round should install");
+    let constrained_reviewer = constrained_reviewer_plan
+        .selected
+        .first()
+        .expect("selected constrained reviewer");
+    assert!(
+        constrained_runtime
+            .spawn_directive_for_task(&constrained_reviewer.task_name)
+            .expect_err("complete task contract must exceed the assignment-only ceiling")
+            .contains("complete server-bound task contract")
+    );
+}
+
+#[test]
+fn oversized_reviewer_summary_is_rejected_before_the_round_is_fixed() {
+    let config = ExtendedWorkflowConfig::default();
+    let root_request = "Implement the CLI workflow and tests.";
+    let turn_plan = plan_turn(root_request, TEST_TURN_ID, &config);
+    let runtime = WorkflowTurnRuntimeState::new(&turn_plan, root_request);
+    let oversized_summary = "s".repeat(MAX_WORKFLOW_CHANGE_SUMMARY_BYTES + 1);
+    let oversized_plan = plan_reviewers(&oversized_summary, TEST_TURN_ID, &config);
+
+    assert!(
+        runtime
+            .reviewer_planning_input(&oversized_summary)
+            .expect_err("oversized planning summary")
+            .contains("hard limit is 1500")
+    );
+    assert!(
+        runtime
+            .install_reviewers(&oversized_plan, &oversized_summary)
+            .expect_err("oversized reviewer round")
+            .contains("hard limit is 1500")
+    );
+
+    let compact_summary = "CLI workflow and test changes.";
+    let compact_plan = plan_reviewers(compact_summary, TEST_TURN_ID, &config);
+    runtime
+        .install_reviewers(&compact_plan, compact_summary)
+        .expect("a failed oversized attempt must not fix the reviewer round");
 }
 
 #[test]

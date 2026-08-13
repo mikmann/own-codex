@@ -59,6 +59,24 @@ fn selected_workflow_task_name(value: &Value, process: &str) -> Option<String> {
     }
 }
 
+fn selected_reviewer_task_name(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|parsed| selected_reviewer_task_name(&parsed)),
+        Value::Array(values) => values.iter().find_map(selected_reviewer_task_name),
+        Value::Object(values) => {
+            if let Some(task_name) = values.get("task_name").and_then(Value::as_str)
+                && task_name.contains("_reviewer_")
+            {
+                return Some(task_name.to_string());
+            }
+            values.values().find_map(selected_reviewer_task_name)
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => None,
+    }
+}
+
 #[derive(Debug)]
 struct WorkflowExpertSpawnResponder {
     child_task: &'static str,
@@ -85,6 +103,35 @@ impl wiremock::Respond for WorkflowExpertSpawnResponder {
                 &arguments,
             ),
             ev_completed("resp-root-spawn"),
+        ]))
+    }
+}
+
+#[derive(Debug)]
+struct WorkflowReviewerSpawnResponder {
+    call_id: &'static str,
+}
+
+impl wiremock::Respond for WorkflowReviewerSpawnResponder {
+    fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+        let body = request_body_json(request).expect("responses request should contain JSON");
+        let task_name = selected_reviewer_task_name(&body)
+            .expect("reviewer planning output should contain a selected reviewer task");
+        let arguments = json!({
+            "message": "route the selected reviewer",
+            "task_name": task_name,
+            "fork_turns": "none"
+        })
+        .to_string();
+        core_test_support::responses::sse_response(sse(vec![
+            ev_response_created("resp-root-reviewer-spawn"),
+            ev_function_call_with_namespace(
+                self.call_id,
+                "collaboration",
+                "spawn_agent",
+                &arguments,
+            ),
+            ev_completed("resp-root-reviewer-spawn"),
         ]))
     }
 }
@@ -452,5 +499,85 @@ async fn workflow_expert_shell_write_fails_closed_without_creating_a_file() -> R
     .await?;
     assert!(!tool_output.trim().is_empty());
     assert!(!marker.exists(), "read-only expert created {marker:?}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn maximum_bounded_reviewer_contract_reaches_the_child() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    const PLAN_CALL_ID: &str = "call-plan-max-reviewer";
+    const SPAWN_CALL_ID: &str = "call-spawn-max-reviewer";
+    let root_prefix = "What is HTTP? ";
+    let root_prompt = format!("{root_prefix}{}", "r".repeat(3_000 - root_prefix.len()));
+    let summary_prefix = "CLI security and tests. ";
+    let change_summary = format!(
+        "{summary_prefix}{}",
+        "s".repeat(1_500 - summary_prefix.len())
+    );
+
+    let server = start_mock_server().await;
+    let plan_args = json!({"change_summary": &change_summary}).to_string();
+    let root_prompt_match = root_prompt.clone();
+    mount_sse_once_match(
+        &server,
+        move |request: &wiremock::Request| request_body_contains(request, &root_prompt_match),
+        sse(vec![
+            ev_response_created("resp-plan-max-reviewer"),
+            ev_function_call(PLAN_CALL_ID, "plan_workflow_reviewers", &plan_args),
+            ev_completed("resp-plan-max-reviewer"),
+        ]),
+    )
+    .await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(BodyContains(PLAN_CALL_ID))
+        .respond_with(WorkflowReviewerSpawnResponder {
+            call_id: SPAWN_CALL_ID,
+        })
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    let child_request = mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            request_body_contains(request, "<extended_workflow_result_contract>")
+        },
+        sse(vec![
+            ev_response_created("resp-max-reviewer-child"),
+            ev_assistant_message(
+                "msg-max-reviewer-child",
+                r#"{"subject":"maximum bounded reviewer task","verdict":"pass","summary":"the complete task reached the reviewer","findings":[],"evidence":[{"file":"codex-rs/core/src/extended_workflow.rs","symbol":"spawn_directive_for_task","explanation":"the task includes its bounded result contract"}],"missing_tests":[]}"#,
+            ),
+            ev_completed("resp-max-reviewer-child"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| request_body_contains(request, SPAWN_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-max-reviewer-finished"),
+            ev_assistant_message("msg-max-reviewer-finished", "reviewer started"),
+            ev_completed("resp-max-reviewer-finished"),
+        ]),
+    )
+    .await;
+
+    let mut builder = test_codex().with_config(|config| {
+        config.extended_workflow.enabled = true;
+    });
+    let test = builder.build(&server).await?;
+    test.submit_turn(&root_prompt).await?;
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while child_request.requests().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    let request = child_request.single_request();
+    let child_input = request.message_input_texts("user").join("\n");
+    assert!(child_input.contains(&root_prompt));
+    assert!(child_input.contains(&change_summary));
+    assert!(child_input.contains("<extended_workflow_result_contract>"));
     Ok(())
 }
