@@ -59,6 +59,42 @@ fn concept_with_explicit_implementation_is_a_work_order() {
 }
 
 #[test]
+fn english_and_german_change_imperatives_are_work_orders_without_substring_false_positives() {
+    for input in [
+        "Add a command.",
+        "Create a file.",
+        "Change the parser.",
+        "Remove the flag.",
+        "Delete the cache.",
+        "Fix the resume path.",
+        "Implementiere den Handler.",
+        "Ändere die Konfiguration.",
+        "Lösche den veralteten Befehl.",
+    ] {
+        assert_eq!(
+            classify_request(input).class,
+            RequestClass::WorkOrder,
+            "{input}"
+        );
+    }
+    for input in [
+        "What is an address?",
+        "Explain this fixture.",
+        "What does builder mean?",
+    ] {
+        assert_eq!(
+            classify_request(input).class,
+            RequestClass::SimpleAnswer,
+            "{input}"
+        );
+    }
+    assert_eq!(
+        classify_request("Create a concept.").class,
+        RequestClass::Concept
+    );
+}
+
+#[test]
 fn zero_zero_starts_no_agents() {
     let mut config = ExtendedWorkflowConfig::default();
     config.experts.min = 0;
@@ -90,16 +126,38 @@ fn workflow_budget_is_split_across_enabled_subagent_rounds() {
 }
 
 #[test]
+fn concept_round_does_not_reserve_budget_for_an_inapplicable_reviewer_round() {
+    let mut config = ExtendedWorkflowConfig {
+        workflow_budget_tokens: Some(4_800),
+        ..Default::default()
+    };
+    config.experts.min = 3;
+    config.experts.max = 3;
+    for profile in &mut config.experts.profiles {
+        profile.token_budget = Some(1_500);
+    }
+
+    let concept = plan_turn("Create a concept for the parser.", TEST_TURN_ID, &config);
+    let work_order = plan_turn("Change the parser.", TEST_TURN_ID, &config);
+
+    assert!(!concept.experts.budget_blocked);
+    assert!(work_order.experts.budget_blocked);
+}
+
+#[test]
 fn concept_contract_accepts_an_explicit_complete_design() {
-    let validation = validate_concept(&WorkflowConcept {
-        title: "Design".to_string(),
-        objective: "Choose an approach".to_string(),
-        context: "Repository context".to_string(),
-        decisions: vec!["Use existing plans".to_string()],
-        alternatives: vec!["No change".to_string()],
-        risks_or_open_questions: vec!["None known".to_string()],
-        tickets: Vec::new(),
-    });
+    let validation = validate_concept(
+        &WorkflowConcept {
+            title: "Design".to_string(),
+            objective: "Choose an approach".to_string(),
+            context: "Repository context".to_string(),
+            decisions: vec!["Use existing plans".to_string()],
+            alternatives: vec!["No change".to_string()],
+            risks_or_open_questions: vec!["None known".to_string()],
+            tickets: Vec::new(),
+        },
+        "design approach",
+    );
     assert!(validation.valid, "{:?}", validation.errors);
 }
 
@@ -304,7 +362,8 @@ fn runtime_ledger_rejects_unselected_duplicate_and_premature_reviewer_spawns() {
         TEST_TURN_ID,
         &config,
     );
-    let runtime = WorkflowTurnRuntimeState::new(&turn_plan);
+    let root_request = "Implementiere CLI, Security und Tests.";
+    let runtime = WorkflowTurnRuntimeState::new(&turn_plan, root_request);
     let selected = turn_plan.experts.selected.first().expect("selected expert");
 
     assert!(runtime.reserve_spawn_for_task(&selected.task_name).is_ok());
@@ -329,7 +388,7 @@ fn runtime_ledger_rejects_unselected_duplicate_and_premature_reviewer_spawns() {
             .contains("no selected workflow profile")
     );
     runtime
-        .install_reviewers(&reviewer_plan)
+        .install_reviewers(&reviewer_plan, "security and CLI changes")
         .expect("install reviewers");
     let remaining_expert = turn_plan
         .experts
@@ -346,10 +405,44 @@ fn runtime_ledger_rejects_unselected_duplicate_and_premature_reviewer_spawns() {
 }
 
 #[test]
+fn workflow_spawn_task_is_root_bound_and_context_budgeted() {
+    let root_request = "Change the CLI parser and validate resume behavior.";
+    let mut config = ExtendedWorkflowConfig::default();
+    let plan = plan_turn(root_request, TEST_TURN_ID, &config);
+    let selected = plan.experts.selected.first().expect("selected expert");
+    let runtime = WorkflowTurnRuntimeState::new(&plan, root_request);
+    let directive = runtime
+        .spawn_directive_for_task(&selected.task_name)
+        .expect("server-bound task");
+    assert!(directive.canonical_task.contains(root_request));
+    assert!(directive.canonical_task.contains(&format!(
+        "Root request SHA-256: {}",
+        plan.root_request_sha256
+    )));
+
+    for profile in &mut config.experts.profiles {
+        profile.context_budget = Some(1);
+    }
+    let constrained_plan = plan_turn(root_request, TEST_TURN_ID, &config);
+    let constrained_runtime = WorkflowTurnRuntimeState::new(&constrained_plan, root_request);
+    let constrained = constrained_plan
+        .experts
+        .selected
+        .first()
+        .expect("selected constrained expert");
+    assert!(
+        constrained_runtime
+            .spawn_directive_for_task(&constrained.task_name)
+            .expect_err("task must exceed one token")
+            .contains("no agent was started")
+    );
+}
+
+#[test]
 fn simple_answer_runtime_ledger_rejects_expert_spawn() {
     let config = ExtendedWorkflowConfig::default();
     let turn_plan = plan_turn("Was bedeutet HTTP?", TEST_TURN_ID, &config);
-    let runtime = WorkflowTurnRuntimeState::new(&turn_plan);
+    let runtime = WorkflowTurnRuntimeState::new(&turn_plan, "Was bedeutet HTTP?");
     assert!(turn_plan.experts.selected.is_empty());
     assert!(
         runtime
@@ -378,24 +471,27 @@ fn work_order_reviewer_gate_requires_distinct_passing_agents_and_roles() {
         TEST_TURN_ID,
         &config,
     );
-    let runtime = WorkflowTurnRuntimeState::new(&turn_plan);
+    let root_request = "Implementiere CLI, Security und Tests.";
+    let runtime = WorkflowTurnRuntimeState::new(&turn_plan, root_request);
     assert!(runtime.requires_reviewer_completion());
     let reviewer_plan = plan_reviewers("security and CLI changes", TEST_TURN_ID, &config);
     runtime
-        .install_reviewers(&reviewer_plan)
+        .install_reviewers(&reviewer_plan, "security and CLI changes")
         .expect("reviewer plan should install");
     let required = reviewer_plan.selected.len();
     let unselected = (0..required)
-        .map(
-            |index| codex_agent_graph_store::WorkflowReviewerValidation {
-                agent_thread_id: codex_protocol::ThreadId::new(),
-                role: format!("Unselected role {index}"),
-                output_revision: 1,
-                output_sha256: format!("unselected-{index}"),
-                reviewer_pass: true,
-                has_high_or_critical: false,
-            },
-        )
+        .map(|index| codex_agent_graph_store::WorkflowValidationRecord {
+            validation_key: format!("reviewer:unselected-{index}"),
+            result_kind: "reviewer".to_string(),
+            agent_thread_id: Some(codex_protocol::ThreadId::new()),
+            agent_role: Some(format!("Unselected role {index}")),
+            submissions: 1,
+            accepted: true,
+            output_revision: 1,
+            output_sha256: format!("unselected-{index}"),
+            reviewer_pass: true,
+            has_high_or_critical: false,
+        })
         .collect::<Vec<_>>();
     assert!(matches!(
         runtime.reviewer_completion_gate(&unselected),
@@ -406,9 +502,13 @@ fn work_order_reviewer_gate_requires_distinct_passing_agents_and_roles() {
         .iter()
         .enumerate()
         .map(
-            |(index, reviewer)| codex_agent_graph_store::WorkflowReviewerValidation {
-                agent_thread_id: codex_protocol::ThreadId::new(),
-                role: reviewer.role.clone(),
+            |(index, reviewer)| codex_agent_graph_store::WorkflowValidationRecord {
+                validation_key: format!("reviewer:{index}"),
+                result_kind: "reviewer".to_string(),
+                agent_thread_id: Some(codex_protocol::ThreadId::new()),
+                agent_role: Some(reviewer.role.clone()),
+                submissions: 1,
+                accepted: true,
                 output_revision: 1,
                 output_sha256: format!("reviewer-{index}"),
                 reviewer_pass: index + 1 < required,
@@ -424,7 +524,7 @@ fn work_order_reviewer_gate_requires_distinct_passing_agents_and_roles() {
     let passing = validations
         .into_iter()
         .map(
-            |validation| codex_agent_graph_store::WorkflowReviewerValidation {
+            |validation| codex_agent_graph_store::WorkflowValidationRecord {
                 reviewer_pass: true,
                 has_high_or_critical: false,
                 ..validation
@@ -440,8 +540,10 @@ fn work_order_reviewer_gate_requires_distinct_passing_agents_and_roles() {
 #[test]
 fn simple_answer_does_not_require_reviewer_completion() {
     let config = ExtendedWorkflowConfig::default();
-    let runtime =
-        WorkflowTurnRuntimeState::new(&plan_turn("Was bedeutet HTTP?", TEST_TURN_ID, &config));
+    let runtime = WorkflowTurnRuntimeState::new(
+        &plan_turn("Was bedeutet HTTP?", TEST_TURN_ID, &config),
+        "Was bedeutet HTTP?",
+    );
     assert!(!runtime.requires_reviewer_completion());
     assert_eq!(
         runtime.reviewer_completion_gate(&[]),

@@ -13,39 +13,42 @@ pub(super) async fn completion_gate(
     else {
         return WorkflowCompletionGate::Satisfied;
     };
-    if !runtime.requires_reviewer_completion() {
-        return WorkflowCompletionGate::Satisfied;
-    }
     let mut validations = match sess
         .services
         .agent_control
-        .list_workflow_reviewer_validations(sess.thread_id, &turn_context.sub_id)
+        .list_workflow_validations(sess.thread_id, &turn_context.sub_id)
         .await
     {
         Ok(validations) => validations,
         Err(error) => {
             return WorkflowCompletionGate::Blocked(format!(
-                "Extended workflow reviewer state could not be verified: {error}. The ticket is not validated."
+                "Extended workflow state could not be verified: {error}. The request is not validated."
             ));
         }
     };
     for validation in &mut validations {
+        let Some(agent_thread_id) = validation.agent_thread_id else {
+            continue;
+        };
+        if !validation.accepted {
+            continue;
+        }
         let completed = match sess
             .services
             .agent_control
-            .completed_workflow_agent(validation.agent_thread_id)
+            .completed_workflow_agent(agent_thread_id)
             .await
         {
             Ok(completed) => completed,
             Err(error) => {
                 return WorkflowCompletionGate::Blocked(format!(
-                    "Extended workflow reviewer output for `{}` could not be verified: {error}. The ticket is not validated.",
-                    validation.agent_thread_id
+                    "Extended workflow agent output for `{agent_thread_id}` could not be verified: {error}. The request is not validated."
                 ));
             }
         };
-        validation.reviewer_pass &= completed.output_revision == validation.output_revision
+        validation.accepted &= completed.output_revision == validation.output_revision
             && completed.output_sha256 == validation.output_sha256;
+        validation.reviewer_pass &= validation.accepted;
     }
-    runtime.reviewer_completion_gate(&validations)
+    runtime.completion_gate(&validations)
 }

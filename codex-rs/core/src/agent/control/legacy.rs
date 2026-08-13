@@ -55,9 +55,9 @@ impl AgentControl {
             self.state.release_spawned_thread(agent_id);
             return Ok(());
         };
-        thread.session.ensure_rollout_materialized().await;
-        thread.session.flush_rollout().await?;
-        let shutdown = async {
+        let close = async {
+            thread.session.ensure_rollout_materialized().await;
+            thread.session.flush_rollout().await?;
             let result = if matches!(thread.agent_status().await, AgentStatus::Shutdown) {
                 Ok(String::new())
             } else {
@@ -66,19 +66,19 @@ impl AgentControl {
                     .await
             };
             thread.wait_until_terminated().await;
-            result
+            result?;
+            let _ = state.remove_thread(&agent_id).await;
+            self.forget_v2_residency(agent_id);
+            self.state.release_spawned_thread(agent_id);
+            CodexResult::Ok(())
         };
-        tokio::time::timeout(AGENT_CLOSE_TIMEOUT, shutdown)
+        tokio::time::timeout(AGENT_CLOSE_TIMEOUT, close)
             .await
             .map_err(|_| {
                 CodexErr::Fatal(format!(
                     "timed out while closing agent `{agent_id}` after {} seconds",
                     AGENT_CLOSE_TIMEOUT.as_secs()
                 ))
-            })??;
-        let _ = state.remove_thread(&agent_id).await;
-        self.forget_v2_residency(agent_id);
-        self.state.release_spawned_thread(agent_id);
-        Ok(())
+            })?
     }
 }

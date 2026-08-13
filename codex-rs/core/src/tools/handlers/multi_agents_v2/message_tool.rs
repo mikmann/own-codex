@@ -85,7 +85,7 @@ pub(crate) async fn handle_message_string_tool(
     })?;
     let resume_config =
         build_agent_resume_config(turn.as_ref(), step_context.environments.primary())?;
-    session
+    let _residency_pin = session
         .services
         .agent_control
         .ensure_v2_agent_loaded(resume_config, receiver_thread_id)

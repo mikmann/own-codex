@@ -15,16 +15,15 @@ use codex_protocol::AgentPath;
 use codex_protocol::ResponseItemId;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::MCP_APP_UI_EXTENSION_ID;
 use codex_protocol::mcp::OPENAI_FORM_EXTENSION_ID;
 use codex_protocol::models::ContentItem;
-use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::AgentMessageEvent;
-use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::ResumedHistory;
@@ -49,10 +48,10 @@ use wiremock::MockServer;
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
 
 #[test]
-fn rollout_resume_reapplies_persisted_read_only_workflow_ceiling() {
+fn direct_rollout_resume_rejects_spawned_workflow_child() {
     const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
     let handle = std::thread::Builder::new()
-        .name("rollout_resume_reapplies_persisted_read_only_workflow_ceiling".to_string())
+        .name("direct_rollout_resume_rejects_spawned_workflow_child".to_string())
         .stack_size(TEST_STACK_SIZE_BYTES)
         .spawn(|| {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -120,22 +119,15 @@ fn rollout_resume_reapplies_persisted_read_only_workflow_ceiling() {
                         /*parent_trace*/ None,
                         ClientMcpExtensions::default(),
                     )
-                    .await
-                    .expect("rollout resume should succeed");
-
-                let snapshot = resumed.thread.config_snapshot().await;
-                assert_eq!(snapshot.approval_policy, AskForApproval::Never);
-                assert_eq!(snapshot.permission_profile, PermissionProfile::read_only());
-                assert!(snapshot.session_source.is_read_only_subagent());
-                let effective = resumed.thread.config().await;
-                assert!(!effective.agents_enabled);
-                assert!(!effective.extended_workflow.enabled);
-
-                resumed
-                    .thread
-                    .shutdown_and_wait()
-                    .await
-                    .expect("resumed child should shut down");
+                    .await;
+                let Err(error) = resumed else {
+                    panic!("direct resume must fail before creating an isolated subagent control");
+                };
+                assert!(matches!(
+                    error.details(),
+                    CodexErrorDetails::UnsupportedOperation(message)
+                        if message.contains("owning agent session")
+                ));
             });
         })
         .expect("spawn resume regression test thread");
@@ -319,6 +311,17 @@ impl codex_agent_graph_store::AgentGraphStore for FakeAgentGraphStore {
         Vec<codex_agent_graph_store::WorkflowReviewerValidation>,
     > {
         Box::pin(async { panic!("unexpected workflow reviewer validation listing") })
+    }
+
+    fn list_workflow_validations(
+        &self,
+        _root_thread_id: ThreadId,
+        _turn_id: &str,
+    ) -> codex_agent_graph_store::AgentGraphStoreFuture<
+        '_,
+        Vec<codex_agent_graph_store::WorkflowValidationRecord>,
+    > {
+        Box::pin(async { panic!("unexpected workflow validation listing") })
     }
 }
 

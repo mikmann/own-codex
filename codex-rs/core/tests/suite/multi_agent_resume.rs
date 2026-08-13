@@ -11,6 +11,7 @@ use codex_protocol::user_input::UserInput;
 use core_test_support::responses::assert_parent_turn;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once_match;
@@ -636,12 +637,28 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     let close_args = serde_json::to_string(&json!({
         "target": SIBLING_NAME,
     }))?;
-    mount_root_collaboration_call(
+    mount_sse_once_match(
         &server,
-        CLOSE_PROMPT,
-        CLOSE_CALL_ID,
-        "close_agent",
-        &close_args,
+        |request: &wiremock::Request| {
+            body_contains(request, CLOSE_PROMPT) && !request_has_model(request, ROLE_MODEL)
+        },
+        sse(vec![
+            ev_response_created("resp-close-survivor-1"),
+            ev_function_call(CLOSE_CALL_ID, "close_agent", &close_args),
+            ev_completed("resp-close-survivor-1"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, CLOSE_CALL_ID) && !request_has_model(request, ROLE_MODEL)
+        },
+        sse(vec![
+            ev_response_created("resp-close-survivor-2"),
+            ev_assistant_message("msg-close-survivor-2", "agent closed"),
+            ev_completed("resp-close-survivor-2"),
+        ]),
     )
     .await;
     resumed.submit_turn(CLOSE_PROMPT).await?;

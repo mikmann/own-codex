@@ -19,6 +19,27 @@ use codex_protocol::protocol::TurnCompleteEvent;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
 
+#[test]
+fn residency_pins_and_eviction_cancellation_preserve_close_state() {
+    let residency = Arc::new(super::V2Residency::default());
+    let thread_id = ThreadId::new();
+    residency.touch(thread_id);
+    let pin = residency
+        .pin_required(thread_id)
+        .expect("resident should be pinnable");
+    assert_eq!(residency.begin_eviction(/*protected_thread_id*/ None), None);
+    drop(pin);
+
+    assert_eq!(
+        residency.begin_eviction(/*protected_thread_id*/ None),
+        Some(thread_id)
+    );
+    assert_eq!(residency.resident_count(), 1);
+    residency.remove(thread_id);
+    residency.cancel_eviction(thread_id);
+    assert_eq!(residency.resident_count(), 0);
+}
+
 #[tokio::test]
 async fn residency_slot_reservation_unloads_oldest_idle_v2_agent() {
     let mut config = test_config().await;

@@ -900,7 +900,7 @@ async fn build_skills_and_plugins(
             &turn_context.config.extended_workflow,
         );
         turn_context.extension_data.insert(
-            crate::extended_workflow::WorkflowTurnRuntimeState::new(&plan),
+            crate::extended_workflow::WorkflowTurnRuntimeState::new(&plan, &request_text),
         );
         let turn_context_fragment =
             match crate::context::ExtendedWorkflowTurnContext::try_new(&plan) {

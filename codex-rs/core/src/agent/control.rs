@@ -383,19 +383,19 @@ impl AgentControl {
         Ok(())
     }
 
-    pub(crate) async fn list_workflow_reviewer_validations(
+    pub(crate) async fn list_workflow_validations(
         &self,
         root_thread_id: ThreadId,
         turn_id: &str,
-    ) -> CodexResult<Vec<codex_agent_graph_store::WorkflowReviewerValidation>> {
+    ) -> CodexResult<Vec<codex_agent_graph_store::WorkflowValidationRecord>> {
         let state = self.upgrade()?;
         if let Some(store) = state.agent_graph_store() {
             return store
-                .list_workflow_reviewer_validations(root_thread_id, turn_id)
+                .list_workflow_validations(root_thread_id, turn_id)
                 .await
                 .map_err(|error| {
                     CodexErr::Fatal(format!(
-                        "failed to read persisted workflow reviewer validations: {error}"
+                        "failed to read persisted workflow validations: {error}"
                     ))
                 });
         }
@@ -405,31 +405,29 @@ impl AgentControl {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut records = ledger
             .iter()
-            .filter_map(|((record_root, record_turn, _), validation)| {
-                if *record_root != root_thread_id
-                    || record_turn != turn_id
-                    || validation.result_kind != "reviewer"
-                    || !validation.accepted
-                {
-                    return None;
-                }
-                Some(codex_agent_graph_store::WorkflowReviewerValidation {
-                    agent_thread_id: validation.agent_thread_id?,
-                    role: validation.reviewer_role.clone()?,
-                    output_revision: validation.output_revision,
-                    output_sha256: validation.output_sha256.clone(),
-                    reviewer_pass: validation.reviewer_pass,
-                    has_high_or_critical: validation.has_high_or_critical,
-                })
-            })
+            .filter(
+                |&((record_root, record_turn, _validation_key), _validation)| {
+                    *record_root == root_thread_id && record_turn == turn_id
+                },
+            )
+            .map(
+                |((_record_root, _record_turn, validation_key), validation)| {
+                    codex_agent_graph_store::WorkflowValidationRecord {
+                        validation_key: validation_key.clone(),
+                        result_kind: validation.result_kind.clone(),
+                        agent_thread_id: validation.agent_thread_id,
+                        agent_role: validation.reviewer_role.clone(),
+                        submissions: validation.submissions,
+                        accepted: validation.accepted,
+                        output_revision: validation.output_revision,
+                        output_sha256: validation.output_sha256.clone(),
+                        reviewer_pass: validation.reviewer_pass,
+                        has_high_or_critical: validation.has_high_or_critical,
+                    }
+                },
+            )
             .collect::<Vec<_>>();
-        records.sort_by(|left, right| {
-            left.role.cmp(&right.role).then_with(|| {
-                left.agent_thread_id
-                    .to_string()
-                    .cmp(&right.agent_thread_id.to_string())
-            })
-        });
+        records.sort_by(|left, right| left.validation_key.cmp(&right.validation_key));
         Ok(records)
     }
 

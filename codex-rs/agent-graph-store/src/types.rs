@@ -57,6 +57,21 @@ pub struct WorkflowReviewerValidation {
     pub has_high_or_critical: bool,
 }
 
+/// Persisted validation state for any structured workflow result in one root turn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowValidationRecord {
+    pub validation_key: String,
+    pub result_kind: String,
+    pub agent_thread_id: Option<ThreadId>,
+    pub agent_role: Option<String>,
+    pub submissions: u8,
+    pub accepted: bool,
+    pub output_revision: u32,
+    pub output_sha256: String,
+    pub reviewer_pass: bool,
+    pub has_high_or_critical: bool,
+}
+
 /// Lifecycle status attached to a directional thread-spawn edge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

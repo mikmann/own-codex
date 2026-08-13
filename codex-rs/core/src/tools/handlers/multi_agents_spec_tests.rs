@@ -55,6 +55,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         expose_agent_type: true,
         hide_agent_type_model_reasoning: false,
         expose_spawn_agent_model_overrides: true,
+        reserved_collaboration_schema: true,
         multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
     });
@@ -143,6 +144,7 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
         expose_agent_type: true,
         hide_agent_type_model_reasoning: false,
         expose_spawn_agent_model_overrides: true,
+        reserved_collaboration_schema: false,
         multi_agent_version: MultiAgentVersion::V1,
         usage_hint_text: None,
     });
@@ -208,6 +210,7 @@ fn spawn_agent_tool_caps_visible_model_summaries() {
         expose_agent_type: true,
         hide_agent_type_model_reasoning: false,
         expose_spawn_agent_model_overrides: true,
+        reserved_collaboration_schema: true,
         multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
     });
@@ -254,6 +257,7 @@ fn spawn_agent_tool_keeps_reserved_schema_when_spawn_metadata_is_hidden() {
         expose_agent_type: false,
         hide_agent_type_model_reasoning: true,
         expose_spawn_agent_model_overrides: true,
+        reserved_collaboration_schema: true,
         multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
     });
@@ -293,6 +297,7 @@ fn spawn_agent_tool_keeps_reserved_schema_without_override_exposure() {
         expose_agent_type: false,
         hide_agent_type_model_reasoning: true,
         expose_spawn_agent_model_overrides: false,
+        reserved_collaboration_schema: true,
         multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
     });

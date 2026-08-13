@@ -78,6 +78,13 @@ pub(crate) fn create_validate_workflow_result_tool() -> ToolSpec {
             .with_max_length(crate::extended_workflow::MAX_WORKFLOW_EXPECTED_SUBJECT_BYTES),
         ),
         (
+            "selected".to_string(),
+            JsonSchema::boolean(Some(
+                "For ticket results only: select this accepted ticket as the one the main agent will implement. Omit or use false for other results. A completed selection is immutable for the turn."
+                    .to_string(),
+            )),
+        ),
+        (
             "result".to_string(),
             result_schema,
         ),
@@ -102,13 +109,15 @@ pub(crate) fn create_validate_workflow_result_tool() -> ToolSpec {
             "type": "object",
             "properties": {
                 "accepted": { "type": "boolean" },
+                "already_accepted": { "type": "boolean" },
                 "retry_allowed": { "type": "boolean" },
                 "attempts": { "type": "integer" },
                 "errors": { "type": "array", "items": { "type": "string" } },
                 "has_high_or_critical": { "type": "boolean" },
                 "result_bytes": { "type": "integer" },
                 "max_result_bytes": { "type": "integer" },
-                "validation_key": { "type": "string" }
+                "validation_key": { "type": "string" },
+                "selected": { "type": "boolean" }
             },
             "required": [
                 "accepted",
@@ -118,7 +127,8 @@ pub(crate) fn create_validate_workflow_result_tool() -> ToolSpec {
                 "has_high_or_critical",
                 "result_bytes",
                 "max_result_bytes",
-                "validation_key"
+                "validation_key",
+                "selected"
             ],
             "additionalProperties": false
         })),

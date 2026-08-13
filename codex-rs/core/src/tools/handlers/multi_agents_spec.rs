@@ -29,6 +29,7 @@ pub struct SpawnAgentToolOptions {
     pub expose_agent_type: bool,
     pub hide_agent_type_model_reasoning: bool,
     pub expose_spawn_agent_model_overrides: bool,
+    pub reserved_collaboration_schema: bool,
     pub multi_agent_version: MultiAgentVersion,
     pub usage_hint_text: Option<String>,
 }
@@ -41,6 +42,7 @@ impl Default for SpawnAgentToolOptions {
             expose_agent_type: true,
             hide_agent_type_model_reasoning: false,
             expose_spawn_agent_model_overrides: false,
+            reserved_collaboration_schema: false,
             multi_agent_version: MultiAgentVersion::Disabled,
             usage_hint_text: None,
         }
@@ -106,11 +108,28 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
     let inherited_model_guidance = (options.expose_spawn_agent_model_overrides
         && !options.hide_agent_type_model_reasoning)
         .then_some(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE);
-    // `collaboration.spawn_agent` is a Responses API reserved tool. Its input schema must remain
-    // byte-for-byte compatible with the model's fixed contract regardless of local role or UI
-    // metadata configuration. Workflow authorization is therefore derived server-side from the
-    // generated task name instead of adding caller-controlled properties here.
     let mut properties = spawn_agent_common_properties_v2();
+    if !options.reserved_collaboration_schema {
+        properties.insert(
+            "agent_type".to_string(),
+            JsonSchema::string(Some(format!(
+                "Agent type override for the new agent. Omit unless explicitly requested. Set `fork_turns` to `none` or a positive integer when an explicit override is needed.\n{}",
+                options.agent_type_description
+            ))),
+        );
+        properties.insert(
+            "service_tier".to_string(),
+            JsonSchema::string(Some(
+                SPAWN_AGENT_SERVICE_TIER_OVERRIDE_DESCRIPTION.to_string(),
+            )),
+        );
+        if !options.expose_agent_type {
+            properties.remove("agent_type");
+        }
+        if options.hide_agent_type_model_reasoning {
+            properties.remove("service_tier");
+        }
+    }
     properties.insert(
         "task_name".to_string(),
         JsonSchema::string(Some(

@@ -54,3 +54,17 @@ pub struct WorkflowReviewerValidation {
     pub reviewer_pass: bool,
     pub has_high_or_critical: bool,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowValidationRecord {
+    pub validation_key: String,
+    pub result_kind: String,
+    pub agent_thread_id: Option<codex_protocol::ThreadId>,
+    pub agent_role: Option<String>,
+    pub submissions: u8,
+    pub accepted: bool,
+    pub output_revision: u32,
+    pub output_sha256: String,
+    pub reviewer_pass: bool,
+    pub has_high_or_critical: bool,
+}

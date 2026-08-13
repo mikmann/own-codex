@@ -2875,6 +2875,8 @@ struct ExtendedThreadSpawnRole {
     workflow_turn_id: Option<String>,
     #[serde(default)]
     assignment_sha256: Option<String>,
+    #[serde(default)]
+    workflow_root_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2884,6 +2886,7 @@ pub struct ExtendedWorkflowAgentIdentity {
     pub name: Option<String>,
     pub workflow_turn_id: Option<String>,
     pub assignment_sha256: Option<String>,
+    pub workflow_root_sha256: Option<String>,
 }
 
 #[doc(hidden)]
@@ -2895,6 +2898,7 @@ pub struct ExtendedThreadSpawnRoleMetadata<'a> {
     pub workflow_name: Option<&'a str>,
     pub workflow_turn_id: Option<&'a str>,
     pub assignment_sha256: Option<&'a str>,
+    pub workflow_root_sha256: Option<&'a str>,
 }
 
 #[doc(hidden)]
@@ -2912,6 +2916,7 @@ pub fn encode_extended_thread_spawn_role(
         workflow_name: None,
         workflow_turn_id: None,
         assignment_sha256: None,
+        workflow_root_sha256: None,
     })
 }
 
@@ -2925,6 +2930,7 @@ pub fn encode_extended_thread_spawn_role_metadata(
         && metadata.workflow_name.is_none()
         && metadata.workflow_turn_id.is_none()
         && metadata.assignment_sha256.is_none()
+        && metadata.workflow_root_sha256.is_none()
     {
         return metadata.config_role.map(str::to_string);
     }
@@ -2936,6 +2942,7 @@ pub fn encode_extended_thread_spawn_role_metadata(
         workflow_name: metadata.workflow_name.map(str::to_string),
         workflow_turn_id: metadata.workflow_turn_id.map(str::to_string),
         assignment_sha256: metadata.assignment_sha256.map(str::to_string),
+        workflow_root_sha256: metadata.workflow_root_sha256.map(str::to_string),
     };
     serde_json::to_string(&encoded)
         .ok()
@@ -3064,6 +3071,7 @@ impl SessionSource {
             name: metadata.workflow_name,
             workflow_turn_id: metadata.workflow_turn_id,
             assignment_sha256: metadata.assignment_sha256,
+            workflow_root_sha256: metadata.workflow_root_sha256,
         })
     }
 

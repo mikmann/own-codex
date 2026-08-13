@@ -252,7 +252,7 @@ pub fn validate_reviewer_result(
     }
 }
 
-pub fn validate_ticket(ticket: &WorkflowTicket) -> ContractValidation {
+pub fn validate_ticket(ticket: &WorkflowTicket, expected_subject: &str) -> ContractValidation {
     let mut errors = Vec::new();
     require_text(&mut errors, "title", &ticket.title);
     require_text(&mut errors, "goal", &ticket.goal);
@@ -262,6 +262,11 @@ pub fn validate_ticket(ticket: &WorkflowTicket) -> ContractValidation {
         &mut errors,
         "acceptance_criteria",
         &ticket.acceptance_criteria,
+    );
+    validate_subject(
+        &mut errors,
+        &format!("{} {}", ticket.title, ticket.goal),
+        expected_subject,
     );
     require_non_empty(
         &mut errors,
@@ -281,7 +286,7 @@ pub fn validate_ticket(ticket: &WorkflowTicket) -> ContractValidation {
     }
 }
 
-pub fn validate_concept(concept: &WorkflowConcept) -> ContractValidation {
+pub fn validate_concept(concept: &WorkflowConcept, expected_subject: &str) -> ContractValidation {
     let mut errors = Vec::new();
     require_text(&mut errors, "title", &concept.title);
     require_text(&mut errors, "objective", &concept.objective);
@@ -293,8 +298,13 @@ pub fn validate_concept(concept: &WorkflowConcept) -> ContractValidation {
         "risks_or_open_questions",
         &concept.risks_or_open_questions,
     );
+    validate_subject(
+        &mut errors,
+        &format!("{} {}", concept.title, concept.objective),
+        expected_subject,
+    );
     for (index, ticket) in concept.tickets.iter().enumerate() {
-        let validation = validate_ticket(ticket);
+        let validation = validate_ticket(ticket, expected_subject);
         errors.extend(
             validation
                 .errors

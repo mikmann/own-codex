@@ -22,6 +22,8 @@ use std::sync::PoisonError;
 const DEFAULT_ESTIMATED_AGENT_TOKENS: u64 = 1_200;
 const MAX_CLASSIFIER_INPUT_CHARS: usize = 32_000;
 pub(crate) const MAX_WORKFLOW_TASK_BYTES: usize = 6_000;
+const MAX_WORKFLOW_ROOT_REQUEST_BYTES: usize = 3_000;
+const MAX_CANONICAL_WORKFLOW_TASK_BYTES: usize = 4_200;
 pub(crate) const MAX_WORKFLOW_CHANGE_SUMMARY_BYTES: usize = 6_000;
 pub(crate) const MAX_WORKFLOW_EXPECTED_SUBJECT_BYTES: usize = 4_096;
 pub(crate) const MAX_WORKFLOW_RESULT_ID_BYTES: usize = 256;
@@ -105,6 +107,11 @@ pub struct WorkflowProcessPlan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowTurnPlan {
     pub classification: RequestClassification,
+    pub root_request_sha256: String,
+    pub task_binding_blocked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_binding_message: Option<String>,
+    pub requires_concept_artifact: bool,
     pub experts: WorkflowProcessPlan,
     pub reviewer_policy_enabled: bool,
     pub reviewer_min: usize,
@@ -138,6 +145,7 @@ pub(crate) fn sha256_bytes(bytes: &[u8]) -> String {
 
 pub(crate) fn workflow_assignment_sha256(
     turn_id: &str,
+    root_request_sha256: &str,
     kind: WorkflowAgentKind,
     name: &str,
     role: &str,
@@ -148,7 +156,7 @@ pub(crate) fn workflow_assignment_sha256(
         WorkflowAgentKind::Expert => 0,
         WorkflowAgentKind::Reviewer => 1,
     }]);
-    for field in [turn_id, name, role, task] {
+    for field in [turn_id, root_request_sha256, name, role, task] {
         hasher.update((field.len() as u64).to_be_bytes());
         hasher.update(field.as_bytes());
     }
@@ -169,6 +177,14 @@ pub struct WorkflowSpawnAssignment {
     pub task: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowSpawnDirective {
+    pub kind: WorkflowAgentKind,
+    pub profile: WorkflowAgentPlan,
+    pub canonical_task: String,
+    pub root_request_sha256: String,
+}
+
 /// Server-side ledger for the concrete workflow selection of one root turn.
 ///
 /// The model-visible plan is guidance; this ledger is the enforcement boundary. A selected
@@ -182,14 +198,28 @@ pub struct WorkflowTurnRuntimeState {
 #[derive(Debug)]
 struct WorkflowTurnRuntimeInner {
     classification: RequestClassification,
+    root_request: String,
+    root_request_sha256: String,
+    task_binding_error: Option<String>,
+    requires_concept_artifact: bool,
     experts: WorkflowProcessPlan,
-    reviewers: Option<WorkflowProcessPlan>,
+    reviewers: Option<WorkflowReviewerRound>,
     reviewer_policy_enabled: bool,
     reviewer_min: usize,
     reviewer_max: usize,
-    completion_gate_prompts: u8,
+    expert_gate_prompts: u8,
+    concept_gate_prompts: u8,
+    ticket_gate_prompts: u8,
+    reviewer_gate_prompts: u8,
     reserved: HashSet<String>,
     assignments: HashMap<ThreadId, WorkflowSpawnAssignment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkflowReviewerRound {
+    plan: WorkflowProcessPlan,
+    change_summary: String,
+    change_summary_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,49 +230,107 @@ pub enum WorkflowCompletionGate {
 }
 
 impl WorkflowTurnRuntimeState {
-    pub fn new(plan: &WorkflowTurnPlan) -> Self {
+    pub fn new(plan: &WorkflowTurnPlan, root_request: &str) -> Self {
+        let root_request = if plan.task_binding_blocked {
+            String::new()
+        } else {
+            root_request.to_string()
+        };
         Self {
             inner: Mutex::new(WorkflowTurnRuntimeInner {
                 classification: plan.classification.clone(),
+                root_request,
+                root_request_sha256: plan.root_request_sha256.clone(),
+                task_binding_error: plan.task_binding_message.clone(),
+                requires_concept_artifact: plan.requires_concept_artifact,
                 experts: plan.experts.clone(),
                 reviewers: None,
                 reviewer_policy_enabled: plan.reviewer_policy_enabled,
                 reviewer_min: plan.reviewer_min,
                 reviewer_max: plan.reviewer_max,
-                completion_gate_prompts: 0,
+                expert_gate_prompts: 0,
+                concept_gate_prompts: 0,
+                ticket_gate_prompts: 0,
+                reviewer_gate_prompts: 0,
                 reserved: HashSet::new(),
                 assignments: HashMap::new(),
             }),
         }
     }
 
-    pub fn install_reviewers(&self, plan: &WorkflowProcessPlan) -> Result<(), String> {
+    pub fn install_reviewers(
+        &self,
+        plan: &WorkflowProcessPlan,
+        change_summary: &str,
+    ) -> Result<(), String> {
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let reviewer_round = WorkflowReviewerRound {
+            plan: plan.clone(),
+            change_summary: change_summary.to_string(),
+            change_summary_sha256: sha256_bytes(change_summary.as_bytes()),
+        };
         match inner.reviewers.as_ref() {
-            Some(existing) if existing == plan => Ok(()),
+            Some(existing) if existing == &reviewer_round => Ok(()),
             Some(_) => Err(
                 "reviewer selection was already fixed for this turn and cannot be replaced"
                     .to_string(),
             ),
             None => {
-                inner.reviewers = Some(plan.clone());
+                inner.reviewers = Some(reviewer_round);
                 Ok(())
             }
         }
     }
 
+    pub fn reviewer_planning_input(&self, change_summary: &str) -> Result<String, String> {
+        let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(error) = inner.task_binding_error.as_ref() {
+            return Err(error.clone());
+        }
+        let input = format!(
+            "Root request:\n{}\n\nImplemented change summary:\n{change_summary}",
+            inner.root_request
+        );
+        require_bounded_workflow_text("reviewer planning input", &input, MAX_WORKFLOW_TASK_BYTES)?;
+        Ok(input)
+    }
+
+    pub fn root_request(&self) -> Result<String, String> {
+        let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(error) = inner.task_binding_error.as_ref() {
+            return Err(error.clone());
+        }
+        Ok(inner.root_request.clone())
+    }
+
+    pub fn root_request_sha256(&self) -> String {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .root_request_sha256
+            .clone()
+    }
+
     pub fn reserve_spawn_for_task(
         &self,
         task_name: &str,
-    ) -> Result<(WorkflowAgentKind, WorkflowAgentPlan), String> {
+    ) -> Result<WorkflowSpawnDirective, String> {
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        let selected = selected_profile_for_task(&inner, task_name)?;
+        let selected = spawn_directive_for_task(&inner, task_name)?;
         if !inner.reserved.insert(task_name.to_string()) {
             return Err(format!(
                 "workflow task `{task_name}` was already consumed for this turn"
             ));
         }
         Ok(selected)
+    }
+
+    pub fn spawn_directive_for_task(
+        &self,
+        task_name: &str,
+    ) -> Result<WorkflowSpawnDirective, String> {
+        let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        spawn_directive_for_task(&inner, task_name)
     }
 
     pub fn selected_profile_for_task(
@@ -293,90 +381,32 @@ impl WorkflowTurnRuntimeState {
             .cloned()
     }
 
-    pub fn reviewer_completion_gate(
+    pub fn pre_reviewer_gate(
         &self,
-        validations: &[codex_agent_graph_store::WorkflowReviewerValidation],
+        validations: &[codex_agent_graph_store::WorkflowValidationRecord],
     ) -> WorkflowCompletionGate {
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        if inner.classification.class != RequestClass::WorkOrder
-            || !inner.reviewer_policy_enabled
-            || inner.reviewer_max == 0
-        {
-            return WorkflowCompletionGate::Satisfied;
-        }
-        let Some(reviewers) = inner.reviewers.as_ref() else {
-            let details = format!(
-                "plan_workflow_reviewers must select the change-relevant reviewer roles within the configured min={} and max={} bounds before this work-order turn can complete",
-                inner.reviewer_min, inner.reviewer_max
-            );
-            if inner.completion_gate_prompts < 2 {
-                inner.completion_gate_prompts += 1;
-                return WorkflowCompletionGate::Continue(format!(
-                    "Extended workflow completion gate: {details}. Do not present the ticket as completed until the gate passes."
-                ));
-            }
-            return WorkflowCompletionGate::Blocked(format!(
-                "Extended workflow blocked after two targeted continuation attempts: {details}. The ticket is not validated."
-            ));
-        };
-        let required = reviewers.selected.len();
-        if required == 0 {
-            return WorkflowCompletionGate::Satisfied;
-        }
-        let required_roles = reviewers
-            .selected
-            .iter()
-            .map(|reviewer| reviewer.role.trim().to_lowercase())
-            .collect::<HashSet<_>>();
-        let passing_agents = validations
-            .iter()
-            .filter(|validation| {
-                validation.reviewer_pass
-                    && !validation.has_high_or_critical
-                    && required_roles.contains(&validation.role.trim().to_lowercase())
-            })
-            .map(|validation| validation.agent_thread_id)
-            .collect::<HashSet<_>>();
-        let passing_roles = validations
-            .iter()
-            .filter(|validation| {
-                validation.reviewer_pass
-                    && !validation.has_high_or_critical
-                    && required_roles.contains(&validation.role.trim().to_lowercase())
-            })
-            .map(|validation| validation.role.trim().to_lowercase())
-            .filter(|role| !role.is_empty())
-            .collect::<HashSet<_>>();
-        if passing_agents.len() >= required && required_roles.is_subset(&passing_roles) {
-            return WorkflowCompletionGate::Satisfied;
-        }
+        prerequisite_completion_gate(&mut inner, validations)
+    }
 
-        let details = if validations
-            .iter()
-            .any(|validation| !validation.reviewer_pass || validation.has_high_or_critical)
-        {
-            format!(
-                "reviewer validation has not passed: {}/{required} distinct passing agents and {}/{required} distinct passing roles; address the findings, request a new output revision, and validate it",
-                passing_agents.len(),
-                passing_roles.len()
-            )
-        } else {
-            format!(
-                "reviewer validation is incomplete: {}/{required} distinct passing agents and {}/{required} distinct passing roles",
-                passing_agents.len(),
-                passing_roles.len()
-            )
-        };
-        if inner.completion_gate_prompts < 2 {
-            inner.completion_gate_prompts += 1;
-            WorkflowCompletionGate::Continue(format!(
-                "Extended workflow completion gate: {details}. Do not present the ticket as completed until the gate passes."
-            ))
-        } else {
-            WorkflowCompletionGate::Blocked(format!(
-                "Extended workflow blocked after two targeted continuation attempts: {details}. The ticket is not validated."
-            ))
+    pub fn completion_gate(
+        &self,
+        validations: &[codex_agent_graph_store::WorkflowValidationRecord],
+    ) -> WorkflowCompletionGate {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let prerequisite = prerequisite_completion_gate(&mut inner, validations);
+        if prerequisite != WorkflowCompletionGate::Satisfied {
+            return prerequisite;
         }
+        reviewer_completion_gate(&mut inner, validations)
+    }
+
+    pub fn reviewer_completion_gate(
+        &self,
+        validations: &[codex_agent_graph_store::WorkflowValidationRecord],
+    ) -> WorkflowCompletionGate {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        reviewer_completion_gate(&mut inner, validations)
     }
 
     pub fn requires_reviewer_completion(&self) -> bool {
@@ -384,6 +414,283 @@ impl WorkflowTurnRuntimeState {
         inner.classification.class == RequestClass::WorkOrder
             && inner.reviewer_policy_enabled
             && inner.reviewer_max > 0
+    }
+}
+
+fn prerequisite_completion_gate(
+    inner: &mut WorkflowTurnRuntimeInner,
+    validations: &[codex_agent_graph_store::WorkflowValidationRecord],
+) -> WorkflowCompletionGate {
+    if let Some(error) = inner.task_binding_error.as_ref() {
+        return WorkflowCompletionGate::Blocked(format!(
+            "Extended workflow task binding failed: {error}. No subagent result can be accepted for this request."
+        ));
+    }
+    if inner.experts.budget_blocked {
+        return WorkflowCompletionGate::Blocked(
+            inner.experts.budget_message.clone().unwrap_or_else(|| {
+                "the required expert round exceeds its advisory budget".to_string()
+            }),
+        );
+    }
+    let required_experts = inner.experts.selected.len();
+    if required_experts > 0 {
+        let required_roles = inner
+            .experts
+            .selected
+            .iter()
+            .map(|expert| expert.role.trim().to_lowercase())
+            .collect::<HashSet<_>>();
+        let accepted = validations
+            .iter()
+            .filter(|validation| validation.result_kind == "expert" && validation.accepted)
+            .collect::<Vec<_>>();
+        let accepted_agents = accepted
+            .iter()
+            .filter_map(|validation| validation.agent_thread_id)
+            .collect::<HashSet<_>>();
+        let accepted_roles = accepted
+            .iter()
+            .filter_map(|validation| validation.agent_role.as_deref())
+            .map(|role| role.trim().to_lowercase())
+            .filter(|role| required_roles.contains(role))
+            .collect::<HashSet<_>>();
+        if accepted_agents.len() < required_experts || !required_roles.is_subset(&accepted_roles) {
+            let exhausted = validations.iter().any(|validation| {
+                validation.result_kind == "expert"
+                    && !validation.accepted
+                    && validation.submissions >= 2
+            });
+            let details = format!(
+                "expert validation is incomplete: {}/{} distinct accepted agents and {}/{} selected roles",
+                accepted_agents.len(),
+                required_experts,
+                accepted_roles.len(),
+                required_roles.len()
+            );
+            return phase_gate(
+                &mut inner.expert_gate_prompts,
+                &details,
+                exhausted,
+                "expert",
+            );
+        }
+    }
+
+    match inner.classification.class {
+        RequestClass::SimpleAnswer => WorkflowCompletionGate::Satisfied,
+        RequestClass::Concept => artifact_kind_gate(
+            validations,
+            "concept",
+            &mut inner.concept_gate_prompts,
+            "an accepted concept",
+        ),
+        RequestClass::WorkOrder => {
+            if inner.requires_concept_artifact {
+                let concept = artifact_kind_gate(
+                    validations,
+                    "concept",
+                    &mut inner.concept_gate_prompts,
+                    "the requested accepted concept",
+                );
+                if concept != WorkflowCompletionGate::Satisfied {
+                    return concept;
+                }
+            }
+            let accepted_tickets = validations
+                .iter()
+                .filter(|validation| validation.result_kind == "ticket" && validation.accepted)
+                .collect::<Vec<_>>();
+            if accepted_tickets.is_empty() {
+                let exhausted = validations.iter().any(|validation| {
+                    validation.result_kind == "ticket"
+                        && !validation.accepted
+                        && validation.submissions >= 2
+                });
+                return phase_gate(
+                    &mut inner.ticket_gate_prompts,
+                    "no accepted ticket exists for the work order",
+                    exhausted,
+                    "ticket",
+                );
+            }
+            if accepted_tickets.len() == 1 {
+                return WorkflowCompletionGate::Satisfied;
+            }
+            let selected_ticket = validations.iter().find(|validation| {
+                validation.result_kind == "selected_ticket" && validation.accepted
+            });
+            let Some(selected_ticket) = selected_ticket else {
+                return phase_gate(
+                    &mut inner.ticket_gate_prompts,
+                    "multiple accepted tickets exist, but exactly one current ticket must be selected by validating it with selected=true",
+                    false,
+                    "ticket selection",
+                );
+            };
+            let Some(result_id) = selected_ticket.agent_role.as_deref() else {
+                return WorkflowCompletionGate::Blocked(
+                    "the persisted selected-ticket marker is missing its result id".to_string(),
+                );
+            };
+            if accepted_tickets
+                .iter()
+                .any(|ticket| ticket.validation_key == format!("ticket:{result_id}"))
+            {
+                WorkflowCompletionGate::Satisfied
+            } else {
+                WorkflowCompletionGate::Blocked(format!(
+                    "the selected-ticket marker references `{result_id}`, which is not an accepted ticket"
+                ))
+            }
+        }
+    }
+}
+
+fn artifact_kind_gate(
+    validations: &[codex_agent_graph_store::WorkflowValidationRecord],
+    result_kind: &str,
+    prompt_counter: &mut u8,
+    requirement: &str,
+) -> WorkflowCompletionGate {
+    if validations
+        .iter()
+        .any(|validation| validation.result_kind == result_kind && validation.accepted)
+    {
+        return WorkflowCompletionGate::Satisfied;
+    }
+    let exhausted = validations.iter().any(|validation| {
+        validation.result_kind == result_kind && !validation.accepted && validation.submissions >= 2
+    });
+    phase_gate(
+        prompt_counter,
+        &format!("{requirement} is missing"),
+        exhausted,
+        result_kind,
+    )
+}
+
+fn reviewer_completion_gate(
+    inner: &mut WorkflowTurnRuntimeInner,
+    validations: &[codex_agent_graph_store::WorkflowValidationRecord],
+) -> WorkflowCompletionGate {
+    if inner.classification.class != RequestClass::WorkOrder
+        || !inner.reviewer_policy_enabled
+        || inner.reviewer_max == 0
+    {
+        return WorkflowCompletionGate::Satisfied;
+    }
+    let Some(reviewers) = inner.reviewers.as_ref() else {
+        let details = format!(
+            "plan_workflow_reviewers must select the change-relevant reviewer roles within the configured min={} and max={} bounds before this work-order turn can complete",
+            inner.reviewer_min, inner.reviewer_max
+        );
+        return phase_gate(
+            &mut inner.reviewer_gate_prompts,
+            &details,
+            false,
+            "reviewer planning",
+        );
+    };
+    if reviewers.plan.budget_blocked {
+        return WorkflowCompletionGate::Blocked(
+            reviewers.plan.budget_message.clone().unwrap_or_else(|| {
+                "the required reviewer round exceeds its advisory budget".to_string()
+            }),
+        );
+    }
+    let required = reviewers.plan.selected.len();
+    if required == 0 {
+        return WorkflowCompletionGate::Satisfied;
+    }
+    let required_roles = reviewers
+        .plan
+        .selected
+        .iter()
+        .map(|reviewer| reviewer.role.trim().to_lowercase())
+        .collect::<HashSet<_>>();
+    let passing_agents = validations
+        .iter()
+        .filter(|validation| {
+            validation.result_kind == "reviewer"
+                && validation.accepted
+                && validation.reviewer_pass
+                && !validation.has_high_or_critical
+                && validation
+                    .agent_role
+                    .as_deref()
+                    .is_some_and(|role| required_roles.contains(&role.trim().to_lowercase()))
+        })
+        .filter_map(|validation| validation.agent_thread_id)
+        .collect::<HashSet<_>>();
+    let passing_roles = validations
+        .iter()
+        .filter(|validation| {
+            validation.result_kind == "reviewer"
+                && validation.accepted
+                && validation.reviewer_pass
+                && !validation.has_high_or_critical
+                && validation
+                    .agent_role
+                    .as_deref()
+                    .is_some_and(|role| required_roles.contains(&role.trim().to_lowercase()))
+        })
+        .filter_map(|validation| validation.agent_role.as_deref())
+        .map(|role| role.trim().to_lowercase())
+        .filter(|role| !role.is_empty())
+        .collect::<HashSet<_>>();
+    if passing_agents.len() >= required && required_roles.is_subset(&passing_roles) {
+        return WorkflowCompletionGate::Satisfied;
+    }
+
+    let details = if validations.iter().any(|validation| {
+        validation.result_kind == "reviewer"
+            && validation.accepted
+            && (!validation.reviewer_pass || validation.has_high_or_critical)
+    }) {
+        format!(
+            "reviewer validation has not passed: {}/{required} distinct passing agents and {}/{required} distinct passing roles; address the findings, request a new output revision, and validate it",
+            passing_agents.len(),
+            passing_roles.len()
+        )
+    } else {
+        format!(
+            "reviewer validation is incomplete: {}/{required} distinct passing agents and {}/{required} distinct passing roles",
+            passing_agents.len(),
+            passing_roles.len()
+        )
+    };
+    let exhausted = validations.iter().any(|validation| {
+        validation.result_kind == "reviewer" && !validation.accepted && validation.submissions >= 2
+    });
+    phase_gate(
+        &mut inner.reviewer_gate_prompts,
+        &details,
+        exhausted,
+        "reviewer",
+    )
+}
+
+fn phase_gate(
+    prompt_counter: &mut u8,
+    details: &str,
+    terminal_failure: bool,
+    phase: &str,
+) -> WorkflowCompletionGate {
+    if terminal_failure {
+        return WorkflowCompletionGate::Blocked(format!(
+            "Extended workflow {phase} gate failed permanently after the single correction attempt: {details}."
+        ));
+    }
+    if *prompt_counter < 2 {
+        *prompt_counter += 1;
+        WorkflowCompletionGate::Continue(format!(
+            "Extended workflow {phase} gate: {details}. Do not present the request as completed until the gate passes."
+        ))
+    } else {
+        WorkflowCompletionGate::Blocked(format!(
+            "Extended workflow blocked after two targeted {phase} continuation attempts: {details}."
+        ))
     }
 }
 
@@ -398,6 +705,7 @@ fn selected_profile_for_task(
         .find(|profile| profile.task_name == task_name);
     let reviewer = inner.reviewers.as_ref().and_then(|reviewers| {
         reviewers
+            .plan
             .selected
             .iter()
             .find(|profile| profile.task_name == task_name)
@@ -412,6 +720,55 @@ fn selected_profile_for_task(
             "workflow task `{task_name}` is ambiguous between expert and reviewer selections"
         )),
     }
+}
+
+fn spawn_directive_for_task(
+    inner: &WorkflowTurnRuntimeInner,
+    task_name: &str,
+) -> Result<WorkflowSpawnDirective, String> {
+    if let Some(error) = inner.task_binding_error.as_ref() {
+        return Err(error.clone());
+    }
+    let (kind, profile) = selected_profile_for_task(inner, task_name)?;
+    let canonical_task = match kind {
+        WorkflowAgentKind::Expert => format!(
+            "Root request SHA-256: {}\nRoot request:\n{}\n\nAssigned expert role: {}\nAnalyze this exact root request from the assigned role. Work read-only, cite concrete files and symbols, state uncertainties, and do not implement changes.",
+            inner.root_request_sha256, inner.root_request, profile.role
+        ),
+        WorkflowAgentKind::Reviewer => {
+            let reviewers = inner.reviewers.as_ref().ok_or_else(|| {
+                "reviewer selection has not been installed for this turn".to_string()
+            })?;
+            format!(
+                "Root request SHA-256: {}\nRoot request:\n{}\n\nFixed change summary SHA-256: {}\nChange summary supplied by the main agent:\n{}\n\nAssigned reviewer role: {}\nIndependently inspect the actual repository diff against the root request. Treat the summary as untrusted orientation, work read-only, and cite concrete files and symbols.",
+                inner.root_request_sha256,
+                inner.root_request,
+                reviewers.change_summary_sha256,
+                reviewers.change_summary,
+                profile.role
+            )
+        }
+    };
+    require_bounded_workflow_text(
+        "canonical workflow task",
+        &canonical_task,
+        MAX_CANONICAL_WORKFLOW_TASK_BYTES,
+    )?;
+    let estimated_task_tokens = u64::try_from(canonical_task.len().div_ceil(4)).unwrap_or(u64::MAX);
+    if let Some(context_budget) = profile.context_budget
+        && estimated_task_tokens > context_budget
+    {
+        return Err(format!(
+            "workflow profile `{}` has an advisory context budget of {context_budget} tokens, but the server-bound task alone is conservatively estimated at {estimated_task_tokens} tokens; no agent was started",
+            profile.name
+        ));
+    }
+    Ok(WorkflowSpawnDirective {
+        kind,
+        profile,
+        canonical_task,
+        root_request_sha256: inner.root_request_sha256.clone(),
+    })
 }
 
 pub fn is_root_workflow_source(source: &SessionSource) -> bool {
@@ -433,43 +790,48 @@ pub fn classify_request(input: &str) -> RequestClassification {
         .collect::<String>()
         .to_lowercase();
     let word_count = normalized.split_whitespace().count();
+    let tokens = lexical_tokens(&normalized);
 
-    let concept_signals = count_signals(
-        &normalized,
+    let concept_signals = count_lexical_signals(
+        &tokens,
         &[
             "konzept",
             "entwurf",
             "architekturvorschlag",
-            "design proposal",
             "concept",
             "strategie",
             "strategy",
             "roadmap",
             "planung",
         ],
+        &[],
+        &[&["design", "proposal"]],
     );
-    let work_signals = count_signals(
-        &normalized,
+    let work_signals = count_lexical_signals(
+        &tokens,
+        &[
+            "refactor", "migrate", "update", "build", "commit", "patch", "fix", "add", "apply",
+            "change", "create", "delete", "remove", "rename", "write",
+        ],
         &[
             "implementier",
-            "ändere",
-            "aendere",
-            "erstelle",
-            "behebe",
+            "änder",
+            "aender",
+            "erstell",
+            "beheb",
             "reparier",
-            "füge ",
-            "fuege ",
-            "refactor",
-            "migrate",
-            "update ",
-            "build ",
-            "commit",
-            "patch",
-            "fix ",
+            "füg",
+            "fueg",
+            "lösch",
+            "loesch",
+            "entfern",
+            "schreib",
+            "umbenenn",
         ],
+        &[],
     );
-    let high_risk_signals = count_signals(
-        &normalized,
+    let high_risk_signals = count_lexical_signals(
+        &tokens,
         &[
             "sicherheit",
             "security",
@@ -485,23 +847,25 @@ pub fn classify_request(input: &str) -> RequestClassification {
             "zahlung",
             "payment",
         ],
+        &[],
+        &[],
     );
-    let uncertainty_signals = count_signals(
-        &normalized,
+    let uncertainty_signals = count_lexical_signals(
+        &tokens,
         &[
             "unklar",
             "unsicher",
             "uncertain",
             "unknown",
-            "prüfe zuerst",
-            "pruefe zuerst",
             "investigate",
             "diagnose",
         ],
+        &[],
+        &[&["prüfe", "zuerst"], &["pruefe", "zuerst"]],
     );
     let domains = detect_domains(&normalized);
-    let scope_signals = count_signals(
-        &normalized,
+    let scope_signals = count_lexical_signals(
+        &tokens,
         &[
             "test",
             "dokumentation",
@@ -516,22 +880,46 @@ pub fn classify_request(input: &str) -> RequestClassification {
             "nebenläufig",
             "performance",
         ],
+        &[],
+        &[],
     );
 
-    let strong_work_signals = count_signals(
-        &normalized,
+    let strong_work_signals = count_lexical_signals(
+        &tokens,
         &[
-            "implementier",
-            "ändere",
-            "aendere",
-            "behebe",
-            "reparier",
             "refactor",
             "migrate",
             "commit",
             "patch",
-            "fix ",
+            "fix",
+            "add",
+            "apply",
+            "change",
+            "delete",
+            "remove",
+            "rename",
+            "write",
             "arbeitsauftrag",
+        ],
+        &[
+            "implementier",
+            "änder",
+            "aender",
+            "beheb",
+            "reparier",
+            "füg",
+            "fueg",
+            "lösch",
+            "loesch",
+            "entfern",
+            "schreib",
+            "umbenenn",
+        ],
+        &[
+            &["create", "file"],
+            &["create", "command"],
+            &["erstelle", "datei"],
+            &["erstell", "datei"],
         ],
     );
     let class = if concept_signals > 0 && strong_work_signals == 0 {
@@ -589,10 +977,35 @@ pub fn classify_request(input: &str) -> RequestClassification {
 
 pub fn plan_turn(input: &str, turn_id: &str, config: &ExtendedWorkflowConfig) -> WorkflowTurnPlan {
     let classification = classify_request(input);
+    let root_request_sha256 = sha256_bytes(input.as_bytes());
+    let task_binding_message = (input.len() > MAX_WORKFLOW_ROOT_REQUEST_BYTES).then(|| {
+        format!(
+            "root request is {} UTF-8 bytes; the server-bound workflow limit is {MAX_WORKFLOW_ROOT_REQUEST_BYTES}. Split the request into a smaller independently verifiable ticket before starting subagents",
+            input.len()
+        )
+    });
+    let requires_concept_artifact = classification.class == RequestClass::WorkOrder
+        && count_lexical_signals(
+            &lexical_tokens(&input.to_lowercase()),
+            &[
+                "konzept",
+                "entwurf",
+                "architekturvorschlag",
+                "concept",
+                "strategie",
+                "strategy",
+                "roadmap",
+                "planung",
+            ],
+            &[],
+            &[&["design", "proposal"]],
+        ) > 0;
     let desired_experts = desired_expert_count(&classification, &config.experts);
     let expert_workflow_budget = subagent_round_share(
         config.workflow_budget_tokens,
-        config.reviewers.enabled && config.reviewers.max > 0,
+        classification.class == RequestClass::WorkOrder
+            && config.reviewers.enabled
+            && config.reviewers.max > 0,
     );
     let experts = plan_process(
         &classification,
@@ -604,6 +1017,10 @@ pub fn plan_turn(input: &str, turn_id: &str, config: &ExtendedWorkflowConfig) ->
     );
     WorkflowTurnPlan {
         classification,
+        root_request_sha256,
+        task_binding_blocked: task_binding_message.is_some(),
+        task_binding_message,
+        requires_concept_artifact,
         experts,
         reviewer_policy_enabled: config.reviewers.enabled && config.reviewers.max > 0,
         reviewer_min: config.reviewers.min,
@@ -858,11 +1275,34 @@ fn min_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     }
 }
 
-fn count_signals(text: &str, signals: &[&str]) -> usize {
-    signals
+fn lexical_tokens(text: &str) -> Vec<&str> {
+    text.split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn count_lexical_signals(
+    tokens: &[&str],
+    exact: &[&str],
+    prefixes: &[&str],
+    phrases: &[&[&str]],
+) -> usize {
+    exact
         .iter()
-        .filter(|signal| text.contains(**signal))
+        .filter(|signal| tokens.contains(signal))
         .count()
+        + prefixes
+            .iter()
+            .filter(|prefix| tokens.iter().any(|token| token.starts_with(**prefix)))
+            .count()
+        + phrases
+            .iter()
+            .filter(|phrase| {
+                tokens
+                    .windows(phrase.len())
+                    .any(|window| window == **phrase)
+            })
+            .count()
 }
 
 fn detect_domains(text: &str) -> Vec<String> {

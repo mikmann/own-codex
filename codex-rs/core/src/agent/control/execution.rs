@@ -1,4 +1,5 @@
 use super::AgentControl;
+use super::residency::V2ResidencyPin;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
@@ -21,6 +22,11 @@ pub(crate) struct AgentExecutionGuard {
     limiter: Arc<AgentExecutionLimiter>,
 }
 
+pub(crate) struct AgentOperationGuard {
+    _lifecycle: tokio::sync::OwnedRwLockReadGuard<()>,
+    _residency: Option<V2ResidencyPin>,
+}
+
 impl Drop for AgentExecutionGuard {
     fn drop(&mut self) {
         self.limiter.active.fetch_sub(1, Ordering::AcqRel);
@@ -32,14 +38,26 @@ impl AgentControl {
         &self,
         thread_id: ThreadId,
         op: &Op,
-    ) -> CodexResult<tokio::sync::OwnedRwLockReadGuard<()>> {
-        let lifecycle_guard = self.acquire_agent_operation(thread_id).await?;
+    ) -> CodexResult<AgentOperationGuard> {
+        let operation_guard = self.acquire_agent_operation(thread_id).await?;
         self.ensure_execution_capacity_for_turn_start(thread_id, op_starts_turn(op))
             .await?;
-        Ok(lifecycle_guard)
+        Ok(operation_guard)
     }
 
     pub(super) async fn acquire_agent_operation(
+        &self,
+        thread_id: ThreadId,
+    ) -> CodexResult<AgentOperationGuard> {
+        let lifecycle_guard = self.acquire_agent_lifecycle(thread_id).await?;
+        let residency_pin = self.pin_v2_residency(thread_id)?;
+        Ok(AgentOperationGuard {
+            _lifecycle: lifecycle_guard,
+            _residency: residency_pin,
+        })
+    }
+
+    pub(super) async fn acquire_agent_lifecycle(
         &self,
         thread_id: ThreadId,
     ) -> CodexResult<tokio::sync::OwnedRwLockReadGuard<()>> {

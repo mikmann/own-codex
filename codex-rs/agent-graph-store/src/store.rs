@@ -9,6 +9,7 @@ use crate::ThreadSpawnSubtreeClose;
 use crate::WorkflowReviewerValidation;
 use crate::WorkflowValidationCompletion;
 use crate::WorkflowValidationDecision;
+use crate::WorkflowValidationRecord;
 use crate::WorkflowValidationSubmission;
 
 /// Future returned by [`AgentGraphStore`] operations.
@@ -136,4 +137,11 @@ pub trait AgentGraphStore: Send + Sync {
         root_thread_id: ThreadId,
         turn_id: &str,
     ) -> AgentGraphStoreFuture<'_, Vec<WorkflowReviewerValidation>>;
+
+    /// Return every workflow validation record for the supplied root turn.
+    fn list_workflow_validations(
+        &self,
+        root_thread_id: ThreadId,
+        turn_id: &str,
+    ) -> AgentGraphStoreFuture<'_, Vec<WorkflowValidationRecord>>;
 }

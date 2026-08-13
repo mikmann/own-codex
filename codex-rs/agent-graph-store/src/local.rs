@@ -10,6 +10,7 @@ use crate::ThreadSpawnSubtreeClose;
 use crate::WorkflowReviewerValidation;
 use crate::WorkflowValidationCompletion;
 use crate::WorkflowValidationDecision;
+use crate::WorkflowValidationRecord;
 use crate::WorkflowValidationSubmission;
 
 /// SQLite-backed implementation of [`AgentGraphStore`] using an existing state runtime.
@@ -254,6 +255,37 @@ impl AgentGraphStore for LocalAgentGraphStore {
                         .map(|record| WorkflowReviewerValidation {
                             agent_thread_id: record.agent_thread_id,
                             role: record.role,
+                            output_revision: record.output_revision,
+                            output_sha256: record.output_sha256,
+                            reviewer_pass: record.reviewer_pass,
+                            has_high_or_critical: record.has_high_or_critical,
+                        })
+                        .collect()
+                })
+                .map_err(internal_error)
+        })
+    }
+
+    fn list_workflow_validations(
+        &self,
+        root_thread_id: ThreadId,
+        turn_id: &str,
+    ) -> AgentGraphStoreFuture<'_, Vec<WorkflowValidationRecord>> {
+        let turn_id = turn_id.to_string();
+        Box::pin(async move {
+            self.state_db
+                .list_workflow_validations(root_thread_id, &turn_id)
+                .await
+                .map(|records| {
+                    records
+                        .into_iter()
+                        .map(|record| WorkflowValidationRecord {
+                            validation_key: record.validation_key,
+                            result_kind: record.result_kind,
+                            agent_thread_id: record.agent_thread_id,
+                            agent_role: record.agent_role,
+                            submissions: record.submissions,
+                            accepted: record.accepted,
                             output_revision: record.output_revision,
                             output_sha256: record.output_sha256,
                             reviewer_pass: record.reviewer_pass,

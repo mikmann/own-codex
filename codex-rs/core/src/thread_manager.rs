@@ -243,6 +243,13 @@ struct ThreadSpawnRequest {
     inherited_environments: Option<TurnEnvironmentSnapshot>,
     inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
     user_shell_override: Option<crate::shell::Shell>,
+    resume_authorization: ResumeAuthorization,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResumeAuthorization {
+    Direct,
+    OwningAgentControl,
 }
 
 impl ThreadSpawnRequest {
@@ -261,6 +268,7 @@ impl ThreadSpawnRequest {
             inherited_environments: None,
             inherited_exec_policy: None,
             user_shell_override: None,
+            resume_authorization: ResumeAuthorization::Direct,
         }
     }
 }
@@ -1602,6 +1610,7 @@ impl ThreadManagerState {
         };
         let mut request =
             ThreadSpawnRequest::new(options, Arc::clone(&self.auth_manager), agent_control);
+        request.resume_authorization = ResumeAuthorization::OwningAgentControl;
         request.parent_thread_id = parent_thread_id;
         request.inherited_environments = inherited_environments;
         request.inherited_exec_policy = inherited_exec_policy;
@@ -1669,6 +1678,7 @@ impl ThreadManagerState {
             inherited_environments,
             inherited_exec_policy,
             user_shell_override,
+            resume_authorization,
         } = request;
         let StartThreadOptions {
             config,
@@ -1685,6 +1695,18 @@ impl ThreadManagerState {
             client_mcp_extensions,
         } = options;
         let session_source = session_source.unwrap_or_else(|| self.session_source.clone());
+        if matches!(&initial_history, InitialHistory::Resumed(_))
+            && matches!(
+                &session_source,
+                SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+            )
+            && resume_authorization == ResumeAuthorization::Direct
+        {
+            return Err(CodexErr::UnsupportedOperation(
+                "spawned sub-agent threads can only be resumed by their owning agent session"
+                    .to_string(),
+            ));
+        }
         let environments = environments.unwrap_or_else(|| {
             default_thread_environment_selections(
                 self.environment_manager.as_ref(),

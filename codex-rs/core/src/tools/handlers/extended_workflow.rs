@@ -69,6 +69,7 @@ struct ValidateResultArgs {
     result_id: String,
     expected_subject: String,
     agent_task: Option<String>,
+    selected: Option<bool>,
     result: JsonValue,
 }
 
@@ -123,7 +124,7 @@ impl ToolExecutor<ToolInvocation> for PlanWorkflowReviewersHandler {
 
     fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
         Box::pin(async move {
-            let arguments = match invocation.payload {
+            let arguments = match &invocation.payload {
                 ToolPayload::Function { arguments } => arguments,
                 _ => {
                     return Err(FunctionCallError::RespondToModel(
@@ -131,7 +132,7 @@ impl ToolExecutor<ToolInvocation> for PlanWorkflowReviewersHandler {
                     ));
                 }
             };
-            let args: PlanReviewersArgs = parse_arguments(&arguments)?;
+            let args: PlanReviewersArgs = parse_arguments(arguments)?;
             if args.change_summary.trim().is_empty() {
                 return Err(FunctionCallError::RespondToModel(
                     "change_summary must not be empty".to_string(),
@@ -143,11 +144,6 @@ impl ToolExecutor<ToolInvocation> for PlanWorkflowReviewersHandler {
                 crate::extended_workflow::MAX_WORKFLOW_CHANGE_SUMMARY_BYTES,
             )
             .map_err(FunctionCallError::RespondToModel)?;
-            let plan = plan_reviewers(
-                &args.change_summary,
-                &invocation.turn.sub_id,
-                &invocation.turn.config.extended_workflow,
-            );
             let runtime = invocation
                 .turn
                 .extension_data
@@ -158,8 +154,24 @@ impl ToolExecutor<ToolInvocation> for PlanWorkflowReviewersHandler {
                             .to_string(),
                     )
                 })?;
+            let planning_input = runtime
+                .reviewer_planning_input(&args.change_summary)
+                .map_err(FunctionCallError::RespondToModel)?;
+            let validations = verified_workflow_validations(&invocation).await?;
+            match runtime.pre_reviewer_gate(&validations) {
+                crate::extended_workflow::WorkflowCompletionGate::Satisfied => {}
+                crate::extended_workflow::WorkflowCompletionGate::Continue(message)
+                | crate::extended_workflow::WorkflowCompletionGate::Blocked(message) => {
+                    return Err(FunctionCallError::RespondToModel(message));
+                }
+            }
+            let plan = plan_reviewers(
+                &planning_input,
+                &invocation.turn.sub_id,
+                &invocation.turn.config.extended_workflow,
+            );
             runtime
-                .install_reviewers(&plan)
+                .install_reviewers(&plan, &args.change_summary)
                 .map_err(FunctionCallError::RespondToModel)?;
             Ok(boxed_tool_output(WorkflowToolOutput::new(true, plan)))
         })
@@ -198,6 +210,11 @@ async fn handle_validate_result(
         }
     };
     let args: ValidateResultArgs = parse_arguments(arguments)?;
+    if args.selected == Some(true) && args.kind != ResultKind::Ticket {
+        return Err(FunctionCallError::RespondToModel(
+            "selected=true is valid only for a ticket result".to_string(),
+        ));
+    }
     let result_id = args.result_id.trim();
     if result_id.is_empty() {
         return Err(FunctionCallError::RespondToModel(
@@ -236,7 +253,7 @@ async fn handle_validate_result(
     let max_result_bytes = invocation.turn.config.extended_workflow.max_result_bytes;
     let target = validation_target(&invocation, &args).await?;
     let key = target.key.clone();
-    let (output_revision, output_sha256, requires_higher_revision, agent_thread_id, reviewer_role) =
+    let (output_revision, output_sha256, requires_higher_revision, agent_thread_id, agent_role) =
         target.agent.as_ref().map_or_else(
             || {
                 (
@@ -253,7 +270,7 @@ async fn handle_validate_result(
                     agent.output_sha256.clone(),
                     true,
                     Some(agent.thread_id),
-                    (args.kind == ResultKind::Reviewer).then(|| agent.display.role.clone()),
+                    Some(agent.display.role.clone()),
                 )
             },
         );
@@ -267,7 +284,7 @@ async fn handle_validate_result(
             validation_key: key.clone(),
             result_kind: args.kind.as_str().to_string(),
             agent_thread_id,
-            reviewer_role,
+            reviewer_role: agent_role,
             output_revision,
             output_sha256: output_sha256.clone(),
             requires_higher_revision,
@@ -276,6 +293,28 @@ async fn handle_validate_result(
         .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
     let submission = match submission {
         codex_agent_graph_store::WorkflowValidationDecision::Attempt(submission) => submission,
+        codex_agent_graph_store::WorkflowValidationDecision::AlreadyAccepted(submissions)
+            if args.kind == ResultKind::Ticket && args.selected == Some(true) =>
+        {
+            ensure_accepted_validation_matches(&invocation, &key, &output_sha256).await?;
+            select_accepted_ticket(&invocation, result_id, &output_sha256).await?;
+            emit_validation_status(&invocation, &args, &target, true).await;
+            return Ok(boxed_tool_output(WorkflowToolOutput::new(
+                true,
+                serde_json::json!({
+                    "accepted": true,
+                    "already_accepted": true,
+                    "retry_allowed": false,
+                    "attempts": submissions,
+                    "errors": [],
+                    "has_high_or_critical": false,
+                    "result_bytes": encoded_result.len(),
+                    "max_result_bytes": max_result_bytes,
+                    "validation_key": key,
+                    "selected": true,
+                }),
+            )));
+        }
         codex_agent_graph_store::WorkflowValidationDecision::AlreadyAccepted(_) => {
             return Err(FunctionCallError::RespondToModel(format!(
                 "result `{result_id}` was already accepted for this turn and cannot be submitted again"
@@ -363,13 +402,13 @@ async fn handle_validate_result(
             }
             ResultKind::Ticket => {
                 match serde_json::from_value::<WorkflowTicket>(args.result.clone()) {
-                    Ok(result) => validate_ticket(&result),
+                    Ok(result) => validate_ticket(&result, &target.expected_subject),
                     Err(error) => invalid_contract("WorkflowTicket", error),
                 }
             }
             ResultKind::Concept => {
                 match serde_json::from_value::<WorkflowConcept>(args.result.clone()) {
-                    Ok(result) => validate_concept(&result),
+                    Ok(result) => validate_concept(&result, &target.expected_subject),
                     Err(error) => invalid_contract("WorkflowConcept", error),
                 }
             }
@@ -390,12 +429,15 @@ async fn handle_validate_result(
                 validation_key: key.clone(),
                 submission,
                 output_revision,
-                output_sha256,
+                output_sha256: output_sha256.clone(),
                 reviewer_pass,
                 has_high_or_critical: validation.has_high_or_critical,
             })
             .await
             .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+        if args.kind == ResultKind::Ticket && args.selected == Some(true) {
+            select_accepted_ticket(&invocation, result_id, &output_sha256).await?;
+        }
         if let Some(result) = reviewer_result.as_ref() {
             emit_reviewer_findings(&invocation, result).await;
         }
@@ -415,8 +457,146 @@ async fn handle_validate_result(
             "result_bytes": encoded_result.len(),
             "max_result_bytes": max_result_bytes,
             "validation_key": key,
+            "selected": args.kind == ResultKind::Ticket && args.selected == Some(true),
         }),
     )))
+}
+
+async fn select_accepted_ticket(
+    invocation: &ToolInvocation,
+    result_id: &str,
+    ticket_output_sha256: &str,
+) -> Result<(), FunctionCallError> {
+    let selection_sha256 = crate::extended_workflow::sha256_bytes(
+        format!("selected_ticket\0{result_id}\0{ticket_output_sha256}").as_bytes(),
+    );
+    let decision = invocation
+        .session
+        .services
+        .agent_control
+        .begin_workflow_validation(codex_agent_graph_store::WorkflowValidationSubmission {
+            root_thread_id: invocation.session.thread_id,
+            turn_id: invocation.turn.sub_id.clone(),
+            validation_key: "selected_ticket".to_string(),
+            result_kind: "selected_ticket".to_string(),
+            agent_thread_id: None,
+            reviewer_role: Some(result_id.to_string()),
+            output_revision: 1,
+            output_sha256: selection_sha256.clone(),
+            requires_higher_revision: false,
+        })
+        .await
+        .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+    let submission = match decision {
+        codex_agent_graph_store::WorkflowValidationDecision::Attempt(submission) => submission,
+        codex_agent_graph_store::WorkflowValidationDecision::AlreadyAccepted(_) => {
+            let validations = invocation
+                .session
+                .services
+                .agent_control
+                .list_workflow_validations(invocation.session.thread_id, &invocation.turn.sub_id)
+                .await
+                .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+            let same_selection = validations.iter().any(|record| {
+                record.validation_key == "selected_ticket"
+                    && record.result_kind == "selected_ticket"
+                    && record.accepted
+                    && record.agent_role.as_deref() == Some(result_id)
+                    && record.output_sha256 == selection_sha256
+            });
+            if same_selection {
+                return Ok(());
+            }
+            return Err(FunctionCallError::RespondToModel(
+                "a different ticket was already selected for this turn and the selection is immutable"
+                    .to_string(),
+            ));
+        }
+        codex_agent_graph_store::WorkflowValidationDecision::Exhausted(_)
+        | codex_agent_graph_store::WorkflowValidationDecision::UnchangedCorrection(_) => {
+            return Err(FunctionCallError::RespondToModel(
+                "the ticket selection marker is unusable for this turn".to_string(),
+            ));
+        }
+        codex_agent_graph_store::WorkflowValidationDecision::ResultLimitReached => {
+            return Err(FunctionCallError::RespondToModel(
+                "the turn contains too many workflow results to persist a ticket selection"
+                    .to_string(),
+            ));
+        }
+    };
+    invocation
+        .session
+        .services
+        .agent_control
+        .complete_workflow_validation(codex_agent_graph_store::WorkflowValidationCompletion {
+            root_thread_id: invocation.session.thread_id,
+            turn_id: invocation.turn.sub_id.clone(),
+            validation_key: "selected_ticket".to_string(),
+            submission,
+            output_revision: 1,
+            output_sha256: selection_sha256,
+            reviewer_pass: false,
+            has_high_or_critical: false,
+        })
+        .await
+        .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))
+}
+
+async fn ensure_accepted_validation_matches(
+    invocation: &ToolInvocation,
+    validation_key: &str,
+    output_sha256: &str,
+) -> Result<(), FunctionCallError> {
+    let validations = invocation
+        .session
+        .services
+        .agent_control
+        .list_workflow_validations(invocation.session.thread_id, &invocation.turn.sub_id)
+        .await
+        .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+    if validations.iter().any(|record| {
+        record.validation_key == validation_key
+            && record.accepted
+            && record.output_sha256 == output_sha256
+    }) {
+        Ok(())
+    } else {
+        Err(FunctionCallError::RespondToModel(format!(
+            "accepted workflow result `{validation_key}` does not match this resubmission"
+        )))
+    }
+}
+
+async fn verified_workflow_validations(
+    invocation: &ToolInvocation,
+) -> Result<Vec<codex_agent_graph_store::WorkflowValidationRecord>, FunctionCallError> {
+    let mut validations = invocation
+        .session
+        .services
+        .agent_control
+        .list_workflow_validations(invocation.session.thread_id, &invocation.turn.sub_id)
+        .await
+        .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+    for validation in &mut validations {
+        let Some(agent_thread_id) = validation.agent_thread_id else {
+            continue;
+        };
+        if !validation.accepted {
+            continue;
+        }
+        let completed = invocation
+            .session
+            .services
+            .agent_control
+            .completed_workflow_agent(agent_thread_id)
+            .await
+            .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+        validation.accepted &= completed.output_revision == validation.output_revision
+            && completed.output_sha256 == validation.output_sha256;
+        validation.reviewer_pass &= validation.accepted;
+    }
+    Ok(validations)
 }
 
 struct ValidationTarget {
@@ -446,9 +626,21 @@ async fn validation_target(
                     "agent_task must be omitted for ticket and concept validation".to_string(),
                 ));
             }
+            let runtime = invocation
+                .turn
+                .extension_data
+                .get::<WorkflowTurnRuntimeState>()
+                .ok_or_else(|| {
+                    FunctionCallError::RespondToModel(
+                        "ticket and concept validation require an active root workflow turn"
+                            .to_string(),
+                    )
+                })?;
             Ok(ValidationTarget {
                 key: format!("{}:{}", args.kind.as_str(), args.result_id.trim()),
-                expected_subject: args.expected_subject.clone(),
+                expected_subject: runtime
+                    .root_request()
+                    .map_err(FunctionCallError::RespondToModel)?,
                 agent: None,
             })
         }
@@ -519,8 +711,14 @@ async fn validation_target(
                     "agent `{thread_id}` is missing its persisted workflow assignment"
                 ))
             })?;
+            let workflow_root_sha256 = identity.workflow_root_sha256.clone().ok_or_else(|| {
+                FunctionCallError::RespondToModel(format!(
+                    "agent `{thread_id}` is missing its persisted root-request binding"
+                ))
+            })?;
             let expected_assignment_sha256 = crate::extended_workflow::workflow_assignment_sha256(
                 &invocation.turn.sub_id,
+                &workflow_root_sha256,
                 expected_kind,
                 &name,
                 &identity.role,
@@ -535,15 +733,22 @@ async fn validation_target(
                 .turn
                 .extension_data
                 .get::<WorkflowTurnRuntimeState>()
-                && let Some(assignment) = runtime.assignment_for_thread(thread_id)
-                && (assignment.kind != expected_kind
-                    || assignment.name != name
-                    || assignment.role != identity.role
-                    || assignment.task != assignment_message)
             {
-                return Err(FunctionCallError::RespondToModel(format!(
-                    "agent `{thread_id}` does not match the server-side assignment for this turn"
-                )));
+                if runtime.root_request_sha256() != workflow_root_sha256 {
+                    return Err(FunctionCallError::RespondToModel(format!(
+                        "agent `{thread_id}` is bound to a different root request"
+                    )));
+                }
+                if let Some(assignment) = runtime.assignment_for_thread(thread_id)
+                    && (assignment.kind != expected_kind
+                        || assignment.name != name
+                        || assignment.role != identity.role
+                        || assignment.task != assignment_message)
+                {
+                    return Err(FunctionCallError::RespondToModel(format!(
+                        "agent `{thread_id}` does not match the server-side assignment for this turn"
+                    )));
+                }
             }
             let expected_subject =
                 crate::extended_workflow::workflow_assignment_subject(&assignment_message)
@@ -670,6 +875,7 @@ fn validation_rejected_output(
             "result_bytes": result_bytes,
             "max_result_bytes": max_result_bytes,
             "validation_key": validation_key,
+            "selected": false,
         }),
     ))
 }

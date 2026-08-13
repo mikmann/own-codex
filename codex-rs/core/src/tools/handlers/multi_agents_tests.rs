@@ -390,8 +390,9 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
     profile.agent_type = Some(role_name.clone());
     profile.model = Some("gpt-5.4".to_string());
     profile.reasoning_effort = Some(ReasoningEffort::High);
+    let root_request = "Implement the architecture and security validation.";
     let workflow_plan = crate::extended_workflow::plan_turn(
-        "Implement the architecture and security validation.",
+        root_request,
         &turn.sub_id,
         &config.extended_workflow,
     );
@@ -404,7 +405,7 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
         .task_name
         .clone();
     turn.extension_data.insert(
-        crate::extended_workflow::WorkflowTurnRuntimeState::new(&workflow_plan),
+        crate::extended_workflow::WorkflowTurnRuntimeState::new(&workflow_plan, root_request),
     );
 
     let manager = thread_manager();
@@ -494,6 +495,7 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
     let validation_name = "architecture-validator";
     let validation_assignment_sha256 = crate::extended_workflow::workflow_assignment_sha256(
         &turn.sub_id,
+        &workflow_plan.root_request_sha256,
         crate::extended_workflow::WorkflowAgentKind::Expert,
         validation_name,
         "Architecture",
@@ -513,6 +515,7 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
                 workflow_name: Some(validation_name),
                 workflow_turn_id: Some(turn.sub_id.as_str()),
                 assignment_sha256: Some(validation_assignment_sha256.as_str()),
+                workflow_root_sha256: Some(workflow_plan.root_request_sha256.as_str()),
             },
         ),
     });
@@ -664,11 +667,9 @@ async fn multi_agent_v2_workflow_spawn_rejects_stale_identity_fork_and_model_ove
     let (session, mut turn) = make_session_and_context().await;
     let mut config = (*turn.config).clone();
     config.extended_workflow.enabled = true;
-    let workflow_plan = crate::extended_workflow::plan_turn(
-        "Implement CLI security and architecture validation.",
-        &turn.sub_id,
-        &config.extended_workflow,
-    );
+    let root_request = "Implement CLI security and architecture validation.";
+    let workflow_plan =
+        crate::extended_workflow::plan_turn(root_request, &turn.sub_id, &config.extended_workflow);
     let selected = workflow_plan
         .experts
         .selected
@@ -682,6 +683,7 @@ async fn multi_agent_v2_workflow_spawn_rejects_stale_identity_fork_and_model_ove
     turn.extension_data
         .insert(crate::extended_workflow::WorkflowTurnRuntimeState::new(
             &workflow_plan,
+            root_request,
         ));
     set_turn_config(&mut turn, config);
     let session = Arc::new(session);

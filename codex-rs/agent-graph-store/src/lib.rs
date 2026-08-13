@@ -15,4 +15,5 @@ pub use types::ThreadSpawnSubtreeClose;
 pub use types::WorkflowReviewerValidation;
 pub use types::WorkflowValidationCompletion;
 pub use types::WorkflowValidationDecision;
+pub use types::WorkflowValidationRecord;
 pub use types::WorkflowValidationSubmission;

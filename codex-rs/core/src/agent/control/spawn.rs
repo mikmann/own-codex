@@ -246,12 +246,18 @@ impl AgentControl {
         &self,
         mut config: Config,
         thread_id: ThreadId,
-    ) -> CodexResult<()> {
-        let _lifecycle_guard = self.acquire_agent_operation(thread_id).await?;
+    ) -> CodexResult<Option<super::residency::V2ResidencyPin>> {
+        let _lifecycle_guard = self.acquire_agent_lifecycle(thread_id).await?;
         let state = self.upgrade()?;
-        if state.get_thread(thread_id).await.is_ok() {
+        if let Ok(thread) = state.get_thread(thread_id).await {
             self.touch_loaded_v2_residency(&state, thread_id).await;
-            return Ok(());
+            let residency_pin = self.pin_v2_residency(thread_id)?;
+            if is_v2_resident_session_source(&thread.session_source) && residency_pin.is_none() {
+                return Err(CodexErr::UnsupportedOperation(format!(
+                    "agent `{thread_id}` is not yet resident; retry the operation"
+                )));
+            }
+            return Ok(residency_pin);
         }
         if self.state.agent_metadata_for_thread(thread_id).is_none() {
             return Err(CodexErr::ThreadNotFound(thread_id));
@@ -372,15 +378,20 @@ impl AgentControl {
             .await
         {
             Ok(reloaded_thread) => {
-                residency_slot.commit(reloaded_thread.thread_id);
+                let residency_pin = residency_slot.commit_pinned(reloaded_thread.thread_id)?;
                 state.notify_thread_created(reloaded_thread.thread_id);
-                Ok(())
+                Ok(Some(residency_pin))
             }
             Err(err) => {
                 if state.get_thread(thread_id).await.is_ok() {
                     drop(residency_slot);
                     self.touch_loaded_v2_residency(&state, thread_id).await;
-                    return Ok(());
+                    let residency_pin = self.pin_v2_residency(thread_id)?.ok_or_else(|| {
+                        CodexErr::UnsupportedOperation(format!(
+                            "agent `{thread_id}` is not yet resident; retry the operation"
+                        ))
+                    })?;
+                    return Ok(Some(residency_pin));
                 }
                 Err(err)
             }
@@ -925,6 +936,7 @@ impl AgentControl {
         } else {
             self.ensure_agent_lifecycle_open(thread_id).await?;
         }
+        let _lifecycle_guard = self.acquire_agent_operation(thread_id).await?;
         let root_depth = thread_spawn_depth(&session_source).unwrap_or(0);
         let (resumed_thread_id, resumed_multi_agent_version) = Box::pin(
             self.resume_single_agent_from_rollout(config.clone(), thread_id, session_source),
@@ -1139,6 +1151,24 @@ impl AgentControl {
                 inherited_exec_policy,
             })
             .await?;
+        if let Err(error) = self
+            .ensure_thread_spawn_edge_open_for_source(
+                resumed_thread.thread.as_ref(),
+                resumed_thread.thread_id,
+                Some(&notification_source),
+            )
+            .await
+        {
+            let shutdown_error = resumed_thread.thread.shutdown_and_wait().await.err();
+            let _ = state.remove_thread(&resumed_thread.thread_id).await;
+            self.forget_v2_residency(resumed_thread.thread_id);
+            if let Some(shutdown_error) = shutdown_error {
+                return Err(CodexErr::Fatal(format!(
+                    "resume publication failed ({error}); runtime cleanup also failed: {shutdown_error}"
+                )));
+            }
+            return Err(error);
+        }
         let mut agent_metadata = agent_metadata;
         agent_metadata.agent_id = Some(resumed_thread.thread_id);
         reservation.commit(agent_metadata.clone());
@@ -1155,16 +1185,9 @@ impl AgentControl {
                 resumed_thread.thread_id,
                 Some(notification_source.clone()),
                 child_reference,
-                agent_metadata.agent_path.clone(),
+                agent_metadata.agent_path,
             );
         }
-        self.ensure_thread_spawn_edge_open_for_source(
-            resumed_thread.thread.as_ref(),
-            resumed_thread.thread_id,
-            Some(&notification_source),
-        )
-        .await?;
-
         Ok((resumed_thread.thread_id, multi_agent_version))
     }
 }

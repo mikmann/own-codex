@@ -847,6 +847,47 @@ ORDER BY reviewer_role, agent_thread_id
             .collect()
     }
 
+    /// Return every validation record for one root turn in stable key order.
+    pub async fn list_workflow_validations(
+        &self,
+        root_thread_id: ThreadId,
+        turn_id: &str,
+    ) -> anyhow::Result<Vec<crate::WorkflowValidationRecord>> {
+        let rows = sqlx::query(
+            r#"
+SELECT validation_key, result_kind, agent_thread_id, reviewer_role, submissions,
+       accepted, output_revision, output_sha256, reviewer_pass, has_high_or_critical
+FROM extended_workflow_validations
+WHERE root_thread_id = ? AND turn_id = ?
+ORDER BY validation_key
+            "#,
+        )
+        .bind(root_thread_id.to_string())
+        .bind(turn_id)
+        .fetch_all(self.pool.as_ref())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let agent_thread_id = row
+                    .try_get::<Option<String>, _>("agent_thread_id")?
+                    .map(ThreadId::try_from)
+                    .transpose()?;
+                Ok(crate::WorkflowValidationRecord {
+                    validation_key: row.try_get("validation_key")?,
+                    result_kind: row.try_get("result_kind")?,
+                    agent_thread_id,
+                    agent_role: row.try_get("reviewer_role")?,
+                    submissions: u8::try_from(row.try_get::<i64, _>("submissions")?)?,
+                    accepted: row.try_get::<i64, _>("accepted")? != 0,
+                    output_revision: u32::try_from(row.try_get::<i64, _>("output_revision")?)?,
+                    output_sha256: row.try_get("output_sha256")?,
+                    reviewer_pass: row.try_get::<i64, _>("reviewer_pass")? != 0,
+                    has_high_or_critical: row.try_get::<i64, _>("has_high_or_critical")? != 0,
+                })
+            })
+            .collect()
+    }
+
     /// Find a direct spawned child of `parent_thread_id` by canonical agent path.
     pub async fn find_thread_spawn_child_by_path(
         &self,

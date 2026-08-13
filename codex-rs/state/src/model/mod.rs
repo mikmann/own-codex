@@ -12,6 +12,7 @@ pub use graph::DirectionalThreadSpawnEdgeStatus;
 pub use graph::WorkflowReviewerValidation;
 pub use graph::WorkflowValidationCompletion;
 pub use graph::WorkflowValidationDecision;
+pub use graph::WorkflowValidationRecord;
 pub use graph::WorkflowValidationSubmission;
 pub use log::LogEntry;
 pub use log::LogQuery;

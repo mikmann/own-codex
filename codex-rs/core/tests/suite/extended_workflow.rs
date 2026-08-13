@@ -302,6 +302,81 @@ async fn ticket_validation_allows_exactly_one_changed_correction() -> Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accepted_ticket_selection_is_idempotent_across_tool_retry() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let args = json!({
+        "kind": "ticket",
+        "result_id": "selected-ticket",
+        "expected_subject": "change the parser ticket",
+        "selected": true,
+        "result": {
+            "title": "Change the parser",
+            "goal": "Change the parser safely",
+            "context": "The root request requires a parser change",
+            "requirements": ["Keep the accepted grammar compatible"],
+            "acceptance_criteria": ["The parser change passes its regression tests"],
+            "dependencies": ["Existing parser fixtures"],
+            "test_and_validation": ["Run parser integration tests"],
+            "risks_or_open_questions": ["No known open questions"]
+        }
+    })
+    .to_string();
+    let response_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-select"),
+                ev_function_call("call-select", "validate_workflow_result", &args),
+                ev_completed("resp-select"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-select-retry"),
+                ev_function_call("call-select-retry", "validate_workflow_result", &args),
+                ev_completed("resp-select-retry"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-selected"),
+                ev_assistant_message("msg-selected", "ticket selected"),
+                ev_completed("resp-selected"),
+            ]),
+        ],
+    )
+    .await;
+    let mut builder = test_codex().with_config(|config| {
+        config.extended_workflow.enabled = true;
+    });
+    let test = builder.build(&server).await?;
+    test.submit_turn("Change the parser.").await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 3);
+    let first: Value = serde_json::from_str(
+        &requests[1]
+            .function_call_output_text("call-select")
+            .expect("first selection output"),
+    )?;
+    let repeated: Value = serde_json::from_str(
+        &requests[2]
+            .function_call_output_text("call-select-retry")
+            .expect("repeated selection output"),
+    )?;
+    assert_eq!(
+        (first["accepted"].as_bool(), first["selected"].as_bool()),
+        (Some(true), Some(true))
+    );
+    assert_eq!(
+        (
+            repeated["accepted"].as_bool(),
+            repeated["selected"].as_bool(),
+            repeated["already_accepted"].as_bool(),
+        ),
+        (Some(true), Some(true), Some(true))
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workflow_expert_shell_write_fails_closed_without_creating_a_file() -> Result<()> {
     skip_if_no_network!(Ok(()));
     const ROOT_PROMPT: &str =
