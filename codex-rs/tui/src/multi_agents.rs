@@ -13,6 +13,8 @@ use codex_app_server_protocol::CollabAgentTool;
 use codex_app_server_protocol::CollabAgentToolCallStatus;
 use codex_app_server_protocol::SubAgentActivityKind;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::WorkflowAgentDisplay;
+use codex_app_server_protocol::WorkflowAgentDisplayStatus;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use crossterm::event::KeyCode;
@@ -25,6 +27,8 @@ use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use std::collections::HashSet;
+#[cfg(not(test))]
+use supports_color::Stream;
 
 const COLLAB_PROMPT_PREVIEW_GRAPHEMES: usize = 160;
 const COLLAB_AGENT_ERROR_PREVIEW_GRAPHEMES: usize = 160;
@@ -302,15 +306,52 @@ pub(crate) fn sub_agent_activity_display(item: &ThreadItem) -> Option<SubAgentAc
 
 pub(crate) fn sub_agent_activity_history_cell(item: &ThreadItem) -> Option<PlainHistoryCell> {
     let ThreadItem::SubAgentActivity {
-        kind, agent_path, ..
+        kind,
+        agent_path,
+        workflow_agent,
+        ..
     } = item
     else {
         return None;
     };
-    Some(collab_event(
-        sub_agent_activity_title(*kind, agent_path),
-        Vec::new(),
-    ))
+    let title = workflow_agent.as_ref().map_or_else(
+        || sub_agent_activity_title(*kind, agent_path),
+        |workflow_agent| {
+            workflow_agent_activity_title(workflow_agent, workflow_agent_color_enabled())
+        },
+    );
+    Some(collab_event(title, Vec::new()))
+}
+
+fn workflow_agent_activity_title(
+    agent: &WorkflowAgentDisplay,
+    color_enabled: bool,
+) -> Line<'static> {
+    let reasoning = agent
+        .reasoning_effort
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "default".to_string());
+    let identity = format!(
+        "{}: {} | {} | {} | {}",
+        agent.name, agent.agent_type, agent.role, agent.model, reasoning
+    );
+    let status = match agent.status {
+        WorkflowAgentDisplayStatus::Running => "Running",
+        WorkflowAgentDisplayStatus::Validated => "Validated",
+        WorkflowAgentDisplayStatus::Rejected => "Rejected",
+    };
+    let status_span = match (agent.status, color_enabled) {
+        (WorkflowAgentDisplayStatus::Validated, true) => Span::from(status).green().bold(),
+        (WorkflowAgentDisplayStatus::Rejected, true) => Span::from(status).red().bold(),
+        (_, true) => Span::from(status).blue(),
+        (_, false) => Span::from(status),
+    };
+    title_spans_line(vec![
+        blue_if_supported(Span::from(identity), color_enabled),
+        Span::from(" | ").dim(),
+        status_span,
+    ])
 }
 
 pub(crate) fn sub_agent_activity_summary(kind: SubAgentActivityKind, agent_path: &str) -> String {
@@ -505,6 +546,10 @@ fn agent_label_line(agent: AgentLabel<'_>) -> Line<'static> {
 }
 
 fn agent_label_spans(agent: AgentLabel<'_>) -> Vec<Span<'static>> {
+    agent_label_spans_with_color(agent, workflow_agent_color_enabled())
+}
+
+fn agent_label_spans_with_color(agent: AgentLabel<'_>, color_enabled: bool) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let nickname = agent
         .nickname
@@ -513,22 +558,35 @@ fn agent_label_spans(agent: AgentLabel<'_>) -> Vec<Span<'static>> {
     let role = agent.role.map(str::trim).filter(|role| !role.is_empty());
 
     if let Some(nickname) = nickname {
-        spans.push(Span::from(nickname.to_string()).cyan().bold());
+        spans.push(blue_if_supported(Span::from(nickname.to_string()), color_enabled).bold());
     } else if let Some(thread_id) = agent.thread_id {
-        spans.push(Span::from(thread_id.to_string()).cyan());
+        spans.push(blue_if_supported(
+            Span::from(thread_id.to_string()),
+            color_enabled,
+        ));
     } else {
-        spans.push(Span::from("agent").cyan());
+        spans.push(blue_if_supported(Span::from("agent"), color_enabled));
     }
 
     if let Some(role) = role {
         spans.push(Span::from(" ").dim());
-        spans.push(Span::from(format!("[{role}]")));
+        spans.push(blue_if_supported(
+            Span::from(format!("[{role}]")),
+            color_enabled,
+        ));
     }
 
     spans
 }
 
 fn spawn_request_spans(spawn_request: Option<&SpawnRequestSummary>) -> Vec<Span<'static>> {
+    spawn_request_spans_with_color(spawn_request, workflow_agent_color_enabled())
+}
+
+fn spawn_request_spans_with_color(
+    spawn_request: Option<&SpawnRequestSummary>,
+    color_enabled: bool,
+) -> Vec<Span<'static>> {
     let Some(spawn_request) = spawn_request else {
         return Vec::new();
     };
@@ -544,7 +602,24 @@ fn spawn_request_spans(spawn_request: Option<&SpawnRequestSummary>) -> Vec<Span<
         format!("({model} {})", spawn_request.reasoning_effort)
     };
 
-    vec![Span::from(" ").dim(), Span::from(details).magenta()]
+    vec![
+        Span::from(" ").dim(),
+        blue_if_supported(Span::from(details), color_enabled),
+    ]
+}
+
+fn blue_if_supported(span: Span<'static>, color_enabled: bool) -> Span<'static> {
+    if color_enabled { span.blue() } else { span }
+}
+
+#[cfg(not(test))]
+fn workflow_agent_color_enabled() -> bool {
+    supports_color::on_cached(Stream::Stdout).is_some()
+}
+
+#[cfg(test)]
+fn workflow_agent_color_enabled() -> bool {
+    true
 }
 
 fn prompt_line(prompt: &str) -> Option<Line<'static>> {
@@ -686,6 +761,7 @@ mod tests {
             kind: SubAgentActivityKind::Interacted,
             agent_thread_id: ThreadId::new().to_string(),
             agent_path: "/root/child".to_string(),
+            workflow_agent: None,
         };
 
         assert_eq!(sub_agent_activity_display(&item), None);
@@ -890,13 +966,91 @@ mod tests {
         let lines = cell.display_lines(/*width*/ 200);
         let title = &lines[0];
         assert_eq!(title.spans[2].content.as_ref(), "Robie");
-        assert_eq!(title.spans[2].style.fg, Some(Color::Cyan));
+        assert_eq!(title.spans[2].style.fg, Some(Color::Blue));
         assert!(title.spans[2].style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(title.spans[4].content.as_ref(), "[explorer]");
-        assert_eq!(title.spans[4].style.fg, None);
+        assert_eq!(title.spans[4].style.fg, Some(Color::Blue));
         assert!(!title.spans[4].style.add_modifier.contains(Modifier::DIM));
         assert_eq!(title.spans[6].content.as_ref(), "(gpt-5 high)");
-        assert_eq!(title.spans[6].style.fg, Some(Color::Magenta));
+        assert_eq!(title.spans[6].style.fg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn workflow_agent_identity_remains_textual_without_color_support() {
+        let spans = agent_label_spans_with_color(
+            AgentLabel {
+                thread_id: None,
+                nickname: Some("eulenmann"),
+                role: Some("Expert | Architecture"),
+            },
+            /*color_enabled*/ false,
+        );
+        assert_eq!(spans[0].content.as_ref(), "eulenmann");
+        assert_eq!(spans[0].style.fg, None);
+        assert_eq!(spans[2].content.as_ref(), "[Expert | Architecture]");
+        assert_eq!(spans[2].style.fg, None);
+
+        let details = spawn_request_spans_with_color(
+            Some(&SpawnRequestSummary {
+                model: "gpt-5".to_string(),
+                reasoning_effort: ReasoningEffortConfig::High,
+            }),
+            /*color_enabled*/ false,
+        );
+        assert_eq!(details[1].content.as_ref(), "(gpt-5 high)");
+        assert_eq!(details[1].style.fg, None);
+    }
+
+    #[test]
+    fn v2_workflow_activity_renders_effective_identity_and_text_status() {
+        let item = ThreadItem::SubAgentActivity {
+            id: "activity-workflow".to_string(),
+            kind: SubAgentActivityKind::Started,
+            agent_thread_id: ThreadId::new().to_string(),
+            agent_path: "/root/architecture".to_string(),
+            workflow_agent: Some(WorkflowAgentDisplay {
+                name: "eulenmann".to_string(),
+                agent_type: "Expert".to_string(),
+                role: "Architecture".to_string(),
+                model: "gpt-5.6-sol".to_string(),
+                reasoning_effort: Some(ReasoningEffortConfig::High),
+                status: WorkflowAgentDisplayStatus::Validated,
+            }),
+        };
+
+        let cell = sub_agent_activity_history_cell(&item).expect("workflow activity renders");
+        assert_snapshot!("v2_workflow_activity", cell_to_text(&cell));
+        let title = &cell.display_lines(/*width*/ 200)[0];
+        assert_eq!(
+            title.spans[1].content.as_ref(),
+            "eulenmann: Expert | Architecture | gpt-5.6-sol | high"
+        );
+        assert_eq!(title.spans[1].style.fg, Some(Color::Blue));
+        assert_eq!(title.spans[3].content.as_ref(), "Validated");
+        assert_eq!(title.spans[3].style.fg, Some(Color::Green));
+
+        let no_color =
+            workflow_agent_activity_title(item_workflow_agent(&item), /*color_enabled*/ false);
+        assert_eq!(no_color.spans[1].style.fg, None);
+        assert_eq!(no_color.spans[3].content.as_ref(), "Validated");
+        assert_eq!(no_color.spans[3].style.fg, None);
+
+        let mut rejected = item_workflow_agent(&item).clone();
+        rejected.status = WorkflowAgentDisplayStatus::Rejected;
+        let rejected_title = workflow_agent_activity_title(&rejected, /*color_enabled*/ true);
+        assert_eq!(rejected_title.spans[3].content.as_ref(), "Rejected");
+        assert_eq!(rejected_title.spans[3].style.fg, Some(Color::Red));
+    }
+
+    fn item_workflow_agent(item: &ThreadItem) -> &WorkflowAgentDisplay {
+        let ThreadItem::SubAgentActivity {
+            workflow_agent: Some(agent),
+            ..
+        } = item
+        else {
+            panic!("expected workflow agent metadata");
+        };
+        agent
     }
 
     #[test]

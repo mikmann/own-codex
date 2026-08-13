@@ -74,7 +74,9 @@ impl UpdateAction {
 
 #[cfg(not(debug_assertions))]
 pub fn get_update_action() -> Option<UpdateAction> {
-    UpdateAction::from_install_context(InstallContext::current())
+    // A fork build must never route an update request to the official package,
+    // Homebrew cask, or standalone installer.
+    None
 }
 
 #[cfg(test)]

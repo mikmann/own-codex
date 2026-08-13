@@ -1,10 +1,47 @@
 use super::*;
 
 use anyhow::Result;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::USER_MESSAGE_BEGIN;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::path::PathBuf;
+
+#[test]
+fn display_metadata_cannot_replace_persisted_read_only_workflow_marker() {
+    let parent_thread_id = ThreadId::new();
+    let encoded_role = codex_protocol::protocol::encode_extended_thread_spawn_role(
+        None,
+        /*read_only*/ true,
+        Some("Reviewer"),
+        Some("Security"),
+    );
+    let source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: encoded_role.clone(),
+    });
+
+    let enriched = with_thread_spawn_agent_metadata(
+        source,
+        Some("display-name".to_string()),
+        Some("display role without authorization marker".to_string()),
+    );
+
+    let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        agent_nickname,
+        agent_role,
+        ..
+    }) = enriched
+    else {
+        panic!("expected thread-spawn source");
+    };
+    assert_eq!(agent_nickname.as_deref(), Some("display-name"));
+    assert_eq!(agent_role, encoded_role);
+}
 
 #[test]
 fn extract_conversation_summary_prefers_plain_user_messages() -> Result<()> {

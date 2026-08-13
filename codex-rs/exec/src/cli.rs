@@ -16,6 +16,11 @@ pub struct Cli {
     #[clap(skip)]
     pub psp: bool,
 
+    /// Product default supplied by the primary extended-workflow launcher.
+    /// Explicit configuration still takes precedence.
+    #[clap(skip)]
+    pub extended_workflow_default_enabled: bool,
+
     /// Action to perform. If omitted, runs a new non-interactive session.
     #[command(subcommand)]
     pub command: Option<Command>,

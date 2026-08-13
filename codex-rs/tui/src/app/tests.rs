@@ -5770,7 +5770,7 @@ fn session_start_error_surfaces_archived_guidance_without_rollout_path() {
         thread_id,
     };
     let expected = format!(
-        "session {thread_id} is archived. Run `codex unarchive {thread_id}` to unarchive it first."
+        "session {thread_id} is archived. Run `codex-extended-workflow unarchive {thread_id}` to unarchive it first."
     );
 
     for action in ["resume", "fork"] {

@@ -3,6 +3,7 @@ use crate::bottom_pane::goal_status_indicator_line;
 use crate::chatwidget::rate_limits::NUDGE_MODEL_SLUG;
 use crate::chatwidget::rate_limits::get_limits_duration;
 use codex_app_server_protocol::SpendControlLimitSnapshot;
+use codex_protocol::num_format::format_with_separators;
 use pretty_assertions::assert_eq;
 use ratatui::backend::TestBackend;
 use serial_test::serial;
@@ -888,8 +889,8 @@ async fn rolling_rate_limit_snapshot_preserves_prior_individual_limit() {
         .individual_limit
         .as_ref()
         .expect("rolling updates should preserve monthly limits");
-    assert_eq!(individual_limit.used, "8,000");
-    assert_eq!(individual_limit.limit, "25,000");
+    assert_eq!(individual_limit.used, format_with_separators(8_000));
+    assert_eq!(individual_limit.limit, format_with_separators(25_000));
     assert_eq!(individual_limit.percent_remaining, 68.0);
 
     chat.on_rate_limit_snapshot(Some(snapshot(/*percent*/ 30.0)));

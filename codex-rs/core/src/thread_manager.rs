@@ -818,6 +818,29 @@ impl ThreadManager {
             .initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
+        let resumed_thread_id = match &options.initial_history {
+            InitialHistory::Resumed(resumed) => Some(resumed.conversation_id),
+            InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => None,
+        };
+        if let Some(resumed_thread_id) = resumed_thread_id
+            && matches!(
+                &resumed_session_source,
+                SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+            )
+            && let Some(agent_graph_store) = self.state.agent_graph_store()
+            && !agent_graph_store
+                .thread_spawn_path_is_open(resumed_thread_id)
+                .await
+                .map_err(|error| {
+                    CodexErr::Fatal(format!(
+                        "failed to read resumed agent lifecycle path: {error}"
+                    ))
+                })?
+        {
+            return Err(CodexErr::UnsupportedOperation(
+                "closing or closed sub-agent threads cannot be resumed".to_string(),
+            ));
+        }
         options.session_source = Some(
             options
                 .session_source
@@ -900,13 +923,35 @@ impl ThreadManager {
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
-        if let InitialHistory::Resumed(resumed) = &initial_history
-            && initial_history.get_multi_agent_version() == Some(MultiAgentVersion::V2)
-            && !session_source.is_non_root_agent()
-        {
-            agent_control
-                .restore_v2_agent_metadata(&config, resumed.conversation_id)
-                .await;
+        if let InitialHistory::Resumed(resumed) = &initial_history {
+            if matches!(
+                &session_source,
+                SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+            ) {
+                if let Some(agent_graph_store) = self.state.agent_graph_store()
+                    && !agent_graph_store
+                        .thread_spawn_path_is_open(resumed.conversation_id)
+                        .await
+                        .map_err(|error| {
+                            CodexErr::Fatal(format!(
+                                "failed to read resumed agent lifecycle path: {error}"
+                            ))
+                        })?
+                {
+                    return Err(CodexErr::UnsupportedOperation(
+                        "closing or closed sub-agent threads cannot be resumed".to_string(),
+                    ));
+                }
+            } else {
+                agent_control
+                    .reconcile_closing_subtrees(resumed.conversation_id)
+                    .await?;
+                if initial_history.get_multi_agent_version() == Some(MultiAgentVersion::V2) {
+                    agent_control
+                        .restore_v2_agent_metadata(&config, resumed.conversation_id)
+                        .await?;
+                }
+            }
         }
         let options = StartThreadOptions {
             initial_history,
@@ -1319,17 +1364,26 @@ impl ThreadManagerState {
         forked_from_thread_id: Option<ThreadId>,
         config: &Config,
     ) -> MultiAgentVersion {
+        let inherited_multi_agent_version = self
+            .initial_multi_agent_version_for_spawn(
+                initial_history,
+                session_source,
+                parent_thread_id,
+                forked_from_thread_id,
+            )
+            .await;
+        // Workflow children deliberately disable agent features in their own
+        // config. Preserve the already-established V2 lineage so the read-only
+        // metadata can still be reloaded and enforced after eviction/resume.
+        if session_source.is_some_and(SessionSource::is_read_only_subagent)
+            && inherited_multi_agent_version == Some(MultiAgentVersion::V2)
+        {
+            return MultiAgentVersion::V2;
+        }
         if let Some(multi_agent_version) = config.multi_agent_version_override() {
             return multi_agent_version;
         }
-        self.initial_multi_agent_version_for_spawn(
-            initial_history,
-            session_source,
-            parent_thread_id,
-            forked_from_thread_id,
-        )
-        .await
-        .unwrap_or_else(|| config.multi_agent_version_from_features())
+        inherited_multi_agent_version.unwrap_or_else(|| config.multi_agent_version_from_features())
     }
 
     async fn initial_multi_agent_version_for_spawn(

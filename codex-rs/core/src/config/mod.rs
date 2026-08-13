@@ -29,6 +29,7 @@ use codex_config::config_toml::RealtimeAudioConfig;
 use codex_config::config_toml::RealtimeConfig;
 use codex_config::config_toml::ThreadStoreToml;
 use codex_config::config_toml::validate_model_providers;
+use codex_config::extended_workflow::ExtendedWorkflowConfig;
 use codex_config::loader::load_config_layers_state;
 use codex_config::loader::project_trust_key;
 use codex_config::permissions_toml::PermissionsToml;
@@ -105,10 +106,12 @@ use codex_protocol::config_types::WebSearchConfig;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::ActivePermissionProfile;
+use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
@@ -220,7 +223,7 @@ At the start of your turn, you are the active agent.
 You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
 All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
 
-You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task and trigger a turn, and `send_message` to pass a message to a running agent without triggering a turn.
+You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task and trigger a turn, and `send_message` to pass a message to a running agent without triggering a turn. Use `close_agent` when an agent and its descendants are no longer needed so their concurrency slots are released.
 Child agents can also spawn their own sub-agents.
 You can decide how much context you want to propagate to your sub-agents with the `fork_turns` parameter.
 
@@ -238,7 +241,7 @@ const DEFAULT_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT: &str = r#"You are an agen
 
 You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents. All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
 
-You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task and trigger a turn, and `send_message` to pass a message to a running agent.
+You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task and trigger a turn, and `send_message` to pass a message to a running agent. Use `close_agent` when an agent and its descendants are no longer needed so their concurrency slots are released.
 Child agents can also spawn their own sub-agents.
 
 When you provide a response in the final channel, that content is immediately delivered back to your parent agent.
@@ -257,7 +260,7 @@ const DEFAULT_MULTI_AGENT_V2_MODEL_OVERRIDE_USAGE_HINT_TEXT: &str = "Full-histor
 const DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "collaboration";
 const DEFAULT_MULTI_AGENT_V2_WAIT_AGENT_USAGE_HINT_TEXT: &str =
     "When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.";
-const DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT: &str = r#"Note that collaboration tools cannot be called from inside `functions.exec`. Call `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, and `list_agents` only as direct tool calls using the recipient shown in their tool definitions, such as `to=functions.collaboration.spawn_agent`, since they are intentionally absent from the `functions.exec` `tools.*` namespace. Available tools in `functions.exec` are explicitly described with a `tools` namespace in the developer message.
+const DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT: &str = r#"Note that collaboration tools cannot be called from inside `functions.exec`. Call `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, `close_agent`, and `list_agents` only as direct tool calls using the recipient shown in their tool definitions, such as `to=functions.collaboration.spawn_agent`, since they are intentionally absent from the `functions.exec` `tools.*` namespace. Available tools in `functions.exec` are explicitly described with a `tools` namespace in the developer message.
 
 All agents share the same directory. In detail:
 - All agents have access to the same container and filesystem as you.
@@ -895,6 +898,9 @@ pub struct Config {
     /// User-defined role declarations keyed by role name.
     pub agent_roles: BTreeMap<String, AgentRoleConfig>,
 
+    /// Effective request-classification, expert, ticket, and reviewer workflow settings.
+    pub extended_workflow: ExtendedWorkflowConfig,
+
     /// Memories subsystem settings.
     pub memories: MemoriesConfig,
 
@@ -1451,6 +1457,7 @@ impl ConfigBuilder {
         let cli_overrides = cli_overrides.unwrap_or_default();
         let mut harness_overrides = harness_overrides.unwrap_or_default();
         let loader_overrides = loader_overrides.unwrap_or_default();
+        let extended_workflow_default_enabled = loader_overrides.extended_workflow_default_enabled;
         let cwd_override = harness_overrides.cwd.as_deref().or(fallback_cwd.as_deref());
         let cwd = match cwd_override {
             Some(path) => AbsolutePathBuf::relative_to_current_dir(path)?,
@@ -1524,6 +1531,7 @@ impl ConfigBuilder {
                 harness_overrides,
                 codex_home,
                 lock_config_layer_stack,
+                extended_workflow_default_enabled,
             )
             .await?;
             config.config_lock_toml = Some(Arc::new(expected_lock_config));
@@ -1538,6 +1546,7 @@ impl ConfigBuilder {
             harness_overrides,
             codex_home,
             config_layer_stack,
+            extended_workflow_default_enabled,
         )
         .await
     }
@@ -1549,12 +1558,80 @@ impl ConfigBuilder {
 }
 
 impl Config {
+    /// Apply a monotonic read-only ceiling to an expert or reviewer child.
+    pub(crate) fn apply_read_only_subagent_ceiling(&mut self) -> Result<(), String> {
+        self.permissions
+            .approval_policy
+            .set(AskForApproval::Never)
+            .map_err(|error| format!("approval_policy cannot be set to never: {error}"))?;
+        let read_only_profile = match self.permissions.permission_profile() {
+            PermissionProfile::Managed {
+                file_system:
+                    ManagedFileSystemPermissions::Restricted {
+                        entries,
+                        glob_scan_max_depth,
+                    },
+                ..
+            } => PermissionProfile::Managed {
+                file_system: ManagedFileSystemPermissions::Restricted {
+                    entries: entries
+                        .iter()
+                        .cloned()
+                        .map(|mut entry| {
+                            if entry.access == FileSystemAccessMode::Write {
+                                entry.access = FileSystemAccessMode::Read;
+                            }
+                            entry
+                        })
+                        .collect(),
+                    glob_scan_max_depth: *glob_scan_max_depth,
+                },
+                network: NetworkSandboxPolicy::Restricted,
+            },
+            PermissionProfile::Managed {
+                file_system: ManagedFileSystemPermissions::Unrestricted,
+                ..
+            }
+            | PermissionProfile::Disabled => PermissionProfile::read_only(),
+            PermissionProfile::External { .. } => {
+                return Err(
+                    "an externally enforced permission profile cannot be proven read-only"
+                        .to_string(),
+                );
+            }
+        };
+        self.permissions
+            .set_permission_profile(read_only_profile)
+            .map_err(|error| {
+                format!("permission profile cannot be reduced to read-only: {error}")
+            })?;
+        self.permissions.approval_policy = Constrained::allow_only(AskForApproval::Never);
+        let locked_profile = PermissionProfileState::locked_to_snapshot(
+            self.permissions.permission_profile_state().snapshot(),
+        );
+        self.permissions
+            .set_permission_profile_state(locked_profile);
+        self.extended_workflow.enabled = false;
+        self.agents_enabled = false;
+        for feature in [Feature::Collab, Feature::MultiAgentV2] {
+            self.features.disable(feature).map_err(|error| {
+                format!("feature `{}` cannot be disabled: {error}", feature.key())
+            })?;
+        }
+        self.include_apps_instructions = false;
+        Ok(())
+    }
+
     pub fn sqlite_config(&self) -> &codex_state::SqliteConfig {
         &self.sqlite
     }
 
     pub(crate) fn multi_agent_version_override(&self) -> Option<MultiAgentVersion> {
-        if self.features.enabled(Feature::MultiAgentV2) {
+        let extended_workflow_needs_agents = self.extended_workflow.enabled
+            && ((self.extended_workflow.experts.enabled && self.extended_workflow.experts.max > 0)
+                || (self.extended_workflow.reviewers.enabled
+                    && self.extended_workflow.reviewers.max > 0));
+        if self.features.enabled(Feature::MultiAgentV2) || extended_workflow_needs_agents {
             Some(MultiAgentVersion::V2)
         } else if !self.agents_enabled {
             Some(MultiAgentVersion::Disabled)
@@ -1865,6 +1942,7 @@ impl Config {
             },
             refreshed_config.codex_home.clone(),
             config_layer_stack,
+            refreshed_config.extended_workflow.enabled,
         )
         .await
     }
@@ -1913,6 +1991,7 @@ impl Config {
             ConfigOverrides::default(),
             codex_home,
             ConfigLayerStack::default(),
+            /*extended_workflow_default_enabled*/ false,
         )
         .await
     }
@@ -3196,6 +3275,7 @@ impl Config {
             overrides,
             codex_home,
             config_layer_stack,
+            /*extended_workflow_default_enabled*/ false,
         )
         .await
     }
@@ -3206,6 +3286,7 @@ impl Config {
         overrides: ConfigOverrides,
         codex_home: AbsolutePathBuf,
         config_layer_stack: ConfigLayerStack,
+        extended_workflow_default_enabled: bool,
     ) -> std::io::Result<Self> {
         // Keep the large config-construction future off small test thread stacks.
         Box::pin(async move {
@@ -3710,6 +3791,11 @@ impl Config {
         };
         let code_mode = resolve_code_mode_config(&cfg);
         let multi_agent_v2 = resolve_multi_agent_v2_config(&cfg);
+        let extended_workflow = ExtendedWorkflowConfig::resolve_with_default(
+            cfg.extended_workflow.as_ref(),
+            extended_workflow_default_enabled,
+        )
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
         let token_budget = resolve_token_budget_config(&cfg, &features)?;
         let rollout_budget = resolve_rollout_budget_config(&cfg, &features)?;
         let current_time_reminder = resolve_current_time_reminder_config(&cfg, &features)?;
@@ -4158,6 +4244,7 @@ impl Config {
             agent_default_subagent_reasoning_effort,
             agent_max_depth,
             agent_roles,
+            extended_workflow,
             memories: memories_config,
             agent_interrupt_message_enabled,
             codex_home,

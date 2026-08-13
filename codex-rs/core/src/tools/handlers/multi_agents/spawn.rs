@@ -128,8 +128,10 @@ async fn handle_spawn_agent(
             session.thread_id,
             &turn.session_source,
             child_depth,
-            role_name,
-            /*task_name*/ None,
+            ThreadSpawnMetadata {
+                agent_role: role_name,
+                ..Default::default()
+            },
         )?),
         SpawnAgentOptions {
             fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),

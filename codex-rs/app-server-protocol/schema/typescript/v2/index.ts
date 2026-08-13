@@ -546,6 +546,8 @@ export type { WindowsSandboxSetupMode } from "./WindowsSandboxSetupMode";
 export type { WindowsSandboxSetupStartParams } from "./WindowsSandboxSetupStartParams";
 export type { WindowsSandboxSetupStartResponse } from "./WindowsSandboxSetupStartResponse";
 export type { WindowsWorldWritableWarningNotification } from "./WindowsWorldWritableWarningNotification";
+export type { WorkflowAgentDisplay } from "./WorkflowAgentDisplay";
+export type { WorkflowAgentDisplayStatus } from "./WorkflowAgentDisplayStatus";
 export type { WorkspaceMessage } from "./WorkspaceMessage";
 export type { WorkspaceMessageType } from "./WorkspaceMessageType";
 export type { WriteStatus } from "./WriteStatus";

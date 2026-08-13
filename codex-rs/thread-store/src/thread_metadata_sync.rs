@@ -69,7 +69,7 @@ impl ThreadMetadataSync {
             source: Some(params.source.clone()),
             thread_source: Some(params.thread_source.clone()),
             agent_nickname: Some(params.source.get_nickname()),
-            agent_role: Some(params.source.get_agent_role()),
+            agent_role: Some(params.source.get_agent_display_role()),
             agent_path: Some(params.source.get_agent_path().map(Into::into)),
             cwd: Some(cwd.clone()),
             cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),

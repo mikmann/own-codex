@@ -2860,6 +2860,93 @@ pub enum SubAgentSource {
     Other(String),
 }
 
+#[doc(hidden)]
+pub const EXTENDED_AGENT_ROLE_PREFIX: &str = "__codex_extended_agent__:";
+
+#[derive(Serialize, Deserialize)]
+struct ExtendedThreadSpawnRole {
+    config_role: Option<String>,
+    read_only: bool,
+    workflow_type: Option<String>,
+    workflow_role: Option<String>,
+    #[serde(default)]
+    workflow_name: Option<String>,
+    #[serde(default)]
+    workflow_turn_id: Option<String>,
+    #[serde(default)]
+    assignment_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtendedWorkflowAgentIdentity {
+    pub agent_type: String,
+    pub role: String,
+    pub name: Option<String>,
+    pub workflow_turn_id: Option<String>,
+    pub assignment_sha256: Option<String>,
+}
+
+#[doc(hidden)]
+pub struct ExtendedThreadSpawnRoleMetadata<'a> {
+    pub config_role: Option<&'a str>,
+    pub read_only: bool,
+    pub workflow_type: Option<&'a str>,
+    pub workflow_role: Option<&'a str>,
+    pub workflow_name: Option<&'a str>,
+    pub workflow_turn_id: Option<&'a str>,
+    pub assignment_sha256: Option<&'a str>,
+}
+
+#[doc(hidden)]
+pub fn encode_extended_thread_spawn_role(
+    config_role: Option<&str>,
+    read_only: bool,
+    workflow_type: Option<&str>,
+    workflow_role: Option<&str>,
+) -> Option<String> {
+    encode_extended_thread_spawn_role_metadata(ExtendedThreadSpawnRoleMetadata {
+        config_role,
+        read_only,
+        workflow_type,
+        workflow_role,
+        workflow_name: None,
+        workflow_turn_id: None,
+        assignment_sha256: None,
+    })
+}
+
+#[doc(hidden)]
+pub fn encode_extended_thread_spawn_role_metadata(
+    metadata: ExtendedThreadSpawnRoleMetadata<'_>,
+) -> Option<String> {
+    if !metadata.read_only
+        && metadata.workflow_type.is_none()
+        && metadata.workflow_role.is_none()
+        && metadata.workflow_name.is_none()
+        && metadata.workflow_turn_id.is_none()
+        && metadata.assignment_sha256.is_none()
+    {
+        return metadata.config_role.map(str::to_string);
+    }
+    let encoded = ExtendedThreadSpawnRole {
+        config_role: metadata.config_role.map(str::to_string),
+        read_only: metadata.read_only,
+        workflow_type: metadata.workflow_type.map(str::to_string),
+        workflow_role: metadata.workflow_role.map(str::to_string),
+        workflow_name: metadata.workflow_name.map(str::to_string),
+        workflow_turn_id: metadata.workflow_turn_id.map(str::to_string),
+        assignment_sha256: metadata.assignment_sha256.map(str::to_string),
+    };
+    serde_json::to_string(&encoded)
+        .ok()
+        .map(|encoded| format!("{EXTENDED_AGENT_ROLE_PREFIX}{encoded}"))
+}
+
+fn decode_extended_thread_spawn_role(role: &str) -> Option<ExtendedThreadSpawnRole> {
+    role.strip_prefix(EXTENDED_AGENT_ROLE_PREFIX)
+        .and_then(|encoded| serde_json::from_str(encoded).ok())
+}
+
 impl fmt::Display for SessionSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -2916,10 +3003,68 @@ impl SessionSource {
     pub fn get_agent_role(&self) -> Option<String> {
         match self {
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_role, .. }) => {
-                agent_role.clone()
+                agent_role.as_deref().and_then(|role| {
+                    decode_extended_thread_spawn_role(role)
+                        .and_then(|metadata| metadata.config_role)
+                        .or_else(|| {
+                            (!role.starts_with(EXTENDED_AGENT_ROLE_PREFIX))
+                                .then(|| role.to_string())
+                        })
+                })
             }
             _ => None,
         }
+    }
+
+    pub fn get_agent_display_role(&self) -> Option<String> {
+        match self {
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_role, .. }) => {
+                let role = agent_role.as_deref()?;
+                if let Some(metadata) = decode_extended_thread_spawn_role(role) {
+                    match (metadata.workflow_type, metadata.workflow_role) {
+                        (Some(agent_type), Some(workflow_role)) => {
+                            Some(format!("{agent_type} | {workflow_role}"))
+                        }
+                        _ => metadata.config_role,
+                    }
+                } else if role.starts_with(EXTENDED_AGENT_ROLE_PREFIX) {
+                    None
+                } else {
+                    Some(role.to_string())
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub fn is_read_only_subagent(&self) -> bool {
+        matches!(
+            self,
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                agent_role: Some(agent_role),
+                ..
+            }) if agent_role.starts_with(EXTENDED_AGENT_ROLE_PREFIX)
+                && decode_extended_thread_spawn_role(agent_role)
+                    .is_none_or(|metadata| metadata.read_only)
+        )
+    }
+
+    pub fn get_extended_workflow_agent_identity(&self) -> Option<ExtendedWorkflowAgentIdentity> {
+        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            agent_role: Some(agent_role),
+            ..
+        }) = self
+        else {
+            return None;
+        };
+        let metadata = decode_extended_thread_spawn_role(agent_role)?;
+        Some(ExtendedWorkflowAgentIdentity {
+            agent_type: metadata.workflow_type?,
+            role: metadata.workflow_role?,
+            name: metadata.workflow_name,
+            workflow_turn_id: metadata.workflow_turn_id,
+            assignment_sha256: metadata.assignment_sha256,
+        })
     }
 
     pub fn get_agent_path(&self) -> Option<AgentPath> {
@@ -4354,6 +4499,27 @@ pub enum SubAgentActivityKind {
     Interrupted,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum WorkflowAgentDisplayStatus {
+    Running,
+    Validated,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct WorkflowAgentDisplay {
+    pub name: String,
+    pub agent_type: String,
+    pub role: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reasoning_effort: Option<ReasoningEffortConfig>,
+    pub status: WorkflowAgentDisplayStatus,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 pub struct SubAgentActivityEvent {
     pub event_id: String,
@@ -4364,6 +4530,9 @@ pub struct SubAgentActivityEvent {
     /// Canonical v2 path of the affected sub-agent.
     pub agent_path: AgentPath,
     pub kind: SubAgentActivityKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workflow_agent: Option<WorkflowAgentDisplay>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
@@ -6348,5 +6517,62 @@ mod tests {
                 .expect("new_or_append should return info");
 
         assert_eq!(info.model_context_window, Some(258_400));
+    }
+
+    #[test]
+    fn extended_thread_spawn_role_round_trips_without_changing_protocol_shape() {
+        let encoded = encode_extended_thread_spawn_role(
+            Some("configured_role"),
+            /*read_only*/ true,
+            Some("Expert"),
+            Some("Architecture"),
+        )
+        .expect("encoded metadata");
+        let source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: None,
+            agent_nickname: Some("architecture".to_string()),
+            agent_role: Some(encoded),
+        });
+
+        assert_eq!(source.get_agent_role().as_deref(), Some("configured_role"));
+        assert_eq!(
+            source.get_agent_display_role().as_deref(),
+            Some("Expert | Architecture")
+        );
+        assert!(source.is_read_only_subagent());
+        assert_eq!(
+            serde_json::from_value::<SessionSource>(
+                serde_json::to_value(&source).expect("serialize source")
+            )
+            .expect("deserialize source"),
+            source
+        );
+    }
+
+    #[test]
+    fn legacy_and_malformed_thread_spawn_roles_are_backward_compatible_and_fail_closed() {
+        let legacy = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: Some("reviewer".to_string()),
+        });
+        assert_eq!(legacy.get_agent_role().as_deref(), Some("reviewer"));
+        assert_eq!(legacy.get_agent_display_role().as_deref(), Some("reviewer"));
+        assert!(!legacy.is_read_only_subagent());
+
+        let malformed = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: Some(format!("{EXTENDED_AGENT_ROLE_PREFIX}not-json")),
+        });
+        assert_eq!(malformed.get_agent_role(), None);
+        assert_eq!(malformed.get_agent_display_role(), None);
+        assert!(malformed.is_read_only_subagent());
     }
 }

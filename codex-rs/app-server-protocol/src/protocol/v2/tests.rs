@@ -3067,6 +3067,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         agent_path: codex_protocol::AgentPath::root()
             .join("worker")
             .expect("worker path"),
+        workflow_agent: None,
     });
 
     assert_eq!(
@@ -3076,7 +3077,45 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             kind: SubAgentActivityKind::Interrupted,
             agent_thread_id: receiver_thread_id.to_string(),
             agent_path: "/root/worker".to_string(),
+            workflow_agent: None,
         }
+    );
+    assert_eq!(
+        serde_json::to_value(ThreadItem::SubAgentActivity {
+            id: "activity-1".to_string(),
+            kind: SubAgentActivityKind::Interrupted,
+            agent_thread_id: receiver_thread_id.to_string(),
+            agent_path: "/root/worker".to_string(),
+            workflow_agent: None,
+        })
+        .expect("activity should serialize"),
+        json!({
+            "type": "subAgentActivity",
+            "id": "activity-1",
+            "kind": "interrupted",
+            "agentThreadId": receiver_thread_id.to_string(),
+            "agentPath": "/root/worker",
+            "workflowAgent": null,
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(WorkflowAgentDisplay {
+            name: "eulenmann".to_string(),
+            agent_type: "Expert".to_string(),
+            role: "Architecture".to_string(),
+            model: "gpt-test".to_string(),
+            reasoning_effort: None,
+            status: WorkflowAgentDisplayStatus::Validated,
+        })
+        .expect("workflow display should serialize"),
+        json!({
+            "name": "eulenmann",
+            "agentType": "Expert",
+            "role": "Architecture",
+            "model": "gpt-test",
+            "reasoningEffort": null,
+            "status": "validated",
+        })
     );
 
     let search_item = TurnItem::WebSearch(CoreWebSearchItem {

@@ -33,6 +33,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::ErrorEvent;
@@ -50,6 +51,7 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::protocol::encode_extended_thread_spawn_role;
 use codex_thread_store::ArchiveThreadParams;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::LocalThreadStore;
@@ -644,8 +646,18 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
     ));
 }
 
-#[tokio::test]
-async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
+#[test]
+fn ensure_v2_agent_loaded_reloads_registered_read_only_workflow_agent() {
+    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+    let handle = std::thread::Builder::new()
+        .name("ensure_v2_agent_loaded_reloads_registered_read_only_workflow_agent".to_string())
+        .stack_size(TEST_STACK_SIZE_BYTES)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime");
+            runtime.block_on(async {
     let (home, mut config) = test_config().await;
     let _ = config.features.enable(Feature::MultiAgentV2);
     let _ = config.features.enable(Feature::Sqlite);
@@ -655,6 +667,10 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
     let agent_path = AgentPath::try_from("/root/worker").expect("agent path");
     let mut child_config = harness.config.clone();
     child_config.model = Some("gpt-5.6-luna".to_string());
+    child_config.model_reasoning_effort = Some(ReasoningEffort::High);
+    child_config
+        .apply_read_only_subagent_ceiling()
+        .expect("read-only workflow child config");
     let spawned_agent = harness
         .control
         .spawn_agent_with_metadata(
@@ -665,7 +681,12 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
                 depth: 1,
                 agent_path: Some(agent_path.clone()),
                 agent_nickname: None,
-                agent_role: None,
+                agent_role: encode_extended_thread_spawn_role(
+                    None,
+                    /*read_only*/ true,
+                    Some("Expert"),
+                    Some("Architecture"),
+                ),
             })),
             SpawnAgentOptions {
                 parent_thread_id: Some(parent_thread_id),
@@ -679,6 +700,10 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         .get_thread(spawned_agent.thread_id)
         .await
         .expect("child thread should exist");
+    assert_eq!(
+        child_thread.multi_agent_version(),
+        Some(MultiAgentVersion::V2)
+    );
     child_thread
         .inject_response_items(vec![assistant_message(
             "child persisted",
@@ -714,6 +739,7 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
     }
 
     let mut sender_config = harness.config.clone();
+    sender_config.model_reasoning_effort = Some(ReasoningEffort::Ultra);
     sender_config.model_provider_id = "ollama".to_string();
     sender_config.model_provider = sender_config
         .model_providers
@@ -731,14 +757,32 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         .get_thread(spawned_agent.thread_id)
         .await
         .expect("reloaded child thread should exist");
+    let reloaded_snapshot = reloaded_child.config_snapshot().await;
     assert_eq!(
-        reloaded_child.config_snapshot().await.model,
-        "gpt-5.6-luna",
+        reloaded_child.multi_agent_version(),
+        Some(MultiAgentVersion::V2)
+    );
+    assert_eq!(reloaded_snapshot.approval_policy, AskForApproval::Never);
+    assert_eq!(
+        reloaded_snapshot.permission_profile,
+        PermissionProfile::read_only()
+    );
+    assert!(reloaded_snapshot.session_source.is_read_only_subagent());
+    let reloaded_config = reloaded_child.config().await;
+    assert!(!reloaded_config.agents_enabled);
+    assert!(!reloaded_config.extended_workflow.enabled);
+    assert_eq!(
+        reloaded_snapshot.model, "gpt-5.6-luna",
         "residency reload must preserve the worker model instead of inheriting its parent model",
     );
     assert_eq!(
+        reloaded_snapshot.reasoning_effort,
+        Some(ReasoningEffort::High),
+        "residency reload must preserve the worker reasoning effort instead of inheriting its sender's effort",
+    );
+    assert_eq!(
         (
-            reloaded_child.config_snapshot().await.model_provider_id,
+            reloaded_snapshot.model_provider_id,
             reloaded_child
                 .session
                 .new_default_turn()
@@ -781,6 +825,12 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         .into_iter()
         .find(|entry| *entry == expected);
     assert_eq!(captured, Some(expected));
+            });
+        })
+        .expect("spawn LRU reload regression test thread");
+    handle
+        .join()
+        .expect("LRU reload regression test thread panicked");
 }
 
 #[tokio::test]
@@ -887,13 +937,14 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
     assert_thread_not_loaded(&resumed_manager, sibling_thread_id).await;
     resumed_control
         .restore_v2_agent_metadata(&harness.config, parent_thread_id)
-        .await;
+        .await
+        .expect("persisted V2 metadata should restore");
     for thread_id in [worker_thread_id, sibling_thread_id] {
         assert!(resumed_control.ensure_agent_known(thread_id).is_ok());
     }
 
     resumed_control
-        .close_agent(worker_thread_id)
+        .close_agent(parent_thread_id, worker_thread_id)
         .await
         .expect("closing a restored sibling should succeed");
 
@@ -902,6 +953,67 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
     assert!(closed_worker.is_err());
     assert!(surviving_sibling.is_ok());
     assert_thread_not_loaded(&resumed_manager, sibling_thread_id).await;
+}
+
+#[tokio::test]
+async fn closing_agent_path_rejects_new_input_before_shutdown() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    let child_thread_id = harness
+        .spawn_anonymous_child(parent_thread_id, SpawnAgentOptions::default())
+        .await;
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should exist");
+    persist_thread_for_tree_resume(&parent_thread, "parent persisted").await;
+    persist_thread_for_tree_resume(&child_thread, "child persisted").await;
+
+    let graph_store = harness
+        .control
+        .upgrade()
+        .expect("thread manager state")
+        .agent_graph_store()
+        .expect("persistent agent graph store");
+    let close = graph_store
+        .begin_thread_spawn_subtree_close(parent_thread_id, parent_thread_id, child_thread_id)
+        .await
+        .expect("close reservation should be readable")
+        .expect("child close should be authorized");
+    assert_eq!(close.thread_ids_deepest_first, vec![child_thread_id]);
+
+    let error = harness
+        .control
+        .send_input(
+            child_thread_id,
+            text_input("must not be delivered"),
+            /*parent_turn_id*/ None,
+        )
+        .await
+        .expect_err("closing child must reject new input");
+    assert_matches!(
+        error.details(),
+        CodexErrorDetails::UnsupportedOperation(message)
+            if message.contains("closing or closed")
+    );
+
+    assert!(
+        graph_store
+            .finish_thread_spawn_subtree_close(child_thread_id)
+            .await
+            .expect("close should finish")
+    );
+    harness
+        .control
+        .shutdown_live_agent(child_thread_id)
+        .await
+        .expect("child cleanup should succeed");
+    harness
+        .control
+        .shutdown_live_agent(parent_thread_id)
+        .await
+        .expect("parent cleanup should succeed");
 }
 
 #[tokio::test]
@@ -3721,7 +3833,7 @@ async fn shutdown_agent_tree_closes_descendants_when_started_at_child() {
 
     let _ = harness
         .control
-        .close_agent(child_thread_id)
+        .close_agent(parent_thread_id, child_thread_id)
         .await
         .expect("child close should succeed");
 
@@ -3813,7 +3925,7 @@ async fn resume_agent_from_rollout_does_not_reopen_closed_descendants() {
 
     let _ = harness
         .control
-        .close_agent(child_thread_id)
+        .close_agent(parent_thread_id, child_thread_id)
         .await
         .expect("child close should succeed");
     let _ = harness
@@ -3908,7 +4020,7 @@ async fn resume_closed_child_reopens_open_descendants() {
 
     let _ = harness
         .control
-        .close_agent(child_thread_id)
+        .close_agent(parent_thread_id, child_thread_id)
         .await
         .expect("child close should succeed");
 
@@ -3939,7 +4051,7 @@ async fn resume_closed_child_reopens_open_descendants() {
 
     let _ = harness
         .control
-        .close_agent(child_thread_id)
+        .close_agent(parent_thread_id, child_thread_id)
         .await
         .expect("child close after resume should succeed");
     let _ = harness

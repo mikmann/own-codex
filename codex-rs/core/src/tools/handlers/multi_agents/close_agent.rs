@@ -1,6 +1,5 @@
 use super::*;
 use crate::tools::handlers::multi_agents_spec::create_close_agent_tool_v1;
-use codex_protocol::error::CodexErrorDetails;
 use codex_tools::ToolSpec;
 
 pub(crate) struct Handler;
@@ -39,9 +38,12 @@ async fn handle_close_agent(
     let arguments = function_arguments(payload)?;
     let args: CloseAgentArgs = parse_arguments(&arguments)?;
     let agent_id = parse_agent_id_target(&args.target)?;
-    let receiver_agent = session.services.agent_control.get_agent_metadata(agent_id);
-    let known_agent = receiver_agent.is_some();
-    let receiver_agent = receiver_agent.unwrap_or_default();
+    if agent_id == session.thread_id {
+        return Err(FunctionCallError::RespondToModel(
+            "an agent cannot close itself; return your result and let the parent close you if needed"
+                .to_string(),
+        ));
+    }
     session
         .emit_turn_item_started(
             &turn,
@@ -59,73 +61,44 @@ async fn handle_close_agent(
             }),
         )
         .await;
-    let status = match session
-        .services
-        .agent_control
-        .subscribe_status(agent_id)
-        .await
-    {
-        Ok(mut status_rx) => status_rx.borrow_and_update().clone(),
-        Err(err)
-            if known_agent && matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) =>
-        {
-            session.services.agent_control.get_status(agent_id).await
-        }
-        Err(err) => {
-            let status = session.services.agent_control.get_status(agent_id).await;
-            session
-                .emit_turn_item_completed(
-                    &turn,
-                    TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
-                        id: call_id.clone(),
-                        tool: CollabAgentTool::CloseAgent,
-                        status: collab_tool_call_status(&status, Some(agent_id)),
-                        sender_thread_id: session.thread_id(),
-                        receiver_thread_ids: vec![agent_id],
-                        receiver_agents: vec![CollabAgentRef {
-                            thread_id: agent_id,
-                            agent_nickname: receiver_agent.agent_nickname.clone(),
-                            agent_role: receiver_agent.agent_role.clone(),
-                        }],
-                        prompt: None,
-                        model: None,
-                        reasoning_effort: None,
-                        agents_states: [(agent_id, status)].into_iter().collect(),
-                    }),
-                )
-                .await;
-            return Err(collab_agent_error(agent_id, err));
-        }
+    let close_result = Box::pin(
+        session
+            .services
+            .agent_control
+            .close_agent(session.thread_id, agent_id),
+    )
+    .await;
+    let (tool_status, previous_status) = match &close_result {
+        Ok(outcome) => (
+            CollabAgentToolCallStatus::Completed,
+            Some(outcome.previous_status.clone()),
+        ),
+        Err(_) => (CollabAgentToolCallStatus::Failed, None),
     };
-    let result = Box::pin(session.services.agent_control.close_agent(agent_id))
-        .await
-        .map_err(|err| collab_agent_error(agent_id, err))
-        .map(|_| ());
     session
         .emit_turn_item_completed(
             &turn,
             TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
                 id: call_id,
                 tool: CollabAgentTool::CloseAgent,
-                status: collab_tool_call_status(&status, Some(agent_id)),
+                status: tool_status,
                 sender_thread_id: session.thread_id,
                 receiver_thread_ids: vec![agent_id],
-                receiver_agents: vec![CollabAgentRef {
-                    thread_id: agent_id,
-                    agent_nickname: receiver_agent.agent_nickname,
-                    agent_role: receiver_agent.agent_role,
-                }],
+                receiver_agents: Vec::new(),
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
-                agents_states: [(agent_id, status.clone())].into_iter().collect(),
+                agents_states: previous_status
+                    .clone()
+                    .map(|status| [(agent_id, status)].into_iter().collect())
+                    .unwrap_or_default(),
             }),
         )
         .await;
-    result?;
+    close_result.map_err(|err| close_agent_error(agent_id, err))?;
 
     Ok(CloseAgentResult {
-        previous_status: status,
+        previous_status: previous_status.unwrap_or(AgentStatus::NotFound),
     })
 }
 

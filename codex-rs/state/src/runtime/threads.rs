@@ -4,6 +4,85 @@ use codex_protocol::protocol::SessionSource;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 
+async fn thread_spawn_path_is_open_in_executor<'e, E>(
+    executor: E,
+    thread_id: ThreadId,
+    missing_is_open: bool,
+) -> anyhow::Result<bool>
+where
+    E: sqlx::Executor<'e, Database = Sqlite>,
+{
+    let row = sqlx::query(
+        r#"
+WITH RECURSIVE ancestors(child_thread_id, parent_thread_id, status) AS (
+    SELECT child_thread_id, parent_thread_id, status
+    FROM thread_spawn_edges
+    WHERE child_thread_id = ?
+    UNION
+    SELECT edge.child_thread_id, edge.parent_thread_id, edge.status
+    FROM thread_spawn_edges AS edge
+    JOIN ancestors ON edge.child_thread_id = ancestors.parent_thread_id
+)
+SELECT
+    COUNT(*) AS edge_count,
+    COALESCE(SUM(CASE WHEN status = ? THEN 0 ELSE 1 END), 0) AS non_open_count
+FROM ancestors
+        "#,
+    )
+    .bind(thread_id.to_string())
+    .bind(crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref())
+    .fetch_one(executor)
+    .await?;
+    let edge_count = row.try_get::<i64, _>("edge_count")?;
+    let non_open_count = row.try_get::<i64, _>("non_open_count")?;
+    Ok((missing_is_open || edge_count > 0) && non_open_count == 0)
+}
+
+async fn thread_spawn_path_is_open_from_root_in_executor<'e, E>(
+    executor: E,
+    root_thread_id: ThreadId,
+    thread_id: ThreadId,
+) -> anyhow::Result<bool>
+where
+    E: sqlx::Executor<'e, Database = Sqlite>,
+{
+    let row = sqlx::query(
+        r#"
+WITH RECURSIVE ancestors(child_thread_id, parent_thread_id, status, path) AS (
+    SELECT child_thread_id, parent_thread_id, status, ',' || child_thread_id || ','
+    FROM thread_spawn_edges
+    WHERE child_thread_id = ?
+    UNION ALL
+    SELECT edge.child_thread_id, edge.parent_thread_id, edge.status,
+           ancestors.path || edge.child_thread_id || ','
+    FROM thread_spawn_edges AS edge
+    JOIN ancestors ON edge.child_thread_id = ancestors.parent_thread_id
+    WHERE instr(ancestors.path, ',' || edge.child_thread_id || ',') = 0
+)
+SELECT
+    COUNT(*) AS edge_count,
+    COALESCE(SUM(CASE WHEN status = ? THEN 0 ELSE 1 END), 0) AS non_open_count,
+    COALESCE(SUM(CASE WHEN parent_thread_id = ? THEN 1 ELSE 0 END), 0) AS root_parent_count,
+    COALESCE(SUM(CASE WHEN child_thread_id = ? THEN 1 ELSE 0 END), 0) AS root_child_count
+FROM ancestors
+        "#,
+    )
+    .bind(thread_id.to_string())
+    .bind(crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref())
+    .bind(root_thread_id.to_string())
+    .bind(root_thread_id.to_string())
+    .fetch_one(executor)
+    .await?;
+    let edge_count = row.try_get::<i64, _>("edge_count")?;
+    let non_open_count = row.try_get::<i64, _>("non_open_count")?;
+    let root_parent_count = row.try_get::<i64, _>("root_parent_count")?;
+    let root_child_count = row.try_get::<i64, _>("root_child_count")?;
+    if thread_id == root_thread_id {
+        return Ok(edge_count == 0);
+    }
+    Ok(edge_count > 0 && non_open_count == 0 && root_parent_count == 1 && root_child_count == 0)
+}
+
 impl StateRuntime {
     pub async fn get_thread(&self, id: ThreadId) -> anyhow::Result<Option<crate::ThreadMetadata>> {
         let row = sqlx::query(
@@ -135,6 +214,361 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
         Ok(())
     }
 
+    /// Insert an open spawn edge only while both the parent and child remain openable.
+    ///
+    /// Existing closing or closed child edges are never reopened. The parent check and insert run
+    /// in one SQLite transaction so a concurrent lifecycle transition cannot publish a child
+    /// beneath a closing subtree.
+    pub async fn ensure_thread_spawn_edge_open(
+        &self,
+        root_thread_id: ThreadId,
+        parent_thread_id: ThreadId,
+        child_thread_id: ThreadId,
+    ) -> anyhow::Result<bool> {
+        if parent_thread_id == child_thread_id || child_thread_id == root_thread_id {
+            return Ok(false);
+        }
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let parent_path_open = thread_spawn_path_is_open_from_root_in_executor(
+            &mut *transaction,
+            root_thread_id,
+            parent_thread_id,
+        )
+        .await?;
+        let existing_child = sqlx::query(
+            "SELECT parent_thread_id, status FROM thread_spawn_edges WHERE child_thread_id = ?",
+        )
+        .bind(child_thread_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(existing_child) = existing_child {
+            let existing_parent = existing_child.try_get::<String, _>("parent_thread_id")?;
+            let existing_status = existing_child.try_get::<String, _>("status")?;
+            transaction.commit().await?;
+            return Ok(existing_parent == parent_thread_id.to_string()
+                && existing_status == crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref()
+                && parent_path_open);
+        }
+
+        let creates_cycle = sqlx::query_scalar::<_, i64>(
+            r#"
+WITH RECURSIVE subtree(child_thread_id) AS (
+    SELECT child_thread_id
+    FROM thread_spawn_edges
+    WHERE parent_thread_id = ?
+    UNION
+    SELECT edge.child_thread_id
+    FROM thread_spawn_edges AS edge
+    JOIN subtree ON edge.parent_thread_id = subtree.child_thread_id
+)
+SELECT EXISTS(SELECT 1 FROM subtree WHERE child_thread_id = ?)
+            "#,
+        )
+        .bind(child_thread_id.to_string())
+        .bind(parent_thread_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?
+            != 0;
+        if !parent_path_open || creates_cycle {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+
+        sqlx::query(
+            r#"
+INSERT INTO thread_spawn_edges (
+    parent_thread_id,
+    child_thread_id,
+    status
+) VALUES (?, ?, ?)
+            "#,
+        )
+        .bind(parent_thread_id.to_string())
+        .bind(child_thread_id.to_string())
+        .bind(crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+
+    /// Return the lifecycle status for a spawned thread's incoming edge.
+    pub async fn thread_spawn_edge_status(
+        &self,
+        child_thread_id: ThreadId,
+    ) -> anyhow::Result<Option<crate::DirectionalThreadSpawnEdgeStatus>> {
+        let status = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM thread_spawn_edges WHERE child_thread_id = ?",
+        )
+        .bind(child_thread_id.to_string())
+        .fetch_optional(self.pool.as_ref())
+        .await?;
+        status
+            .map(|status| status.parse().map_err(Into::into))
+            .transpose()
+    }
+
+    /// Return whether the thread's incoming edge and every ancestor edge remain open.
+    pub async fn thread_spawn_path_is_open(&self, thread_id: ThreadId) -> anyhow::Result<bool> {
+        thread_spawn_path_is_open_in_executor(
+            self.pool.as_ref(),
+            thread_id,
+            /*missing_is_open*/ false,
+        )
+        .await
+    }
+
+    /// Atomically prove strict ancestry and reserve a close transition for the target edge.
+    pub async fn begin_thread_spawn_subtree_close(
+        &self,
+        root_thread_id: ThreadId,
+        caller_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+    ) -> anyhow::Result<Option<(crate::DirectionalThreadSpawnEdgeStatus, Vec<ThreadId>)>> {
+        if caller_thread_id == target_thread_id || target_thread_id == root_thread_id {
+            return Ok(None);
+        }
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if !thread_spawn_path_is_open_from_root_in_executor(
+            &mut *transaction,
+            root_thread_id,
+            caller_thread_id,
+        )
+        .await?
+        {
+            transaction.commit().await?;
+            return Ok(None);
+        }
+        let authorized = sqlx::query_scalar::<_, i64>(
+            r#"
+WITH RECURSIVE subtree(child_thread_id, path) AS (
+    SELECT child_thread_id, ',' || child_thread_id || ','
+    FROM thread_spawn_edges
+    WHERE parent_thread_id = ?
+      AND (child_thread_id = ? OR status = ?)
+    UNION ALL
+    SELECT edge.child_thread_id, subtree.path || edge.child_thread_id || ','
+    FROM thread_spawn_edges AS edge
+    JOIN subtree ON edge.parent_thread_id = subtree.child_thread_id
+    WHERE instr(subtree.path, ',' || edge.child_thread_id || ',') = 0
+      AND (edge.child_thread_id = ? OR edge.status = ?)
+)
+SELECT EXISTS(
+    SELECT 1 FROM subtree WHERE child_thread_id = ?
+)
+            "#,
+        )
+        .bind(caller_thread_id.to_string())
+        .bind(target_thread_id.to_string())
+        .bind(crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref())
+        .bind(target_thread_id.to_string())
+        .bind(crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref())
+        .bind(target_thread_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?
+            != 0;
+        if !authorized {
+            transaction.commit().await?;
+            return Ok(None);
+        }
+
+        let Some(previous_status) = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM thread_spawn_edges WHERE child_thread_id = ?",
+        )
+        .bind(target_thread_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let previous_status = previous_status.parse()?;
+        if previous_status == crate::DirectionalThreadSpawnEdgeStatus::Open {
+            sqlx::query(
+                "UPDATE thread_spawn_edges SET status = ? WHERE child_thread_id = ? AND status = ?",
+            )
+            .bind(crate::DirectionalThreadSpawnEdgeStatus::Closing.as_ref())
+            .bind(target_thread_id.to_string())
+            .bind(crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref())
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        let rows = sqlx::query(
+            r#"
+WITH RECURSIVE subtree(child_thread_id, depth, path) AS (
+    SELECT ?, 0, ',' || ? || ','
+    UNION ALL
+    SELECT edge.child_thread_id, subtree.depth + 1, subtree.path || edge.child_thread_id || ','
+    FROM thread_spawn_edges AS edge
+    JOIN subtree ON edge.parent_thread_id = subtree.child_thread_id
+    WHERE instr(subtree.path, ',' || edge.child_thread_id || ',') = 0
+)
+SELECT child_thread_id
+FROM subtree
+ORDER BY depth DESC, child_thread_id ASC
+            "#,
+        )
+        .bind(target_thread_id.to_string())
+        .bind(target_thread_id.to_string())
+        .fetch_all(&mut *transaction)
+        .await?;
+        let thread_ids = rows
+            .into_iter()
+            .map(|row| {
+                ThreadId::try_from(row.try_get::<String, _>("child_thread_id")?).map_err(Into::into)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        transaction.commit().await?;
+        Ok(Some((previous_status, thread_ids)))
+    }
+
+    /// Complete a target edge's close transition without changing descendant edge states.
+    pub async fn finish_thread_spawn_subtree_close(
+        &self,
+        target_thread_id: ThreadId,
+    ) -> anyhow::Result<bool> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let Some(status) = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM thread_spawn_edges WHERE child_thread_id = ?",
+        )
+        .bind(target_thread_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        else {
+            transaction.commit().await?;
+            return Ok(false);
+        };
+        let status = status.parse()?;
+        let completed = match status {
+            crate::DirectionalThreadSpawnEdgeStatus::Closing => sqlx::query(
+                "UPDATE thread_spawn_edges SET status = ? WHERE child_thread_id = ? AND status = ?",
+            )
+            .bind(crate::DirectionalThreadSpawnEdgeStatus::Closed.as_ref())
+            .bind(target_thread_id.to_string())
+            .bind(crate::DirectionalThreadSpawnEdgeStatus::Closing.as_ref())
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected()
+                == 1,
+            crate::DirectionalThreadSpawnEdgeStatus::Closed => true,
+            crate::DirectionalThreadSpawnEdgeStatus::Open => false,
+        };
+        transaction.commit().await?;
+        Ok(completed)
+    }
+
+    /// Reopen one authorized closed target edge without changing its parent or descendants.
+    pub async fn reopen_closed_thread_spawn_edge(
+        &self,
+        root_thread_id: ThreadId,
+        caller_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+    ) -> anyhow::Result<bool> {
+        if caller_thread_id == target_thread_id || target_thread_id == root_thread_id {
+            return Ok(false);
+        }
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if !thread_spawn_path_is_open_from_root_in_executor(
+            &mut *transaction,
+            root_thread_id,
+            caller_thread_id,
+        )
+        .await?
+        {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+        let authorized = sqlx::query_scalar::<_, i64>(
+            r#"
+WITH RECURSIVE subtree(child_thread_id, path) AS (
+    SELECT child_thread_id, ',' || child_thread_id || ','
+    FROM thread_spawn_edges
+    WHERE parent_thread_id = ?
+      AND (child_thread_id = ? OR status = ?)
+    UNION ALL
+    SELECT edge.child_thread_id, subtree.path || edge.child_thread_id || ','
+    FROM thread_spawn_edges AS edge
+    JOIN subtree ON edge.parent_thread_id = subtree.child_thread_id
+    WHERE instr(subtree.path, ',' || edge.child_thread_id || ',') = 0
+      AND (edge.child_thread_id = ? OR edge.status = ?)
+)
+SELECT EXISTS(SELECT 1 FROM subtree WHERE child_thread_id = ?)
+            "#,
+        )
+        .bind(caller_thread_id.to_string())
+        .bind(target_thread_id.to_string())
+        .bind(crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref())
+        .bind(target_thread_id.to_string())
+        .bind(crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref())
+        .bind(target_thread_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?
+            != 0;
+        if !authorized {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+        let status = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM thread_spawn_edges WHERE child_thread_id = ?",
+        )
+        .bind(target_thread_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?
+        .parse()?;
+        let reopened = match status {
+            crate::DirectionalThreadSpawnEdgeStatus::Open => true,
+            crate::DirectionalThreadSpawnEdgeStatus::Closing => false,
+            crate::DirectionalThreadSpawnEdgeStatus::Closed => sqlx::query(
+                "UPDATE thread_spawn_edges SET status = ? WHERE child_thread_id = ? AND status = ?",
+            )
+            .bind(crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref())
+            .bind(target_thread_id.to_string())
+            .bind(crate::DirectionalThreadSpawnEdgeStatus::Closed.as_ref())
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected()
+                == 1,
+        };
+        transaction.commit().await?;
+        Ok(reopened)
+    }
+
+    /// List all closing target edges below a root while traversing every descendant status.
+    pub async fn list_closing_thread_spawn_targets(
+        &self,
+        root_thread_id: ThreadId,
+    ) -> anyhow::Result<Vec<ThreadId>> {
+        let rows = sqlx::query(
+            r#"
+WITH RECURSIVE subtree(child_thread_id, status, depth, path) AS (
+    SELECT child_thread_id, status, 1, ',' || child_thread_id || ','
+    FROM thread_spawn_edges
+    WHERE parent_thread_id = ?
+    UNION ALL
+    SELECT edge.child_thread_id, edge.status, subtree.depth + 1,
+           subtree.path || edge.child_thread_id || ','
+    FROM thread_spawn_edges AS edge
+    JOIN subtree ON edge.parent_thread_id = subtree.child_thread_id
+    WHERE instr(subtree.path, ',' || edge.child_thread_id || ',') = 0
+)
+SELECT child_thread_id
+FROM subtree
+WHERE status = ?
+ORDER BY depth DESC, child_thread_id ASC
+            "#,
+        )
+        .bind(root_thread_id.to_string())
+        .bind(crate::DirectionalThreadSpawnEdgeStatus::Closing.as_ref())
+        .fetch_all(self.pool.as_ref())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                ThreadId::try_from(row.try_get::<String, _>("child_thread_id")?).map_err(Into::into)
+            })
+            .collect()
+    }
+
     /// List direct spawned children of `parent_thread_id` whose edge matches `status`.
     pub async fn list_thread_spawn_children_with_status(
         &self,
@@ -175,6 +609,242 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
     ) -> anyhow::Result<Vec<ThreadId>> {
         self.list_thread_spawn_descendants_matching(root_thread_id, /*status*/ None)
             .await
+    }
+
+    /// Atomically reserve one of at most two validation submissions for one root turn.
+    pub async fn begin_workflow_validation(
+        &self,
+        submission: crate::WorkflowValidationSubmission,
+    ) -> anyhow::Result<crate::WorkflowValidationDecision> {
+        anyhow::ensure!(!submission.turn_id.is_empty() && submission.turn_id.len() <= 128);
+        anyhow::ensure!(
+            !submission.validation_key.is_empty() && submission.validation_key.len() <= 512
+        );
+        anyhow::ensure!(!submission.result_kind.is_empty() && submission.result_kind.len() <= 32);
+        anyhow::ensure!(submission.output_sha256.len() == 64);
+        anyhow::ensure!(
+            submission
+                .reviewer_role
+                .as_ref()
+                .is_none_or(|role| !role.is_empty() && role.len() <= 256)
+        );
+
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let existing = sqlx::query(
+            r#"
+SELECT submissions, accepted, result_kind, reviewer_pass, review_cycles,
+       output_revision, output_sha256
+FROM extended_workflow_validations
+WHERE root_thread_id = ? AND turn_id = ? AND validation_key = ?
+            "#,
+        )
+        .bind(submission.root_thread_id.to_string())
+        .bind(&submission.turn_id)
+        .bind(&submission.validation_key)
+        .fetch_optional(&mut *transaction)
+        .await?;
+
+        let decision = if let Some(existing) = existing {
+            let submissions = u8::try_from(existing.try_get::<i64, _>("submissions")?)?;
+            let accepted = existing.try_get::<i64, _>("accepted")? != 0;
+            let existing_result_kind = existing.try_get::<String, _>("result_kind")?;
+            let reviewer_pass = existing.try_get::<i64, _>("reviewer_pass")? != 0;
+            let review_cycles = u8::try_from(existing.try_get::<i64, _>("review_cycles")?)?;
+            let previous_revision = u32::try_from(existing.try_get::<i64, _>("output_revision")?)?;
+            let previous_sha256 = existing.try_get::<String, _>("output_sha256")?;
+            if accepted
+                && existing_result_kind == "reviewer"
+                && !reviewer_pass
+                && review_cycles >= 2
+            {
+                crate::WorkflowValidationDecision::Exhausted(2)
+            } else if accepted && (existing_result_kind != "reviewer" || reviewer_pass) {
+                crate::WorkflowValidationDecision::AlreadyAccepted(submissions)
+            } else if accepted && submission.output_revision <= previous_revision {
+                crate::WorkflowValidationDecision::UnchangedCorrection(submissions)
+            } else if accepted {
+                sqlx::query(
+                    r#"
+UPDATE extended_workflow_validations
+SET submissions = 1, accepted = 0, result_kind = ?, agent_thread_id = ?,
+    reviewer_role = ?, output_revision = ?, output_sha256 = ?, reviewer_pass = 0,
+    has_high_or_critical = 0
+WHERE root_thread_id = ? AND turn_id = ? AND validation_key = ? AND accepted = 1
+                    "#,
+                )
+                .bind(&submission.result_kind)
+                .bind(
+                    submission
+                        .agent_thread_id
+                        .map(|thread_id| thread_id.to_string()),
+                )
+                .bind(&submission.reviewer_role)
+                .bind(i64::from(submission.output_revision))
+                .bind(&submission.output_sha256)
+                .bind(submission.root_thread_id.to_string())
+                .bind(&submission.turn_id)
+                .bind(&submission.validation_key)
+                .execute(&mut *transaction)
+                .await?;
+                crate::WorkflowValidationDecision::Attempt(1)
+            } else if submissions >= 2 {
+                crate::WorkflowValidationDecision::Exhausted(submissions)
+            } else if (submission.requires_higher_revision
+                && submission.output_revision <= previous_revision)
+                || (!submission.requires_higher_revision
+                    && submission.output_sha256 == previous_sha256)
+            {
+                sqlx::query(
+                    r#"
+UPDATE extended_workflow_validations
+SET submissions = 2
+WHERE root_thread_id = ? AND turn_id = ? AND validation_key = ? AND submissions = 1
+                    "#,
+                )
+                .bind(submission.root_thread_id.to_string())
+                .bind(&submission.turn_id)
+                .bind(&submission.validation_key)
+                .execute(&mut *transaction)
+                .await?;
+                crate::WorkflowValidationDecision::UnchangedCorrection(2)
+            } else {
+                let next_submission = submissions + 1;
+                sqlx::query(
+                    r#"
+UPDATE extended_workflow_validations
+SET submissions = ?, result_kind = ?, agent_thread_id = ?, reviewer_role = ?,
+    output_revision = ?, output_sha256 = ?
+WHERE root_thread_id = ? AND turn_id = ? AND validation_key = ? AND accepted = 0
+                    "#,
+                )
+                .bind(i64::from(next_submission))
+                .bind(&submission.result_kind)
+                .bind(
+                    submission
+                        .agent_thread_id
+                        .map(|thread_id| thread_id.to_string()),
+                )
+                .bind(&submission.reviewer_role)
+                .bind(i64::from(submission.output_revision))
+                .bind(&submission.output_sha256)
+                .bind(submission.root_thread_id.to_string())
+                .bind(&submission.turn_id)
+                .bind(&submission.validation_key)
+                .execute(&mut *transaction)
+                .await?;
+                crate::WorkflowValidationDecision::Attempt(next_submission)
+            }
+        } else {
+            let result_count = sqlx::query_scalar::<_, i64>(
+                r#"
+SELECT COUNT(*) FROM extended_workflow_validations
+WHERE root_thread_id = ? AND turn_id = ?
+                "#,
+            )
+            .bind(submission.root_thread_id.to_string())
+            .bind(&submission.turn_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if result_count >= 16 {
+                crate::WorkflowValidationDecision::ResultLimitReached
+            } else {
+                sqlx::query(
+                    r#"
+INSERT INTO extended_workflow_validations (
+    root_thread_id, turn_id, validation_key, result_kind, agent_thread_id,
+    reviewer_role, submissions, output_revision, output_sha256
+) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    "#,
+                )
+                .bind(submission.root_thread_id.to_string())
+                .bind(&submission.turn_id)
+                .bind(&submission.validation_key)
+                .bind(&submission.result_kind)
+                .bind(
+                    submission
+                        .agent_thread_id
+                        .map(|thread_id| thread_id.to_string()),
+                )
+                .bind(&submission.reviewer_role)
+                .bind(i64::from(submission.output_revision))
+                .bind(&submission.output_sha256)
+                .execute(&mut *transaction)
+                .await?;
+                crate::WorkflowValidationDecision::Attempt(1)
+            }
+        };
+        transaction.commit().await?;
+        Ok(decision)
+    }
+
+    /// Mark the exact reserved submission as accepted.
+    pub async fn complete_workflow_validation(
+        &self,
+        completion: crate::WorkflowValidationCompletion,
+    ) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            r#"
+UPDATE extended_workflow_validations
+SET accepted = 1, reviewer_pass = ?, has_high_or_critical = ?,
+    review_cycles = review_cycles + CASE WHEN result_kind = 'reviewer' THEN 1 ELSE 0 END
+WHERE root_thread_id = ? AND turn_id = ? AND validation_key = ?
+  AND submissions = ? AND output_revision = ? AND output_sha256 = ? AND accepted = 0
+            "#,
+        )
+        .bind(if completion.reviewer_pass {
+            1_i64
+        } else {
+            0_i64
+        })
+        .bind(if completion.has_high_or_critical {
+            1_i64
+        } else {
+            0_i64
+        })
+        .bind(completion.root_thread_id.to_string())
+        .bind(completion.turn_id)
+        .bind(completion.validation_key)
+        .bind(i64::from(completion.submission))
+        .bind(i64::from(completion.output_revision))
+        .bind(completion.output_sha256)
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Return all accepted reviewer validations for a root turn in stable role/thread order.
+    pub async fn list_workflow_reviewer_validations(
+        &self,
+        root_thread_id: ThreadId,
+        turn_id: &str,
+    ) -> anyhow::Result<Vec<crate::WorkflowReviewerValidation>> {
+        let rows = sqlx::query(
+            r#"
+SELECT agent_thread_id, reviewer_role, output_revision, output_sha256,
+       reviewer_pass, has_high_or_critical
+FROM extended_workflow_validations
+WHERE root_thread_id = ? AND turn_id = ? AND result_kind = 'reviewer' AND accepted = 1
+ORDER BY reviewer_role, agent_thread_id
+            "#,
+        )
+        .bind(root_thread_id.to_string())
+        .bind(turn_id)
+        .fetch_all(self.pool.as_ref())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(crate::WorkflowReviewerValidation {
+                    agent_thread_id: ThreadId::try_from(
+                        row.try_get::<String, _>("agent_thread_id")?,
+                    )?,
+                    role: row.try_get("reviewer_role")?,
+                    output_revision: u32::try_from(row.try_get::<i64, _>("output_revision")?)?,
+                    output_sha256: row.try_get("output_sha256")?,
+                    reviewer_pass: row.try_get::<i64, _>("reviewer_pass")? != 0,
+                    has_high_or_critical: row.try_get::<i64, _>("has_high_or_critical")? != 0,
+                })
+            })
+            .collect()
     }
 
     /// Find a direct spawned child of `parent_thread_id` by canonical agent path.
@@ -314,6 +984,50 @@ ORDER BY depth ASC, child_thread_id ASC
         parent_thread_id: ThreadId,
         child_thread_id: ThreadId,
     ) -> anyhow::Result<()> {
+        if parent_thread_id == child_thread_id {
+            return Ok(());
+        }
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let existing_child = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM thread_spawn_edges WHERE child_thread_id = ?)",
+        )
+        .bind(child_thread_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?
+            != 0;
+        if existing_child {
+            transaction.commit().await?;
+            return Ok(());
+        }
+        let parent_path_open = thread_spawn_path_is_open_in_executor(
+            &mut *transaction,
+            parent_thread_id,
+            /*missing_is_open*/ true,
+        )
+        .await?;
+        let creates_cycle = sqlx::query_scalar::<_, i64>(
+            r#"
+WITH RECURSIVE subtree(child_thread_id) AS (
+    SELECT child_thread_id
+    FROM thread_spawn_edges
+    WHERE parent_thread_id = ?
+    UNION
+    SELECT edge.child_thread_id
+    FROM thread_spawn_edges AS edge
+    JOIN subtree ON edge.parent_thread_id = subtree.child_thread_id
+)
+SELECT EXISTS(SELECT 1 FROM subtree WHERE child_thread_id = ?)
+            "#,
+        )
+        .bind(child_thread_id.to_string())
+        .bind(parent_thread_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?
+            != 0;
+        if !parent_path_open || creates_cycle {
+            transaction.commit().await?;
+            return Ok(());
+        }
         sqlx::query(
             r#"
 INSERT INTO thread_spawn_edges (
@@ -327,8 +1041,9 @@ ON CONFLICT(child_thread_id) DO NOTHING
         .bind(parent_thread_id.to_string())
         .bind(child_thread_id.to_string())
         .bind(crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref())
-        .execute(self.pool.as_ref())
+        .execute(&mut *transaction)
         .await?;
+        transaction.commit().await?;
         Ok(())
     }
 

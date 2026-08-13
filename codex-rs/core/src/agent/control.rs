@@ -27,6 +27,7 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -44,9 +45,12 @@ use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::ReadThreadParams;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Weak;
+use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::RwLock;
 use tokio::sync::watch;
 use tracing::warn;
 
@@ -56,6 +60,7 @@ use self::residency::V2Residency;
 
 mod execution;
 mod legacy;
+mod lifecycle;
 mod residency;
 mod spawn;
 
@@ -75,11 +80,49 @@ pub(crate) struct SpawnAgentOptions {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct CompletedWorkflowAgent {
+    pub(crate) source: SessionSource,
+    pub(crate) task: Option<String>,
+    pub(crate) output: String,
+    pub(crate) model: Option<String>,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
+    pub(crate) output_revision: u32,
+    pub(crate) output_sha256: String,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct LiveAgent {
     pub(crate) thread_id: ThreadId,
     pub(crate) metadata: AgentMetadata,
     pub(crate) status: AgentStatus,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CloseAgentOutcome {
+    pub(crate) previous_status: AgentStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InMemorySpawnEdge {
+    parent_thread_id: ThreadId,
+    status: codex_agent_graph_store::ThreadSpawnEdgeStatus,
+}
+
+#[derive(Clone, Debug)]
+struct InMemoryWorkflowValidation {
+    submissions: u8,
+    accepted: bool,
+    result_kind: String,
+    agent_thread_id: Option<ThreadId>,
+    reviewer_role: Option<String>,
+    output_revision: u32,
+    output_sha256: String,
+    reviewer_pass: bool,
+    review_cycles: u8,
+    has_high_or_critical: bool,
+}
+
+type InMemoryWorkflowValidations = HashMap<(ThreadId, String, String), InMemoryWorkflowValidation>;
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ListedAgent {
@@ -107,6 +150,16 @@ pub(crate) struct AgentControl {
     agent_execution_limiter: Arc<AgentExecutionLimiter>,
     /// Session-scoped state shared by the root thread and every cloned sub-agent control handle.
     rollout_budget: Arc<RolloutBudget>,
+    /// Serializes lifecycle transitions against spawn publication while still allowing unrelated
+    /// spawns in the same agent tree to proceed in parallel.
+    lifecycle_gate: Arc<RwLock<()>>,
+    /// Allows a failed or crash-recovered close to be retried without overlapping another close.
+    close_gate: Arc<AsyncMutex<()>>,
+    /// Session-local mirror that also covers ephemeral spawn edges omitted from SQLite.
+    spawn_edges: Arc<std::sync::Mutex<HashMap<ThreadId, InMemorySpawnEdge>>>,
+    /// Ephemeral fallback for tests and non-persistent thread stores. Local resumable sessions use
+    /// the SQLite ledger exposed through `AgentGraphStore` instead.
+    workflow_validations: Arc<std::sync::Mutex<InMemoryWorkflowValidations>>,
 }
 
 impl AgentControl {
@@ -135,8 +188,300 @@ impl AgentControl {
         self.session_id
     }
 
+    async fn root_thread_id_for(&self, thread_id: ThreadId) -> ThreadId {
+        if let Some(root_thread_id) = self.state.agent_id_for_path(&AgentPath::root()) {
+            return root_thread_id;
+        }
+        if let Some(root_thread_id) = self.in_memory_spawn_root(thread_id) {
+            return root_thread_id;
+        }
+        let Ok(state) = self.upgrade() else {
+            return ThreadId::from(self.session_id());
+        };
+        let mut current = thread_id;
+        let mut visited = HashSet::new();
+        while visited.insert(current) {
+            let Ok(thread) = state.get_thread(current).await else {
+                break;
+            };
+            let Some(parent_thread_id) = thread.session_source.parent_thread_id() else {
+                return current;
+            };
+            current = parent_thread_id;
+        }
+        ThreadId::from(self.session_id())
+    }
+
     pub(crate) fn rollout_budget(&self) -> &RolloutBudget {
         self.rollout_budget.as_ref()
+    }
+
+    pub(crate) async fn begin_workflow_validation(
+        &self,
+        submission: codex_agent_graph_store::WorkflowValidationSubmission,
+    ) -> CodexResult<codex_agent_graph_store::WorkflowValidationDecision> {
+        let state = self.upgrade()?;
+        if let Some(store) = state.agent_graph_store() {
+            return store
+                .begin_workflow_validation(submission)
+                .await
+                .map_err(|error| {
+                    CodexErr::Fatal(format!(
+                        "failed to reserve persisted workflow validation: {error}"
+                    ))
+                });
+        }
+
+        let key = (
+            submission.root_thread_id,
+            submission.turn_id.clone(),
+            submission.validation_key.clone(),
+        );
+        let mut ledger = self
+            .workflow_validations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(existing) = ledger.get_mut(&key) {
+            if existing.accepted
+                && existing.result_kind == "reviewer"
+                && !existing.reviewer_pass
+                && existing.review_cycles >= 2
+            {
+                return Ok(codex_agent_graph_store::WorkflowValidationDecision::Exhausted(2));
+            }
+            if existing.accepted && (existing.result_kind != "reviewer" || existing.reviewer_pass) {
+                return Ok(
+                    codex_agent_graph_store::WorkflowValidationDecision::AlreadyAccepted(
+                        existing.submissions,
+                    ),
+                );
+            }
+            if existing.accepted && submission.output_revision <= existing.output_revision {
+                return Ok(
+                    codex_agent_graph_store::WorkflowValidationDecision::UnchangedCorrection(
+                        existing.submissions,
+                    ),
+                );
+            }
+            if existing.accepted {
+                existing.submissions = 1;
+                existing.accepted = false;
+                existing.result_kind = submission.result_kind;
+                existing.agent_thread_id = submission.agent_thread_id;
+                existing.reviewer_role = submission.reviewer_role;
+                existing.output_revision = submission.output_revision;
+                existing.output_sha256 = submission.output_sha256;
+                existing.reviewer_pass = false;
+                existing.has_high_or_critical = false;
+                return Ok(codex_agent_graph_store::WorkflowValidationDecision::Attempt(1));
+            }
+            if existing.submissions >= 2 {
+                return Ok(
+                    codex_agent_graph_store::WorkflowValidationDecision::Exhausted(
+                        existing.submissions,
+                    ),
+                );
+            }
+            if (submission.requires_higher_revision
+                && submission.output_revision <= existing.output_revision)
+                || (!submission.requires_higher_revision
+                    && submission.output_sha256 == existing.output_sha256)
+            {
+                existing.submissions = 2;
+                return Ok(
+                    codex_agent_graph_store::WorkflowValidationDecision::UnchangedCorrection(2),
+                );
+            }
+            existing.submissions += 1;
+            existing.result_kind = submission.result_kind;
+            existing.agent_thread_id = submission.agent_thread_id;
+            existing.reviewer_role = submission.reviewer_role;
+            existing.output_revision = submission.output_revision;
+            existing.output_sha256 = submission.output_sha256;
+            return Ok(
+                codex_agent_graph_store::WorkflowValidationDecision::Attempt(existing.submissions),
+            );
+        }
+        let turn_result_count = ledger
+            .keys()
+            .filter(|(root_thread_id, turn_id, _)| {
+                *root_thread_id == submission.root_thread_id && *turn_id == submission.turn_id
+            })
+            .count();
+        if turn_result_count >= 16 {
+            return Ok(codex_agent_graph_store::WorkflowValidationDecision::ResultLimitReached);
+        }
+        ledger.insert(
+            key,
+            InMemoryWorkflowValidation {
+                submissions: 1,
+                accepted: false,
+                result_kind: submission.result_kind,
+                agent_thread_id: submission.agent_thread_id,
+                reviewer_role: submission.reviewer_role,
+                output_revision: submission.output_revision,
+                output_sha256: submission.output_sha256,
+                reviewer_pass: false,
+                review_cycles: 0,
+                has_high_or_critical: false,
+            },
+        );
+        Ok(codex_agent_graph_store::WorkflowValidationDecision::Attempt(1))
+    }
+
+    pub(crate) async fn complete_workflow_validation(
+        &self,
+        completion: codex_agent_graph_store::WorkflowValidationCompletion,
+    ) -> CodexResult<()> {
+        let state = self.upgrade()?;
+        if let Some(store) = state.agent_graph_store() {
+            let completed = store
+                .complete_workflow_validation(completion)
+                .await
+                .map_err(|error| {
+                    CodexErr::Fatal(format!(
+                        "failed to persist accepted workflow validation: {error}"
+                    ))
+                })?;
+            if !completed {
+                return Err(CodexErr::Fatal(
+                    "workflow validation reservation changed before acceptance".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+
+        let key = (
+            completion.root_thread_id,
+            completion.turn_id,
+            completion.validation_key,
+        );
+        let mut ledger = self
+            .workflow_validations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(existing) = ledger.get_mut(&key) else {
+            return Err(CodexErr::Fatal(
+                "workflow validation reservation is missing".to_string(),
+            ));
+        };
+        if existing.accepted
+            || existing.submissions != completion.submission
+            || existing.output_revision != completion.output_revision
+            || existing.output_sha256 != completion.output_sha256
+        {
+            return Err(CodexErr::Fatal(
+                "workflow validation reservation changed before acceptance".to_string(),
+            ));
+        }
+        existing.accepted = true;
+        existing.reviewer_pass = completion.reviewer_pass;
+        if existing.result_kind == "reviewer" {
+            existing.review_cycles = existing.review_cycles.saturating_add(1).min(2);
+        }
+        existing.has_high_or_critical = completion.has_high_or_critical;
+        Ok(())
+    }
+
+    pub(crate) async fn list_workflow_reviewer_validations(
+        &self,
+        root_thread_id: ThreadId,
+        turn_id: &str,
+    ) -> CodexResult<Vec<codex_agent_graph_store::WorkflowReviewerValidation>> {
+        let state = self.upgrade()?;
+        if let Some(store) = state.agent_graph_store() {
+            return store
+                .list_workflow_reviewer_validations(root_thread_id, turn_id)
+                .await
+                .map_err(|error| {
+                    CodexErr::Fatal(format!(
+                        "failed to read persisted workflow reviewer validations: {error}"
+                    ))
+                });
+        }
+        let ledger = self
+            .workflow_validations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut records = ledger
+            .iter()
+            .filter_map(|((record_root, record_turn, _), validation)| {
+                if *record_root != root_thread_id
+                    || record_turn != turn_id
+                    || validation.result_kind != "reviewer"
+                    || !validation.accepted
+                {
+                    return None;
+                }
+                Some(codex_agent_graph_store::WorkflowReviewerValidation {
+                    agent_thread_id: validation.agent_thread_id?,
+                    role: validation.reviewer_role.clone()?,
+                    output_revision: validation.output_revision,
+                    output_sha256: validation.output_sha256.clone(),
+                    reviewer_pass: validation.reviewer_pass,
+                    has_high_or_critical: validation.has_high_or_critical,
+                })
+            })
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            left.role.cmp(&right.role).then_with(|| {
+                left.agent_thread_id
+                    .to_string()
+                    .cmp(&right.agent_thread_id.to_string())
+            })
+        });
+        Ok(records)
+    }
+
+    async fn ensure_agent_lifecycle_open(&self, agent_id: ThreadId) -> CodexResult<()> {
+        let root_thread_id = self.root_thread_id_for(agent_id).await;
+        if agent_id == root_thread_id {
+            return Ok(());
+        }
+        let state = self.upgrade()?;
+        let lifecycle_open = if let Some(agent_graph_store) = state.agent_graph_store() {
+            if agent_graph_store
+                .thread_spawn_edge_status(agent_id)
+                .await
+                .map_err(|error| {
+                    CodexErr::Fatal(format!(
+                        "failed to read thread-spawn lifecycle for {agent_id}: {error}"
+                    ))
+                })?
+                .is_some()
+            {
+                agent_graph_store
+                    .thread_spawn_path_is_open(agent_id)
+                    .await
+                    .map_err(|error| {
+                        CodexErr::Fatal(format!(
+                            "failed to read thread-spawn ancestor lifecycle for {agent_id}: {error}"
+                        ))
+                    })?
+            } else {
+                match self.in_memory_spawn_root(agent_id) {
+                    Some(_) => self.in_memory_spawn_path_is_open(root_thread_id, agent_id),
+                    None => match state.get_thread(agent_id).await {
+                        Ok(thread) => !thread.session_source.is_non_root_agent(),
+                        Err(_) => true,
+                    },
+                }
+            }
+        } else {
+            match self.in_memory_spawn_root(agent_id) {
+                Some(_) => self.in_memory_spawn_path_is_open(root_thread_id, agent_id),
+                None => match state.get_thread(agent_id).await {
+                    Ok(thread) => !thread.session_source.is_non_root_agent(),
+                    Err(_) => true,
+                },
+            }
+        };
+        if !lifecycle_open {
+            return Err(CodexErr::UnsupportedOperation(format!(
+                "agent `{agent_id}` is closing or closed and cannot start or resume descendants"
+            )));
+        }
+        Ok(())
     }
 
     /// Send rich user input items to an existing agent thread.
@@ -146,6 +491,7 @@ impl AgentControl {
         input: Vec<UserInput>,
         parent_turn_id: Option<String>,
     ) -> CodexResult<String> {
+        let _lifecycle_guard = self.acquire_agent_operation(agent_id).await?;
         let state = self.upgrade()?;
         self.ensure_execution_capacity_for_turn_start(agent_id, /*starts_turn*/ true)
             .await?;
@@ -175,6 +521,7 @@ impl AgentControl {
         agent_communication_context: AgentCommunicationContext,
         parent_turn_id: Option<String>,
     ) -> CodexResult<String> {
+        let _lifecycle_guard = self.acquire_agent_operation(agent_id).await?;
         let state = self.upgrade()?;
         self.ensure_execution_capacity_for_turn_start(agent_id, communication.trigger_turn)
             .await?;
@@ -245,6 +592,7 @@ impl AgentControl {
 
     /// Interrupt the current task for an existing agent thread.
     pub(crate) async fn interrupt_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
+        let _lifecycle_guard = self.acquire_agent_operation(agent_id).await?;
         let state = self.upgrade()?;
         self.handle_thread_request_result(
             agent_id,
@@ -283,6 +631,118 @@ impl AgentControl {
             return AgentStatus::NotFound;
         };
         thread.agent_status().await
+    }
+
+    /// Return the terminal output that was actually persisted for a workflow child.
+    ///
+    /// This deliberately reads the child rollout rather than trusting a result object supplied by
+    /// the parent model. It also works after V2 residency eviction and process resume.
+    pub(crate) async fn completed_workflow_agent(
+        &self,
+        agent_id: ThreadId,
+    ) -> CodexResult<CompletedWorkflowAgent> {
+        let state = self.upgrade()?;
+        let live_status = match state.get_thread(agent_id).await {
+            Ok(thread) => Some(thread.agent_status().await),
+            Err(_) => None,
+        };
+        let stored = state
+            .read_stored_thread(ReadThreadParams {
+                thread_id: agent_id,
+                include_archived: true,
+                include_history: true,
+            })
+            .await?;
+        if !stored.source.is_read_only_subagent()
+            || stored
+                .source
+                .get_extended_workflow_agent_identity()
+                .is_none()
+        {
+            return Err(CodexErr::InvalidRequest(format!(
+                "agent `{agent_id}` is not a read-only extended-workflow agent"
+            )));
+        }
+
+        let mut task = None;
+        let mut persisted_status = AgentStatus::PendingInit;
+        let mut output_revision = 0_u32;
+        if let Some(history) = stored.history.as_ref() {
+            for item in &history.items {
+                match item {
+                    RolloutItem::InterAgentCommunication(communication)
+                        if task.is_none() && !communication.content.trim().is_empty() =>
+                    {
+                        task = Some(communication.content.clone());
+                    }
+                    RolloutItem::EventMsg(event) => {
+                        if let Some(status) = crate::agent::agent_status_from_event(event) {
+                            if matches!(status, AgentStatus::Completed(_)) {
+                                output_revision = output_revision.saturating_add(1);
+                            }
+                            // A V2 residency/completion watcher may shut a child down immediately
+                            // after its terminal turn. Preserve the completed result (or terminal
+                            // failure) across that technical shutdown so validation and its one
+                            // correction attempt can still inspect the actual persisted answer.
+                            if status != AgentStatus::Shutdown
+                                || matches!(
+                                    persisted_status,
+                                    AgentStatus::PendingInit | AgentStatus::Running
+                                )
+                            {
+                                persisted_status = status;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let status = match live_status {
+            Some(AgentStatus::Shutdown) => persisted_status,
+            Some(status) => status,
+            None => persisted_status,
+        };
+        let output = match status {
+            AgentStatus::Completed(Some(output)) if !output.trim().is_empty() => output,
+            AgentStatus::Completed(None) => {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "workflow agent `{agent_id}` completed without a terminal response"
+                )));
+            }
+            AgentStatus::PendingInit | AgentStatus::Running => {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "workflow agent `{agent_id}` has not completed"
+                )));
+            }
+            AgentStatus::Errored(error) => {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "workflow agent `{agent_id}` failed: {error}"
+                )));
+            }
+            AgentStatus::Interrupted | AgentStatus::Shutdown | AgentStatus::NotFound => {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "workflow agent `{agent_id}` has no valid completed result (status: {status:?})"
+                )));
+            }
+            AgentStatus::Completed(Some(_)) => {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "workflow agent `{agent_id}` completed with an empty terminal response"
+                )));
+            }
+        };
+        let output_revision = output_revision.max(1);
+        let output_sha256 = crate::extended_workflow::sha256_bytes(output.as_bytes());
+
+        Ok(CompletedWorkflowAgent {
+            source: stored.source,
+            task,
+            output,
+            model: stored.model,
+            reasoning_effort: stored.reasoning_effort,
+            output_revision,
+            output_sha256,
+        })
     }
 
     pub(crate) fn register_session_root(
@@ -585,11 +1045,20 @@ impl AgentControl {
         if depth == 1 {
             self.state.register_root_thread(parent_thread_id);
         }
+        let source_role = agent_role;
+        let display_role = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            depth,
+            agent_path: agent_path.clone(),
+            agent_nickname: preferred_agent_nickname.clone(),
+            agent_role: source_role.clone(),
+        })
+        .get_agent_display_role();
         let agent_metadata = self.prepare_agent_metadata(
             reservation,
             config,
             agent_path,
-            agent_role,
+            display_role,
             preferred_agent_nickname,
         )?;
         let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
@@ -597,7 +1066,9 @@ impl AgentControl {
             depth,
             agent_path: agent_metadata.agent_path.clone(),
             agent_nickname: agent_metadata.agent_nickname.clone(),
-            agent_role: agent_metadata.agent_role.clone(),
+            // Keep the source-owned encoded role intact. AgentMetadata contains only the
+            // user-facing display role and must not become an authorization source.
+            agent_role: source_role,
         });
         Ok((session_source, agent_metadata))
     }
@@ -637,6 +1108,12 @@ impl AgentControl {
         session_source: Option<&SessionSource>,
         child_config: &Config,
     ) -> Option<Arc<crate::exec_policy::ExecPolicyManager>> {
+        // Workflow experts and reviewers have a monotonic read-only ceiling. Parent allow rules
+        // can imply `bypass_sandbox=true`, so inheriting them would silently punch through that
+        // ceiling even though the permission profile itself is read-only.
+        if session_source.is_some_and(SessionSource::is_read_only_subagent) {
+            return Some(Arc::new(crate::exec_policy::ExecPolicyManager::default()));
+        }
         let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id, ..
         })) = session_source
@@ -698,35 +1175,41 @@ impl AgentControl {
         Ok(children_by_parent)
     }
 
-    async fn persist_thread_spawn_edge_for_source(
+    async fn ensure_thread_spawn_edge_open_for_source(
         &self,
         child_thread: &crate::CodexThread,
         child_thread_id: ThreadId,
         session_source: Option<&SessionSource>,
-    ) {
+    ) -> CodexResult<()> {
         let Some(parent_thread_id) = session_source.and_then(SessionSource::parent_thread_id)
         else {
-            return;
+            return Ok(());
         };
-        if child_thread.config_snapshot().await.ephemeral {
-            return;
-        }
-        let Ok(state) = self.upgrade() else {
-            return;
-        };
-        let Some(agent_graph_store) = state.agent_graph_store() else {
-            return;
-        };
-        if let Err(err) = agent_graph_store
-            .upsert_thread_spawn_edge(
-                parent_thread_id,
-                child_thread_id,
-                codex_agent_graph_store::ThreadSpawnEdgeStatus::Open,
-            )
-            .await
+        let root_thread_id = self.root_thread_id_for(parent_thread_id).await;
+        let ephemeral = child_thread.config_snapshot().await.ephemeral;
+        let state = self.upgrade()?;
+        if !ephemeral
+            && let Some(agent_graph_store) = state.agent_graph_store()
+            && !agent_graph_store
+                .ensure_thread_spawn_edge_open(root_thread_id, parent_thread_id, child_thread_id)
+                .await
+                .map_err(|error| {
+                    CodexErr::Fatal(format!(
+                        "failed to persist open thread-spawn edge for {child_thread_id}: {error}"
+                    ))
+                })?
         {
-            warn!("failed to persist thread-spawn edge: {err}");
+            return Err(CodexErr::UnsupportedOperation(format!(
+                "parent agent `{parent_thread_id}` is closing or child `{child_thread_id}` was already closed"
+            )));
         }
+        if !self.ensure_in_memory_spawn_edge_open(root_thread_id, parent_thread_id, child_thread_id)
+        {
+            return Err(CodexErr::UnsupportedOperation(format!(
+                "parent agent `{parent_thread_id}` is closing or child `{child_thread_id}` was already closed"
+            )));
+        }
+        Ok(())
     }
 
     async fn live_thread_spawn_descendants(

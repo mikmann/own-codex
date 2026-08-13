@@ -44,6 +44,39 @@ function createEarlyExitChild(exitCode = 2): FakeChildProcess {
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("CodexExec", () => {
+  it("prefers the extended CLI package and falls back to the upstream package", async () => {
+    const { resolveInstalledCodexPackage } = await import("../src/exec");
+    const both = new Map([
+      ["codex-extended-workflow/package.json", "/extended/package.json"],
+      ["@openai/codex/package.json", "/upstream/package.json"],
+    ]);
+    expect(
+      resolveInstalledCodexPackage((specifier) => {
+        const resolved = both.get(specifier);
+        if (!resolved) throw new Error("not found");
+        return resolved;
+      }),
+    ).toEqual({
+      packageName: "codex-extended-workflow",
+      packageJsonPath: "/extended/package.json",
+    });
+
+    expect(
+      resolveInstalledCodexPackage((specifier) => {
+        if (specifier === "@openai/codex/package.json") return "/upstream/package.json";
+        throw new Error("not found");
+      }),
+    ).toEqual({
+      packageName: "@openai/codex",
+      packageJsonPath: "/upstream/package.json",
+    });
+    expect(
+      resolveInstalledCodexPackage(() => {
+        throw new Error("not found");
+      }),
+    ).toBeNull();
+  });
+
   it("rejects when exit happens before stdout closes", async () => {
     const { CodexExec } = await import("../src/exec");
     const child = createEarlyExitChild();

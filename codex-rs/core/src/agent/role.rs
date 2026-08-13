@@ -199,6 +199,7 @@ mod reload {
             overrides,
             config.codex_home.clone(),
             config_layer_stack,
+            config.extended_workflow.enabled,
         )
         .await?;
         if preserve_current_reasoning_effort {

@@ -452,7 +452,9 @@ async fn build_report(
                             "config could not be loaded",
                         )
                         .detail(err.to_string())
-                        .remediation("Fix the reported config error, then rerun codex doctor.")
+                        .remediation(
+                            "Fix the reported config error, then rerun codex-extended-workflow doctor.",
+                        )
                     })
                 },
                 async { run_sync_check("network", progress.clone(), network_check) },
@@ -834,8 +836,8 @@ fn installation_check(show_details: bool) -> DoctorCheck {
                 npm_package_root,
             } => {
                 status = CheckStatus::Fail;
-                summary =
-                    "npm install -g @openai/codex would update a different install".to_string();
+                summary = "npm install -g codex-extended-workflow would update a different install"
+                    .to_string();
                 remediation = Some(format!(
                     "Fix PATH or npm prefix so the running package root ({}) matches the npm global package root ({}).",
                     running_package_root.display(),
@@ -851,7 +853,7 @@ fn installation_check(show_details: bool) -> DoctorCheck {
                 status = status.max(CheckStatus::Warning);
                 summary = "npm-managed launch is missing package-root provenance".to_string();
                 remediation = Some(
-                    "Reinstall or update Codex so the JS shim provides CODEX_MANAGED_PACKAGE_ROOT."
+                    "Reinstall codex-extended-workflow so the JS shim provides CODEX_MANAGED_PACKAGE_ROOT."
                         .to_string(),
                 );
             }
@@ -1008,7 +1010,7 @@ fn npm_global_root_check() -> NpmRootCheck {
 }
 
 fn compare_npm_package_roots(running_package_root: &Path, npm_root: &Path) -> NpmRootCheck {
-    let npm_package_root = npm_root.join("@openai").join("codex");
+    let npm_package_root = npm_root.join("codex-extended-workflow");
     let running = normalize_path_for_compare(running_package_root);
     let target = normalize_path_for_compare(&npm_package_root);
     if running == target {
@@ -1248,7 +1250,9 @@ fn auth_check(config: &Config) -> DoctorCheck {
                 DoctorCheck::new("auth.credentials", "auth", status, summary).details(details);
             if status == CheckStatus::Fail {
                 check =
-                    check.remediation("Run codex login again or provide a supported auth env var.");
+                    check.remediation(
+                        "Run codex-extended-workflow login again or provide a supported auth env var.",
+                    );
             }
             check
         }
@@ -1266,7 +1270,9 @@ fn auth_check(config: &Config) -> DoctorCheck {
             "no Codex credentials were found",
         )
         .details(details)
-        .remediation("Run codex login or provide an API key through a supported auth env var."),
+        .remediation(
+            "Run codex-extended-workflow login or provide an API key through a supported auth env var.",
+        ),
         Err(err) => DoctorCheck::new(
             "auth.credentials",
             "auth",
@@ -1274,7 +1280,7 @@ fn auth_check(config: &Config) -> DoctorCheck {
             "stored credentials could not be read",
         )
         .detail(err.to_string())
-        .remediation("Fix auth storage access or run codex login again."),
+        .remediation("Fix auth storage access or run codex-extended-workflow login again."),
     }
 }
 
@@ -3201,25 +3207,25 @@ mod tests {
 
     #[test]
     fn compare_npm_package_roots_detects_match() {
-        let running = PathBuf::from("/prefix/lib/node_modules/@openai/codex");
+        let running = PathBuf::from("/prefix/lib/node_modules/codex-extended-workflow");
         let npm_root = PathBuf::from("/prefix/lib/node_modules");
         assert_eq!(
             compare_npm_package_roots(&running, &npm_root),
             NpmRootCheck::Match {
-                package_root: npm_root.join("@openai").join("codex")
+                package_root: npm_root.join("codex-extended-workflow")
             }
         );
     }
 
     #[test]
     fn compare_npm_package_roots_detects_mismatch() {
-        let running = PathBuf::from("/old/lib/node_modules/@openai/codex");
+        let running = PathBuf::from("/old/lib/node_modules/codex-extended-workflow");
         let npm_root = PathBuf::from("/new/lib/node_modules");
         assert_eq!(
             compare_npm_package_roots(&running, &npm_root),
             NpmRootCheck::Mismatch {
                 running_package_root: running,
-                npm_package_root: npm_root.join("@openai").join("codex"),
+                npm_package_root: npm_root.join("codex-extended-workflow"),
             }
         );
     }

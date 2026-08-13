@@ -158,8 +158,10 @@ pub(super) fn with_thread_spawn_agent_metadata(
                 parent_thread_id,
                 depth,
                 agent_path,
-                agent_nickname: agent_nickname.or(existing_agent_nickname),
-                agent_role: agent_role.or(existing_agent_role),
+                agent_nickname: existing_agent_nickname.or(agent_nickname),
+                // Preserve the source-owned encoded workflow marker. Store/UI display metadata is
+                // supplemental and must never replace an authorization ceiling used on resume.
+                agent_role: existing_agent_role.or(agent_role),
             },
         ),
         _ => source,
@@ -319,7 +321,7 @@ pub(crate) fn summary_to_thread(
         cwd,
         cli_version,
         agent_nickname: source.get_nickname(),
-        agent_role: source.get_agent_role(),
+        agent_role: source.get_agent_display_role(),
         source: source.into(),
         can_accept_direct_input: None,
         thread_source: None,

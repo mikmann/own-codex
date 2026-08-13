@@ -4,6 +4,7 @@ use codex_protocol::models::ContentItem;
 
 use super::AdditionalContextUserFragment;
 use super::ContextualUserFragment;
+use super::ExtendedWorkflowTurnContext;
 use super::InternalModelContextFragment;
 use super::LegacyApplyPatchExecCommandWarning;
 use super::LegacyModelMismatchWarning;
@@ -20,6 +21,7 @@ const CONTEXTUAL_USER_FRAGMENT_MATCHERS: &[fn(&str) -> bool] = &[
     UserInstructions::matches_text,
     EnvironmentsState::matches_text,
     AdditionalContextUserFragment::matches_text,
+    ExtendedWorkflowTurnContext::matches_text,
     SkillInstructions::matches_text,
     UserShellCommand::matches_text,
     TurnAborted::matches_text,

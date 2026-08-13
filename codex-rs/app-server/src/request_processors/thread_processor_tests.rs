@@ -1251,6 +1251,50 @@ mod thread_processor_behavior_tests {
         Ok(())
     }
 
+    #[test]
+    fn summary_from_state_db_metadata_exposes_workflow_display_role() -> Result<()> {
+        let conversation_id = ThreadId::from_string("bfd12a78-5900-467b-9bc5-d3d35df08191")?;
+        let source =
+            serde_json::to_string(&SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: ThreadId::from_string("ad7f0408-99b8-4f6e-a46f-bd0eec433370")?,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: Some("eulenmann".to_string()),
+                agent_role: codex_protocol::protocol::encode_extended_thread_spawn_role(
+                    None,
+                    /*read_only*/ true,
+                    Some("Expert"),
+                    Some("Architecture"),
+                ),
+            }))?;
+
+        let summary = summary_from_state_db_metadata(
+            conversation_id,
+            PathBuf::from("/tmp/rollout.jsonl"),
+            Some("hi".to_string()),
+            /*preview*/ None,
+            "2025-09-05T16:53:11Z".to_string(),
+            "2025-09-05T16:53:12Z".to_string(),
+            "test-provider".to_string(),
+            PathBuf::from("/"),
+            "0.0.0".to_string(),
+            source,
+            Some(codex_protocol::protocol::ThreadSource::Subagent),
+            /*agent_nickname*/ None,
+            /*agent_role*/ None,
+            /*git_sha*/ None,
+            /*git_branch*/ None,
+            /*git_origin_url*/ None,
+        );
+
+        let fallback_cwd = AbsolutePathBuf::from_absolute_path("/")?;
+        let thread = summary_to_thread(summary, &fallback_cwd);
+
+        assert_eq!(thread.agent_nickname, Some("eulenmann".to_string()));
+        assert_eq!(thread.agent_role, Some("Expert | Architecture".to_string()));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn removing_thread_state_clears_listener_and_active_turn_history() -> Result<()> {
         let manager = ThreadStateManager::new();

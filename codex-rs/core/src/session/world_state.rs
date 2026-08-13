@@ -11,6 +11,7 @@ use crate::context::world_state::CompactPermissionsState;
 use crate::context::world_state::ContextWindowGuidanceState;
 use crate::context::world_state::EnvironmentsInstructionsState;
 use crate::context::world_state::EnvironmentsState;
+use crate::context::world_state::ExtendedWorkflowPolicyState;
 use crate::context::world_state::ModelInstructionsState;
 use crate::context::world_state::MultiAgentModeState;
 use crate::context::world_state::MultiAgentUsageHintState;
@@ -61,6 +62,14 @@ impl Session {
             String::new()
         };
         let mut world_state = WorldState::default();
+        if turn_context.config.extended_workflow.enabled
+            && crate::extended_workflow::is_root_workflow_source(&turn_context.session_source)
+        {
+            world_state.add_section(
+                ExtendedWorkflowPolicyState::try_new(&turn_context.config.extended_workflow)
+                    .map_err(CodexErr::InvalidRequest)?,
+            );
+        }
         world_state.add_section(ModelInstructionsState::new(
             &turn_context.model_info.slug,
             previous_model.as_deref(),

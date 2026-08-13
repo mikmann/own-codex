@@ -1,0 +1,8 @@
+---
+source: tui/src/chatwidget/tests/slash_commands.rs
+expression: rendered
+---
+• Repository preparation preview
+Repository: <REPO>
+[Create] <CONFIG> — create the minimal repository workflow configuration; AGENTS.md and .codex/agents are not required
+No files changed. Run /prepare-extend-workflow apply to apply this exact kind of change.

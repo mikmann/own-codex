@@ -33,6 +33,7 @@ const FOLLOWUP_CALL_ID: &str = "followup-worker";
 const SIBLING_SPAWN_CALL_ID: &str = "spawn-survivor";
 const SIBLING_FOLLOWUP_CALL_ID: &str = "followup-survivor";
 const INTERRUPT_CALL_ID: &str = "interrupt-worker";
+const CLOSE_CALL_ID: &str = "close-survivor";
 const INITIAL_PROMPT: &str = "spawn a durable worker";
 const INITIAL_TASK: &str = "inspect the repository";
 const NESTED_TASK: &str = "inspect the nested repository";
@@ -45,6 +46,7 @@ const SIBLING_TASK: &str = "inspect the release lifecycle";
 const SIBLING_FOLLOWUP_PROMPT: &str = "continue the surviving worker";
 const SIBLING_FOLLOWUP_TASK: &str = "verify the surviving worker";
 const INTERRUPT_PROMPT: &str = "release the interrupted worker";
+const CLOSE_PROMPT: &str = "close the surviving worker";
 const SIBLING_NAME: &str = "survivor";
 const ROLE_NAME: &str = "durable_worker";
 const ROLE_MODEL: &str = "gpt-5.6-sol";
@@ -630,6 +632,26 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         request.body_contains_text(SIBLING_FOLLOWUP_TASK)
             && request.body_contains_text(ROLE_DEVELOPER_INSTRUCTIONS)
     }));
+
+    let close_args = serde_json::to_string(&json!({
+        "target": SIBLING_NAME,
+    }))?;
+    mount_root_collaboration_call(
+        &server,
+        CLOSE_PROMPT,
+        CLOSE_CALL_ID,
+        "close_agent",
+        &close_args,
+    )
+    .await;
+    resumed.submit_turn(CLOSE_PROMPT).await?;
+    assert!(
+        resumed
+            .thread_manager
+            .get_thread(sibling_thread_id)
+            .await
+            .is_err()
+    );
 
     Ok(())
 }

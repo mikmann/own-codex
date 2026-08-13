@@ -288,7 +288,8 @@ impl CodexThread {
         trace: Option<W3cTraceContext>,
         client_user_message_id: Option<String>,
     ) -> CodexResult<String> {
-        self.session
+        let _lifecycle_guard = self
+            .session
             .services
             .agent_control
             .ensure_execution_capacity_for_op(self.session.thread_id(), &op)
@@ -310,7 +311,8 @@ impl CodexThread {
                 "user message admission requires user input".to_string(),
             ));
         }
-        self.session
+        let _lifecycle_guard = self
+            .session
             .services
             .agent_control
             .ensure_execution_capacity_for_op(self.session.thread_id(), &op)

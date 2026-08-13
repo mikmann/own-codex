@@ -243,6 +243,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
 
     let Cli {
         psp,
+        extended_workflow_default_enabled,
         command,
         strict_config,
         shared,
@@ -327,6 +328,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         user_config_profile: config_profile_v2,
         ignore_user_config,
         ignore_user_and_project_exec_policy_rules: ignore_rules,
+        extended_workflow_default_enabled,
         ..Default::default()
     };
 

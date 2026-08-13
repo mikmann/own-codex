@@ -24,6 +24,7 @@ use codex_protocol::openai_models::WebSearchToolType;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::encode_extended_thread_spawn_role;
 use codex_tools::DiscoverablePluginInfo;
 use codex_tools::DiscoverableTool;
 use codex_tools::ResponsesApiNamespaceTool;
@@ -2150,6 +2151,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         "followup_task",
         "wait_agent",
         "interrupt_agent",
+        "close_agent",
         "list_agents",
         "send_input",
         "resume_agent",
@@ -2162,6 +2164,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         "followup_task",
         "wait_agent",
         "interrupt_agent",
+        "close_agent",
         "list_agents",
     ] {
         assert!(
@@ -2225,6 +2228,103 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
 }
 
 #[tokio::test]
+async fn read_only_workflow_subagents_cannot_delegate_even_when_v2_is_active() {
+    let plan = probe_with(
+        |turn| {
+            set_features(
+                turn,
+                &[
+                    Feature::MultiAgentV2,
+                    Feature::RequestPermissionsTool,
+                    Feature::Plugins,
+                    Feature::Apps,
+                ],
+            );
+            turn.model_info.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
+            turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: ThreadId::new(),
+                depth: 1,
+                agent_path: Some(AgentPath::try_from("/root/expert").expect("valid agent path")),
+                agent_nickname: Some("expert".to_string()),
+                agent_role: encode_extended_thread_spawn_role(
+                    None,
+                    /*read_only*/ true,
+                    Some("Expert"),
+                    Some("Architecture"),
+                ),
+            });
+        },
+        ToolPlanInputs {
+            tool_runtimes: vec![mcp_runtime(
+                "mutable",
+                "mcp__mutable",
+                "write",
+                ToolExposure::Direct,
+            )],
+            extension_tool_executors: vec![Arc::new(TestNamespaceExtensionTool {
+                namespace: "mutable_extension",
+                tool_name: "write",
+            })],
+            dynamic_tools: vec![dynamic_tool(
+                Some("mutable_dynamic"),
+                "write",
+                /*defer_loading*/ false,
+            )],
+            ..ToolPlanInputs::default()
+        },
+    )
+    .await;
+
+    plan.assert_visible_lacks(&[
+        MULTI_AGENT_V1_NAMESPACE,
+        MULTI_AGENT_V2_NAMESPACE,
+        "apply_patch",
+        "request_permissions",
+        "request_plugin_install",
+        "mcp__mutable",
+        "mutable_extension",
+        "mutable_dynamic",
+    ]);
+    plan.assert_registered_lacks(&[
+        "apply_patch",
+        "request_permissions",
+        "request_plugin_install",
+        &ToolName::namespaced("mcp__mutable", "write").to_string(),
+        &ToolName::namespaced("mutable_extension", "write").to_string(),
+        &ToolName::namespaced("mutable_dynamic", "write").to_string(),
+    ]);
+    for tool_name in [
+        "spawn_agent",
+        "send_message",
+        "followup_task",
+        "wait_agent",
+        "interrupt_agent",
+        "close_agent",
+        "list_agents",
+    ] {
+        plan.assert_registered_lacks(&[
+            &ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, tool_name).to_string()
+        ]);
+    }
+    let allowed_read_only_tools = [
+        "exec_command",
+        "list_mcp_resource_templates",
+        "list_mcp_resources",
+        "read_mcp_resource",
+        "shell_command",
+        "view_image",
+        "write_stdin",
+    ];
+    assert!(
+        plan.registered_names
+            .iter()
+            .all(|tool_name| allowed_read_only_tools.contains(&tool_name.as_str())),
+        "unexpected read-only workflow tool in {:?}",
+        plan.registered_names
+    );
+}
+
+#[tokio::test]
 async fn multi_agent_v2_message_schemas_are_encrypted() {
     let plan = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
@@ -2269,6 +2369,7 @@ async fn multi_agent_v2_can_disable_wait_agent() {
     assert_eq!(
         plan.namespace_function_names(MULTI_AGENT_V2_NAMESPACE),
         &[
+            "close_agent".to_string(),
             "followup_task".to_string(),
             "interrupt_agent".to_string(),
             "list_agents".to_string(),
@@ -2369,6 +2470,7 @@ async fn multi_agent_v2_can_use_configured_tool_namespace() {
         "followup_task",
         "wait_agent",
         "interrupt_agent",
+        "close_agent",
         "list_agents",
     ] {
         namespaced.assert_visible_lacks(&[tool_name]);
@@ -2505,6 +2607,7 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
         "followup_task",
         "wait_agent",
         "interrupt_agent",
+        "close_agent",
         "list_agents",
     ] {
         assert!(

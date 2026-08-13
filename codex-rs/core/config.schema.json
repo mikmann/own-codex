@@ -971,6 +971,39 @@
       },
       "type": "object"
     },
+    "ExtendedWorkflowToml": {
+      "additionalProperties": false,
+      "description": "Repository- and user-configurable settings for the extended workflow.",
+      "properties": {
+        "audit_mode": {
+          "description": "Marks normal model-visible workflow diagnostics as audit-enabled. No files are written.",
+          "type": "boolean"
+        },
+        "enabled": {
+          "description": "Enables classification and workflow guidance.\n\nThe `codex-extended-workflow` launcher supplies an enabled internal default. Shared libraries and the compatibility launcher default to disabled unless configuration says otherwise.",
+          "type": "boolean"
+        },
+        "experts": {
+          "$ref": "#/definitions/WorkflowProcessToml"
+        },
+        "max_result_bytes": {
+          "description": "Hard UTF-8 byte limit for one structured expert or reviewer result.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "reviewers": {
+          "$ref": "#/definitions/WorkflowProcessToml"
+        },
+        "workflow_budget_tokens": {
+          "description": "Advisory token budget for the complete workflow. This is not a provider hard limit.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "ExternalConfigMigrationPrompts": {
       "additionalProperties": false,
       "description": "Settings for notices we display to users via the tui and app-server clients (primarily the Codex IDE extension). NOTE: these are different from notifications - notices are warnings, NUX screens, acknowledgements, etc.",
@@ -4882,6 +4915,83 @@
         }
       ]
     },
+    "WorkflowAgentProfileToml": {
+      "additionalProperties": false,
+      "description": "A selectable expert or reviewer profile.",
+      "properties": {
+        "agent_type": {
+          "description": "Optional existing `[agents.<name>]` role to layer onto the child.",
+          "type": "string"
+        },
+        "context_budget": {
+          "description": "Advisory maximum context allocation for this profile.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "model": {
+          "description": "Resolved by the existing spawn-agent model catalog. Not an allowlist.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "reasoning_effort": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            }
+          ],
+          "description": "Validated against the selected model by the existing spawn-agent resolver."
+        },
+        "role": {
+          "type": "string"
+        },
+        "token_budget": {
+          "description": "Advisory per-subagent token budget; exact provider enforcement is not implied.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "role"
+      ],
+      "type": "object"
+    },
+    "WorkflowProcessToml": {
+      "additionalProperties": false,
+      "description": "Independent settings for either the expert or reviewer process.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "max": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "min": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "profiles": {
+          "items": {
+            "$ref": "#/definitions/WorkflowAgentProfileToml"
+          },
+          "type": "array"
+        },
+        "round_budget_tokens": {
+          "description": "Advisory token budget for one complete expert or reviewer round.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "WorkspaceRootsToml": {
       "type": "object"
     }
@@ -5050,6 +5160,14 @@
     },
     "experimental_use_unified_exec_tool": {
       "type": "boolean"
+    },
+    "extended_workflow": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ExtendedWorkflowToml"
+        }
+      ],
+      "description": "Classification, expert, ticket, and reviewer workflow settings."
     },
     "features": {
       "additionalProperties": false,

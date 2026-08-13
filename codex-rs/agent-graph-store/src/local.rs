@@ -6,6 +6,11 @@ use crate::AgentGraphStore;
 use crate::AgentGraphStoreError;
 use crate::AgentGraphStoreFuture;
 use crate::ThreadSpawnEdgeStatus;
+use crate::ThreadSpawnSubtreeClose;
+use crate::WorkflowReviewerValidation;
+use crate::WorkflowValidationCompletion;
+use crate::WorkflowValidationDecision;
+use crate::WorkflowValidationSubmission;
 
 /// SQLite-backed implementation of [`AgentGraphStore`] using an existing state runtime.
 #[derive(Clone)]
@@ -60,6 +65,106 @@ impl AgentGraphStore for LocalAgentGraphStore {
         })
     }
 
+    fn ensure_thread_spawn_edge_open(
+        &self,
+        root_thread_id: ThreadId,
+        parent_thread_id: ThreadId,
+        child_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, bool> {
+        Box::pin(async move {
+            self.state_db
+                .ensure_thread_spawn_edge_open(root_thread_id, parent_thread_id, child_thread_id)
+                .await
+                .map_err(internal_error)
+        })
+    }
+
+    fn thread_spawn_edge_status(
+        &self,
+        child_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, Option<ThreadSpawnEdgeStatus>> {
+        Box::pin(async move {
+            self.state_db
+                .thread_spawn_edge_status(child_thread_id)
+                .await
+                .map(|status| status.map(from_state_status))
+                .map_err(internal_error)
+        })
+    }
+
+    fn thread_spawn_path_is_open(&self, thread_id: ThreadId) -> AgentGraphStoreFuture<'_, bool> {
+        Box::pin(async move {
+            self.state_db
+                .thread_spawn_path_is_open(thread_id)
+                .await
+                .map_err(internal_error)
+        })
+    }
+
+    fn begin_thread_spawn_subtree_close(
+        &self,
+        root_thread_id: ThreadId,
+        caller_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, Option<ThreadSpawnSubtreeClose>> {
+        Box::pin(async move {
+            self.state_db
+                .begin_thread_spawn_subtree_close(
+                    root_thread_id,
+                    caller_thread_id,
+                    target_thread_id,
+                )
+                .await
+                .map(|reservation| {
+                    reservation.map(|(previous_edge_status, thread_ids_deepest_first)| {
+                        ThreadSpawnSubtreeClose {
+                            previous_edge_status: from_state_status(previous_edge_status),
+                            thread_ids_deepest_first,
+                        }
+                    })
+                })
+                .map_err(internal_error)
+        })
+    }
+
+    fn finish_thread_spawn_subtree_close(
+        &self,
+        target_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, bool> {
+        Box::pin(async move {
+            self.state_db
+                .finish_thread_spawn_subtree_close(target_thread_id)
+                .await
+                .map_err(internal_error)
+        })
+    }
+
+    fn reopen_closed_thread_spawn_edge(
+        &self,
+        root_thread_id: ThreadId,
+        caller_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, bool> {
+        Box::pin(async move {
+            self.state_db
+                .reopen_closed_thread_spawn_edge(root_thread_id, caller_thread_id, target_thread_id)
+                .await
+                .map_err(internal_error)
+        })
+    }
+
+    fn list_closing_thread_spawn_targets(
+        &self,
+        root_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, Vec<ThreadId>> {
+        Box::pin(async move {
+            self.state_db
+                .list_closing_thread_spawn_targets(root_thread_id)
+                .await
+                .map_err(internal_error)
+        })
+    }
+
     fn list_thread_spawn_children(
         &self,
         parent_thread_id: ThreadId,
@@ -107,12 +212,128 @@ impl AgentGraphStore for LocalAgentGraphStore {
             }
         })
     }
+
+    fn begin_workflow_validation(
+        &self,
+        submission: WorkflowValidationSubmission,
+    ) -> AgentGraphStoreFuture<'_, WorkflowValidationDecision> {
+        Box::pin(async move {
+            self.state_db
+                .begin_workflow_validation(to_state_submission(submission))
+                .await
+                .map(from_state_decision)
+                .map_err(internal_error)
+        })
+    }
+
+    fn complete_workflow_validation(
+        &self,
+        completion: WorkflowValidationCompletion,
+    ) -> AgentGraphStoreFuture<'_, bool> {
+        Box::pin(async move {
+            self.state_db
+                .complete_workflow_validation(to_state_completion(completion))
+                .await
+                .map_err(internal_error)
+        })
+    }
+
+    fn list_workflow_reviewer_validations(
+        &self,
+        root_thread_id: ThreadId,
+        turn_id: &str,
+    ) -> AgentGraphStoreFuture<'_, Vec<WorkflowReviewerValidation>> {
+        let turn_id = turn_id.to_string();
+        Box::pin(async move {
+            self.state_db
+                .list_workflow_reviewer_validations(root_thread_id, &turn_id)
+                .await
+                .map(|records| {
+                    records
+                        .into_iter()
+                        .map(|record| WorkflowReviewerValidation {
+                            agent_thread_id: record.agent_thread_id,
+                            role: record.role,
+                            output_revision: record.output_revision,
+                            output_sha256: record.output_sha256,
+                            reviewer_pass: record.reviewer_pass,
+                            has_high_or_critical: record.has_high_or_critical,
+                        })
+                        .collect()
+                })
+                .map_err(internal_error)
+        })
+    }
+}
+
+fn to_state_submission(
+    submission: WorkflowValidationSubmission,
+) -> codex_state::WorkflowValidationSubmission {
+    codex_state::WorkflowValidationSubmission {
+        root_thread_id: submission.root_thread_id,
+        turn_id: submission.turn_id,
+        validation_key: submission.validation_key,
+        result_kind: submission.result_kind,
+        agent_thread_id: submission.agent_thread_id,
+        reviewer_role: submission.reviewer_role,
+        output_revision: submission.output_revision,
+        output_sha256: submission.output_sha256,
+        requires_higher_revision: submission.requires_higher_revision,
+    }
+}
+
+fn from_state_decision(
+    decision: codex_state::WorkflowValidationDecision,
+) -> WorkflowValidationDecision {
+    match decision {
+        codex_state::WorkflowValidationDecision::Attempt(submission) => {
+            WorkflowValidationDecision::Attempt(submission)
+        }
+        codex_state::WorkflowValidationDecision::AlreadyAccepted(submissions) => {
+            WorkflowValidationDecision::AlreadyAccepted(submissions)
+        }
+        codex_state::WorkflowValidationDecision::Exhausted(submissions) => {
+            WorkflowValidationDecision::Exhausted(submissions)
+        }
+        codex_state::WorkflowValidationDecision::UnchangedCorrection(submissions) => {
+            WorkflowValidationDecision::UnchangedCorrection(submissions)
+        }
+        codex_state::WorkflowValidationDecision::ResultLimitReached => {
+            WorkflowValidationDecision::ResultLimitReached
+        }
+    }
+}
+
+fn to_state_completion(
+    completion: WorkflowValidationCompletion,
+) -> codex_state::WorkflowValidationCompletion {
+    codex_state::WorkflowValidationCompletion {
+        root_thread_id: completion.root_thread_id,
+        turn_id: completion.turn_id,
+        validation_key: completion.validation_key,
+        submission: completion.submission,
+        output_revision: completion.output_revision,
+        output_sha256: completion.output_sha256,
+        reviewer_pass: completion.reviewer_pass,
+        has_high_or_critical: completion.has_high_or_critical,
+    }
 }
 
 fn to_state_status(status: ThreadSpawnEdgeStatus) -> codex_state::DirectionalThreadSpawnEdgeStatus {
     match status {
         ThreadSpawnEdgeStatus::Open => codex_state::DirectionalThreadSpawnEdgeStatus::Open,
+        ThreadSpawnEdgeStatus::Closing => codex_state::DirectionalThreadSpawnEdgeStatus::Closing,
         ThreadSpawnEdgeStatus::Closed => codex_state::DirectionalThreadSpawnEdgeStatus::Closed,
+    }
+}
+
+fn from_state_status(
+    status: codex_state::DirectionalThreadSpawnEdgeStatus,
+) -> ThreadSpawnEdgeStatus {
+    match status {
+        codex_state::DirectionalThreadSpawnEdgeStatus::Open => ThreadSpawnEdgeStatus::Open,
+        codex_state::DirectionalThreadSpawnEdgeStatus::Closing => ThreadSpawnEdgeStatus::Closing,
+        codex_state::DirectionalThreadSpawnEdgeStatus::Closed => ThreadSpawnEdgeStatus::Closed,
     }
 }
 
@@ -339,6 +560,324 @@ mod tests {
         assert_eq!(
             closed_descendants,
             vec![closed_child_thread_id, closed_great_grandchild_thread_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn close_saga_authorizes_once_and_changes_only_the_target_edge() {
+        let fixture = state_runtime().await;
+        let store = LocalAgentGraphStore::new(fixture.state_db);
+        let root = thread_id(/*suffix*/ 100);
+        let child = thread_id(/*suffix*/ 101);
+        let sibling = thread_id(/*suffix*/ 102);
+        let grandchild = thread_id(/*suffix*/ 103);
+        let leaf = thread_id(/*suffix*/ 104);
+        for (parent, target) in [
+            (root, child),
+            (root, sibling),
+            (child, grandchild),
+            (grandchild, leaf),
+        ] {
+            assert!(
+                store
+                    .ensure_thread_spawn_edge_open(root, parent, target)
+                    .await
+                    .expect("open edge should persist")
+            );
+        }
+        store
+            .set_thread_spawn_edge_status(leaf, ThreadSpawnEdgeStatus::Closed)
+            .await
+            .expect("leaf should close independently");
+
+        let close = store
+            .begin_thread_spawn_subtree_close(root, child, grandchild)
+            .await
+            .expect("close reservation should succeed")
+            .expect("child should authorize its descendant");
+        assert_eq!(
+            close,
+            ThreadSpawnSubtreeClose {
+                previous_edge_status: ThreadSpawnEdgeStatus::Open,
+                thread_ids_deepest_first: vec![leaf, grandchild],
+            }
+        );
+        assert_eq!(
+            store
+                .thread_spawn_edge_status(grandchild)
+                .await
+                .expect("target status should load"),
+            Some(ThreadSpawnEdgeStatus::Closing)
+        );
+        assert_eq!(
+            store
+                .thread_spawn_edge_status(leaf)
+                .await
+                .expect("leaf status should load"),
+            Some(ThreadSpawnEdgeStatus::Closed)
+        );
+        assert!(
+            store
+                .finish_thread_spawn_subtree_close(grandchild)
+                .await
+                .expect("close should finish")
+        );
+
+        assert_eq!(
+            store
+                .begin_thread_spawn_subtree_close(root, sibling, grandchild)
+                .await
+                .expect("wrong-caller check should complete"),
+            None
+        );
+        let repeated = store
+            .begin_thread_spawn_subtree_close(root, child, grandchild)
+            .await
+            .expect("authorized retry should complete")
+            .expect("same caller remains authorized");
+        assert_eq!(repeated.previous_edge_status, ThreadSpawnEdgeStatus::Closed);
+        assert!(
+            store
+                .reopen_closed_thread_spawn_edge(root, child, grandchild)
+                .await
+                .expect("authorized resume should complete")
+        );
+        assert_eq!(
+            store
+                .thread_spawn_edge_status(grandchild)
+                .await
+                .expect("reopened target status should load"),
+            Some(ThreadSpawnEdgeStatus::Open)
+        );
+        assert_eq!(
+            store
+                .thread_spawn_edge_status(leaf)
+                .await
+                .expect("independently closed leaf status should load"),
+            Some(ThreadSpawnEdgeStatus::Closed)
+        );
+    }
+
+    #[tokio::test]
+    async fn closing_ancestor_blocks_existing_child_new_spawn_reparent_and_cycle() {
+        let fixture = state_runtime().await;
+        let store = LocalAgentGraphStore::new(fixture.state_db);
+        let root = thread_id(/*suffix*/ 110);
+        let child = thread_id(/*suffix*/ 111);
+        let grandchild = thread_id(/*suffix*/ 112);
+        let future_child = thread_id(/*suffix*/ 113);
+        assert!(
+            store
+                .ensure_thread_spawn_edge_open(root, root, child)
+                .await
+                .expect("root child should persist")
+        );
+        assert!(
+            store
+                .ensure_thread_spawn_edge_open(root, child, grandchild)
+                .await
+                .expect("grandchild should persist")
+        );
+        store
+            .begin_thread_spawn_subtree_close(root, root, child)
+            .await
+            .expect("root close should complete")
+            .expect("root should authorize child close");
+
+        assert!(
+            !store
+                .ensure_thread_spawn_edge_open(root, child, grandchild)
+                .await
+                .expect("existing edge check should complete")
+        );
+        assert!(
+            !store
+                .ensure_thread_spawn_edge_open(root, grandchild, future_child)
+                .await
+                .expect("new edge check should complete")
+        );
+        assert!(
+            !store
+                .ensure_thread_spawn_edge_open(root, root, grandchild)
+                .await
+                .expect("reparent check should complete")
+        );
+        assert!(
+            !store
+                .ensure_thread_spawn_edge_open(root, grandchild, root)
+                .await
+                .expect("cycle check should complete")
+        );
+    }
+
+    #[tokio::test]
+    async fn closing_targets_are_found_below_open_edges_deepest_first() {
+        let fixture = state_runtime().await;
+        let store = LocalAgentGraphStore::new(fixture.state_db);
+        let root = thread_id(/*suffix*/ 120);
+        let child = thread_id(/*suffix*/ 121);
+        let grandchild = thread_id(/*suffix*/ 122);
+        let leaf = thread_id(/*suffix*/ 123);
+        for (parent, target, status) in [
+            (root, child, ThreadSpawnEdgeStatus::Closing),
+            (child, grandchild, ThreadSpawnEdgeStatus::Open),
+            (grandchild, leaf, ThreadSpawnEdgeStatus::Closing),
+        ] {
+            store
+                .upsert_thread_spawn_edge(parent, target, status)
+                .await
+                .expect("test edge should persist");
+        }
+
+        assert_eq!(
+            store
+                .list_closing_thread_spawn_targets(root)
+                .await
+                .expect("closing targets should load"),
+            vec![leaf, child]
+        );
+    }
+
+    fn validation_submission(
+        root_thread_id: ThreadId,
+        turn_id: &str,
+        validation_key: &str,
+        output_revision: u32,
+        output_sha256: &str,
+    ) -> WorkflowValidationSubmission {
+        WorkflowValidationSubmission {
+            root_thread_id,
+            turn_id: turn_id.to_string(),
+            validation_key: validation_key.to_string(),
+            result_kind: "reviewer".to_string(),
+            agent_thread_id: Some(thread_id(/*suffix*/ 902)),
+            reviewer_role: Some("Security".to_string()),
+            output_revision,
+            output_sha256: output_sha256.to_string(),
+            requires_higher_revision: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_validation_is_turn_bound_persistent_and_requires_new_revision() {
+        let fixture = state_runtime().await;
+        let store = LocalAgentGraphStore::new(fixture.state_db.clone());
+        let reopened_store = LocalAgentGraphStore::new(fixture.state_db);
+        let root = thread_id(/*suffix*/ 900);
+        let first = validation_submission(root, "turn-1", "reviewer:security", 1, &"a".repeat(64));
+        assert_eq!(
+            store
+                .begin_workflow_validation(first.clone())
+                .await
+                .expect("first validation should reserve"),
+            WorkflowValidationDecision::Attempt(1)
+        );
+        assert_eq!(
+            reopened_store
+                .begin_workflow_validation(first)
+                .await
+                .expect("resumed validation state should load"),
+            WorkflowValidationDecision::UnchangedCorrection(2)
+        );
+        assert_eq!(
+            store
+                .begin_workflow_validation(validation_submission(
+                    root,
+                    "turn-1",
+                    "reviewer:security",
+                    2,
+                    &"b".repeat(64),
+                ))
+                .await
+                .expect("exhausted validation should load"),
+            WorkflowValidationDecision::Exhausted(2)
+        );
+        assert_eq!(
+            store
+                .begin_workflow_validation(validation_submission(
+                    root,
+                    "turn-2",
+                    "reviewer:security",
+                    1,
+                    &"a".repeat(64),
+                ))
+                .await
+                .expect("new turn should be isolated"),
+            WorkflowValidationDecision::Attempt(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn reviewer_evidence_records_distinct_pass_and_allows_one_fix_cycle() {
+        let fixture = state_runtime().await;
+        let store = LocalAgentGraphStore::new(fixture.state_db);
+        let root = thread_id(/*suffix*/ 910);
+        let child = thread_id(/*suffix*/ 902);
+        let first =
+            validation_submission(root, "turn-review", "reviewer:security", 1, &"c".repeat(64));
+        assert_eq!(
+            store
+                .begin_workflow_validation(first)
+                .await
+                .expect("first review should reserve"),
+            WorkflowValidationDecision::Attempt(1)
+        );
+        assert!(
+            store
+                .complete_workflow_validation(WorkflowValidationCompletion {
+                    root_thread_id: root,
+                    turn_id: "turn-review".to_string(),
+                    validation_key: "reviewer:security".to_string(),
+                    submission: 1,
+                    output_revision: 1,
+                    output_sha256: "c".repeat(64),
+                    reviewer_pass: false,
+                    has_high_or_critical: true,
+                })
+                .await
+                .expect("review completion should persist")
+        );
+        assert_eq!(
+            store
+                .begin_workflow_validation(validation_submission(
+                    root,
+                    "turn-review",
+                    "reviewer:security",
+                    2,
+                    &"d".repeat(64),
+                ))
+                .await
+                .expect("fixed review should reserve"),
+            WorkflowValidationDecision::Attempt(1)
+        );
+        assert!(
+            store
+                .complete_workflow_validation(WorkflowValidationCompletion {
+                    root_thread_id: root,
+                    turn_id: "turn-review".to_string(),
+                    validation_key: "reviewer:security".to_string(),
+                    submission: 1,
+                    output_revision: 2,
+                    output_sha256: "d".repeat(64),
+                    reviewer_pass: true,
+                    has_high_or_critical: false,
+                })
+                .await
+                .expect("fixed review completion should persist")
+        );
+        assert_eq!(
+            store
+                .list_workflow_reviewer_validations(root, "turn-review")
+                .await
+                .expect("review evidence should load"),
+            vec![WorkflowReviewerValidation {
+                agent_thread_id: child,
+                role: "Security".to_string(),
+                output_revision: 2,
+                output_sha256: "d".repeat(64),
+                reviewer_pass: true,
+                has_high_or_critical: false,
+            }]
         );
     }
 }

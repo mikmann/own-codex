@@ -67,6 +67,9 @@ use doctor::DoctorCommand;
 use state_db_recovery as local_state_db;
 
 use codex_config::LoaderOverrides;
+use codex_config::extended_workflow_prepare::PrepareAction;
+use codex_config::extended_workflow_prepare::apply_extended_workflow_preparation;
+use codex_config::extended_workflow_prepare::plan_extended_workflow_preparation;
 use codex_core::build_models_manager;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
@@ -88,20 +91,21 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::user_input::UserInput;
 use codex_terminal_detection::TerminalName;
 
-/// Codex CLI
+/// codex-extended-workflow CLI
 ///
 /// If no subcommand is specified, options will be forwarded to the interactive CLI.
 #[derive(Debug, Parser)]
 #[clap(
+    name = "codex-extended-workflow",
     author,
-    version,
+    version = "v0.147.1-alpha-1",
     // If a sub‑command is given, ignore requirements of the default args.
     subcommand_negates_reqs = true,
     // The executable is sometimes invoked via a platform‑specific name like
     // `codex-x86_64-unknown-linux-musl`, but the help output should always use
-    // the generic `codex` command name that users run.
-    bin_name = "codex",
-    override_usage = "codex [OPTIONS] [PROMPT]\n       codex [OPTIONS] <COMMAND> [ARGS]"
+    // the stable distribution name rather than a target-triple executable name.
+    bin_name = "codex-extended-workflow",
+    override_usage = "codex-extended-workflow [OPTIONS] [PROMPT]\n       codex-extended-workflow [OPTIONS] <COMMAND> [ARGS]"
 )]
 struct MultitoolCli {
     /// Enable process-only PSP routing for first-party ChatGPT requests.
@@ -160,6 +164,9 @@ enum Subcommand {
 
     /// Generate shell completion scripts.
     Completion(CompletionCommand),
+
+    /// Preview or apply the minimal repository setup for the extended workflow.
+    PrepareExtendWorkflow(PrepareExtendWorkflowCommand),
 
     /// Update Codex to the latest version.
     Update,
@@ -220,6 +227,17 @@ struct CompletionCommand {
     /// Shell to generate completions for
     #[clap(value_enum, default_value_t = Shell::Bash)]
     shell: Shell,
+}
+
+#[derive(Debug, Args)]
+struct PrepareExtendWorkflowCommand {
+    /// Apply the displayed plan. Without this flag the command is a read-only preview.
+    #[arg(long)]
+    apply: bool,
+
+    /// Repository directory to inspect. Defaults to the current directory.
+    #[arg(short = 'C', long = "cd", value_name = "DIR")]
+    cwd: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -467,13 +485,13 @@ struct LoginCommand {
 
     #[arg(
         long = "with-api-key",
-        help = "Read the API key from stdin (e.g. `printenv OPENAI_API_KEY | codex login --with-api-key`)"
+        help = "Read the API key from stdin (e.g. `printenv OPENAI_API_KEY | codex-extended-workflow login --with-api-key`)"
     )]
     with_api_key: bool,
 
     #[arg(
         long = "with-access-token",
-        help = "Read the access token from stdin (e.g. `printenv CODEX_ACCESS_TOKEN | codex login --with-access-token`)"
+        help = "Read the access token from stdin (e.g. `printenv CODEX_ACCESS_TOKEN | codex-extended-workflow login --with-access-token`)"
     )]
     with_access_token: bool,
 
@@ -776,66 +794,17 @@ fn handle_app_exit(exit_info: AppExitInfo) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run the update action and print the result.
-fn run_update_action(action: UpdateAction) -> anyhow::Result<()> {
-    println!();
-    let cmd_str = action.command_str();
-    println!("Updating Codex via `{cmd_str}`...");
-
-    let status = {
-        #[cfg(windows)]
-        {
-            if action == UpdateAction::StandaloneWindows {
-                let (cmd, args) = action.command_args();
-                // Run the standalone PowerShell installer with PowerShell
-                // itself. Routing this through `cmd.exe /C` would parse
-                // PowerShell metacharacters like `|` before PowerShell sees
-                // the installer command.
-                std::process::Command::new(cmd).args(args).status()?
-            } else {
-                // On Windows, run via cmd.exe so .CMD/.BAT are correctly resolved (PATHEXT semantics).
-                std::process::Command::new("cmd")
-                    .args(["/C", &cmd_str])
-                    .status()?
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            let (cmd, args) = action.command_args();
-            let command_path = crate::wsl_paths::normalize_for_wsl(cmd);
-            let normalized_args: Vec<String> = args
-                .iter()
-                .map(crate::wsl_paths::normalize_for_wsl)
-                .collect();
-            std::process::Command::new(&command_path)
-                .args(&normalized_args)
-                .status()?
-        }
-    };
-    if !status.success() {
-        anyhow::bail!("`{cmd_str}` failed with status {status}");
-    }
-    println!("\n🎉 Update ran successfully! Please restart Codex.");
-    Ok(())
+/// Automatic update actions are never executable in this fork.
+fn run_update_action(_action: UpdateAction) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "automatic updates are disabled for codex-extended-workflow; install a validated release explicitly"
+    )
 }
 
 fn run_update_command() -> anyhow::Result<()> {
-    #[cfg(debug_assertions)]
-    {
-        anyhow::bail!(
-            "`codex update` is not available in debug builds. Install a release build of Codex to use this command."
-        );
-    }
-
-    #[cfg(not(debug_assertions))]
-    {
-        let Some(action) = codex_tui::get_update_action() else {
-            anyhow::bail!(
-                "Could not detect the Codex installation method. Please update manually: https://developers.openai.com/codex/cli/"
-            );
-        };
-        run_update_action(action)
-    }
+    anyhow::bail!(
+        "`codex-extended-workflow update` is disabled for this fork; install a validated codex-extended-workflow release explicitly"
+    )
 }
 
 fn run_execpolicycheck(cmd: ExecPolicyCheckCommand) -> anyhow::Result<()> {
@@ -978,15 +947,36 @@ fn stage_str(stage: Stage) -> &'static str {
 
 fn main() -> anyhow::Result<()> {
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
+    let extended_workflow_default_enabled = take_extended_workflow_launcher();
     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
-        cli_main(arg0_paths, remote_control_disabled).await?;
+        cli_main(
+            arg0_paths,
+            remote_control_disabled,
+            extended_workflow_default_enabled,
+        )
+        .await?;
         Ok(())
     })
+}
+
+fn take_extended_workflow_launcher() -> bool {
+    let marker = std::env::var_os("CODEX_EXTENDED_WORKFLOW_LAUNCHER");
+    // SAFETY: `main` calls this before `arg0_dispatch_or_else` starts async work or any child
+    // process. Removing the one-shot launcher marker here prevents compatibility children from
+    // inheriting it.
+    unsafe { std::env::remove_var("CODEX_EXTENDED_WORKFLOW_LAUNCHER") };
+    extended_workflow_launcher_for(env!("CARGO_BIN_NAME"), marker.as_deref())
+}
+
+fn extended_workflow_launcher_for(bin_name: &str, npm_marker: Option<&std::ffi::OsStr>) -> bool {
+    bin_name == "codex-extended-workflow"
+        || npm_marker.is_some_and(|value| value == std::ffi::OsStr::new("1"))
 }
 
 async fn cli_main(
     arg0_paths: Arg0DispatchPaths,
     remote_control_disabled: bool,
+    extended_workflow_default_enabled: bool,
 ) -> anyhow::Result<()> {
     let MultitoolCli {
         psp,
@@ -1023,6 +1013,7 @@ async fn cli_main(
                 root_remote.clone(),
                 root_remote_auth_token_env.clone(),
                 arg0_paths.clone(),
+                extended_workflow_default_enabled,
             )
             .await?;
             handle_app_exit(exit_info)?;
@@ -1037,6 +1028,7 @@ async fn cli_main(
                 .shared
                 .inherit_exec_root_options(&interactive.shared);
             exec_cli.psp = psp;
+            exec_cli.extended_workflow_default_enabled = extended_workflow_default_enabled;
             exec_cli.strict_config |= root_strict_config;
             prepend_config_flags(
                 &mut exec_cli.config_overrides,
@@ -1058,6 +1050,7 @@ async fn cli_main(
                 .shared
                 .inherit_exec_root_options(&interactive.shared);
             exec_cli.psp = psp;
+            exec_cli.extended_workflow_default_enabled = extended_workflow_default_enabled;
             exec_cli.command = Some(ExecCommand::Review(review_args));
             exec_cli.strict_config = strict_config || root_strict_config;
             prepend_config_flags(
@@ -1065,6 +1058,14 @@ async fn cli_main(
                 root_config_overrides.clone(),
             );
             codex_exec::run_main(exec_cli, arg0_paths.clone()).await?;
+        }
+        Some(Subcommand::PrepareExtendWorkflow(command)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "prepare-extend-workflow",
+            )?;
+            run_prepare_extend_workflow(command)?;
         }
         Some(Subcommand::McpServer(McpServerCommand { strict_config })) => {
             reject_remote_mode_for_subcommand(
@@ -1308,6 +1309,7 @@ async fn cli_main(
                     .remote_auth_token_env
                     .or(root_remote_auth_token_env.clone()),
                 arg0_paths.clone(),
+                extended_workflow_default_enabled,
             )
             .await?;
             handle_app_exit(exit_info)?;
@@ -1375,6 +1377,7 @@ async fn cli_main(
                     .remote_auth_token_env
                     .or(root_remote_auth_token_env.clone()),
                 arg0_paths.clone(),
+                extended_workflow_default_enabled,
             )
             .await?;
             handle_app_exit(exit_info)?;
@@ -1408,7 +1411,7 @@ async fn cli_main(
                         .await;
                     } else if login_cli.api_key.is_some() {
                         eprintln!(
-                            "The --api-key flag is no longer supported. Pipe the key instead, e.g. `printenv OPENAI_API_KEY | codex login --with-api-key`."
+                            "The --api-key flag is no longer supported. Pipe the key instead, e.g. `printenv OPENAI_API_KEY | codex-extended-workflow login --with-api-key`."
                         );
                         std::process::exit(1);
                     } else if login_cli.with_api_key {
@@ -1531,7 +1534,9 @@ async fn cli_main(
             #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
             {
                 let _ = loader_overrides;
-                anyhow::bail!("`codex sandbox` is not supported on this operating system");
+                anyhow::bail!(
+                    "`codex-extended-workflow sandbox` is not supported on this operating system"
+                );
             }
         }
         Some(Subcommand::Debug(DebugCommand { subcommand })) => match subcommand {
@@ -1716,9 +1721,44 @@ fn profile_v2_for_subcommand<'a>(
             subcommand: DebugSubcommand::PromptInput(_),
         }) => Ok(Some(profile_v2)),
         _ => anyhow::bail!(
-            "--profile only applies to runtime commands and `codex mcp`: `codex`, `codex exec`, `codex review`, `codex resume`, `codex archive`, `codex delete`, `codex unarchive`, `codex fork`, `codex mcp`, `codex sandbox`, and `codex debug prompt-input`."
+            "--profile only applies to runtime commands and `codex-extended-workflow mcp`: `codex-extended-workflow`, `codex-extended-workflow exec`, `codex-extended-workflow review`, `codex-extended-workflow resume`, `codex-extended-workflow archive`, `codex-extended-workflow delete`, `codex-extended-workflow unarchive`, `codex-extended-workflow fork`, `codex-extended-workflow mcp`, `codex-extended-workflow sandbox`, and `codex-extended-workflow debug prompt-input`."
         ),
     }
+}
+
+fn run_prepare_extend_workflow(command: PrepareExtendWorkflowCommand) -> anyhow::Result<()> {
+    let start = command.cwd.unwrap_or(std::env::current_dir()?);
+    let plan = plan_extended_workflow_preparation(&start)?;
+    println!("Repository: {}", plan.repository_root.display());
+    println!(
+        "[{:?}] {} — {}",
+        plan.action,
+        plan.config_path.display(),
+        plan.detail
+    );
+    if plan.action == PrepareAction::Conflict {
+        anyhow::bail!("preparation stopped because the existing configuration conflicts");
+    }
+    if !command.apply {
+        println!("Preview only; no files were changed. Re-run with --apply to apply this plan.");
+        return Ok(());
+    }
+    std::io::stdout().flush()?;
+
+    let report = apply_extended_workflow_preparation(&plan)?;
+    for path in &report.created {
+        println!("Created: {}", path.display());
+    }
+    for path in &report.updated {
+        println!("Updated: {}", path.display());
+    }
+    for path in &report.reused {
+        println!("Reused unchanged: {}", path.display());
+    }
+    println!(
+        "Prepared repository files. Start a new session or resume the session to load the repository config."
+    );
+    Ok(())
 }
 
 async fn run_exec_server_command(
@@ -1839,7 +1879,7 @@ async fn load_exec_server_remote_auth_provider(
 
     let auth = load_exec_server_remote_auth(
         config,
-        "remote exec-server registration requires ChatGPT authentication or API key authentication; run `codex login` or set CODEX_API_KEY",
+        "remote exec-server registration requires ChatGPT authentication or API key authentication; run `codex-extended-workflow login` or set CODEX_API_KEY",
     )
     .await?;
 
@@ -2184,12 +2224,12 @@ fn reject_remote_mode_for_subcommand(
 ) -> anyhow::Result<()> {
     if let Some(remote) = remote {
         anyhow::bail!(
-            "`--remote {remote}` is only supported for interactive TUI commands, not `codex {subcommand}`"
+            "`--remote {remote}` is only supported for interactive TUI commands, not `codex-extended-workflow {subcommand}`"
         );
     }
     if remote_auth_token_env.is_some() {
         anyhow::bail!(
-            "`--remote-auth-token-env` is only supported for interactive TUI commands, not `codex {subcommand}`"
+            "`--remote-auth-token-env` is only supported for interactive TUI commands, not `codex-extended-workflow {subcommand}`"
         );
     }
     Ok(())
@@ -2250,6 +2290,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::Login(_)) => Some("login"),
         Some(Subcommand::Logout(_)) => Some("logout"),
         Some(Subcommand::Completion(_)) => Some("completion"),
+        Some(Subcommand::PrepareExtendWorkflow(_)) => Some("prepare-extend-workflow"),
         Some(Subcommand::Update) => Some("update"),
         Some(Subcommand::Cloud(_)) => Some("cloud"),
         Some(Subcommand::Sandbox(_)) => Some("sandbox"),
@@ -2280,7 +2321,9 @@ fn reject_strict_config_for_unsupported_subcommand(
     subcommand: &str,
 ) -> anyhow::Result<()> {
     if strict_config {
-        anyhow::bail!("`--strict-config` is not supported for `codex {subcommand}`");
+        anyhow::bail!(
+            "`--strict-config` is not supported for `codex-extended-workflow {subcommand}`"
+        );
     }
     Ok(())
 }
@@ -2373,6 +2416,7 @@ async fn run_interactive_tui(
     remote: Option<String>,
     remote_auth_token_env: Option<String>,
     arg0_paths: Arg0DispatchPaths,
+    extended_workflow_default_enabled: bool,
 ) -> std::io::Result<AppExitInfo> {
     if let Some(prompt) = interactive.prompt.take() {
         // Normalize CRLF/CR to LF so CLI-provided text can't leak `\r` into TUI state.
@@ -2408,7 +2452,10 @@ async fn run_interactive_tui(
         codex_tui::run_main(
             interactive.clone(),
             arg0_paths.clone(),
-            codex_config::LoaderOverrides::default(),
+            codex_config::LoaderOverrides {
+                extended_workflow_default_enabled,
+                ..Default::default()
+            },
             remote_endpoint.clone(),
         )
     };
@@ -2630,7 +2677,7 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
 
 fn print_completion(cmd: CompletionCommand) {
     let mut app = MultitoolCli::command();
-    let name = "codex";
+    let name = "codex-extended-workflow";
     generate(cmd.shell, &mut app, name, &mut std::io::stdout());
 }
 
@@ -2641,6 +2688,23 @@ mod tests {
     use codex_protocol::ThreadId;
     use codex_tui::TokenUsage;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn primary_binary_and_npm_shim_enable_extended_workflow_defaults() {
+        assert!(extended_workflow_launcher_for(
+            "codex-extended-workflow",
+            None
+        ));
+        assert!(extended_workflow_launcher_for(
+            "codex",
+            Some(std::ffi::OsStr::new("1"))
+        ));
+        assert!(!extended_workflow_launcher_for("codex", None));
+        assert!(!extended_workflow_launcher_for(
+            "codex",
+            Some(std::ffi::OsStr::new("true"))
+        ));
+    }
 
     #[tokio::test]
     async fn updater_http_client_factory_honors_respect_system_proxy() {
@@ -3204,15 +3268,27 @@ mod tests {
     fn plugin_marketplace_help_uses_plugin_namespace() {
         let help = help_from_args(&["codex", "plugin", "marketplace", "--help"]);
         assert!(
-            help.contains("Usage: codex plugin marketplace [OPTIONS] <COMMAND>"),
+            help.contains("Usage: codex-extended-workflow plugin marketplace [OPTIONS] <COMMAND>"),
             "{help}"
         );
 
         for (subcommand, usage) in [
-            ("add", "Usage: codex plugin marketplace add"),
-            ("list", "Usage: codex plugin marketplace list"),
-            ("upgrade", "Usage: codex plugin marketplace upgrade"),
-            ("remove", "Usage: codex plugin marketplace remove"),
+            (
+                "add",
+                "Usage: codex-extended-workflow plugin marketplace add",
+            ),
+            (
+                "list",
+                "Usage: codex-extended-workflow plugin marketplace list",
+            ),
+            (
+                "upgrade",
+                "Usage: codex-extended-workflow plugin marketplace upgrade",
+            ),
+            (
+                "remove",
+                "Usage: codex-extended-workflow plugin marketplace remove",
+            ),
         ] {
             let help = help_from_args(&["codex", "plugin", "marketplace", subcommand, "--help"]);
             assert!(help.contains(usage), "{help}");
@@ -3501,7 +3577,7 @@ mod tests {
             lines,
             vec![
                 "Token usage: total=2 input=0 output=2".to_string(),
-                "To continue this session, run codex resume 123e4567-e89b-12d3-a456-426614174000"
+                "To continue this session, run codex-extended-workflow resume 123e4567-e89b-12d3-a456-426614174000"
                     .to_string(),
             ]
         );
@@ -3518,7 +3594,7 @@ mod tests {
             lines,
             vec![
                 "Token usage: total=2 input=0 output=2".to_string(),
-                "To continue this session, run codex resume 123e4567-e89b-12d3-a456-426614174000"
+                "To continue this session, run codex-extended-workflow resume 123e4567-e89b-12d3-a456-426614174000"
                     .to_string(),
             ]
         );
@@ -3546,7 +3622,7 @@ mod tests {
             lines,
             vec![
                 "Token usage: total=2 input=0 output=2".to_string(),
-                "To continue this session, run codex resume, then select my-thread (123e4567-e89b-12d3-a456-426614174000)".to_string(),
+                "To continue this session, run codex-extended-workflow resume, then select my-thread (123e4567-e89b-12d3-a456-426614174000)".to_string(),
             ]
         );
     }
@@ -3874,7 +3950,7 @@ mod tests {
 
         assert_eq!(
             err.to_string(),
-            "`--strict-config` is not supported for `codex mcp`"
+            "`--strict-config` is not supported for `codex-extended-workflow mcp`"
         );
 
         let cli = MultitoolCli::try_parse_from(["codex", "--strict-config", "remote-control"])
@@ -3887,7 +3963,7 @@ mod tests {
 
         assert_eq!(
             err.to_string(),
-            "`--strict-config` is not supported for `codex remote-control`"
+            "`--strict-config` is not supported for `codex-extended-workflow remote-control`"
         );
     }
 
@@ -3903,7 +3979,7 @@ mod tests {
 
         assert_eq!(
             err.to_string(),
-            "`--strict-config` is not supported for `codex app-server proxy`"
+            "`--strict-config` is not supported for `codex-extended-workflow app-server proxy`"
         );
     }
 

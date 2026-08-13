@@ -96,14 +96,14 @@ function findCodexExecutable() {
   }
 
   const packageManager = detectPackageManager();
-  const updateCommand =
+  const reinstallCommand =
     packageManager === "bun"
-      ? "bun install -g @openai/codex@latest"
+      ? "bun install -g codex-extended-workflow"
       : packageManager === "pnpm"
-        ? "pnpm add -g @openai/codex@latest"
-        : "npm install -g @openai/codex@latest";
+        ? "pnpm add -g codex-extended-workflow"
+        : "npm install -g codex-extended-workflow";
   throw new Error(
-    `Missing optional dependency ${platformPackage}. Reinstall Codex: ${updateCommand}`,
+    `Missing optional dependency ${platformPackage}. Reinstall codex-extended-workflow: ${reinstallCommand}`,
   );
 }
 
@@ -122,7 +122,7 @@ function isPnpmOwnedCodexInstall(nodeModulesDir) {
 
   try {
     return (
-      realpathSync(path.join(nodeModulesDir, "@openai", "codex")) ===
+      realpathSync(path.join(nodeModulesDir, "codex-extended-workflow")) ===
       codexPackageRoot
     );
   } catch {

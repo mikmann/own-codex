@@ -19646,6 +19646,16 @@
                 ],
                 "title": "SubAgentActivityThreadItemType",
                 "type": "string"
+              },
+              "workflowAgent": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/v2/WorkflowAgentDisplay"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -22600,6 +22610,51 @@
         ],
         "title": "WindowsWorldWritableWarningNotification",
         "type": "object"
+      },
+      "WorkflowAgentDisplay": {
+        "properties": {
+          "agentType": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "reasoningEffort": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "role": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/definitions/v2/WorkflowAgentDisplayStatus"
+          }
+        },
+        "required": [
+          "agentType",
+          "model",
+          "name",
+          "role",
+          "status"
+        ],
+        "type": "object"
+      },
+      "WorkflowAgentDisplayStatus": {
+        "enum": [
+          "running",
+          "validated",
+          "rejected"
+        ],
+        "type": "string"
       },
       "WorkspaceMessage": {
         "properties": {

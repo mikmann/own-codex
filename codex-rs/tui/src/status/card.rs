@@ -705,18 +705,20 @@ fn status_approval_label(
 
 impl HistoryCell for StatusHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(Line::from(vec![
-            Span::from(format!("{}>_ ", FieldFormatter::INDENT)).dim(),
-            Span::from("OpenAI Codex").bold(),
-            Span::from(" ").dim(),
-            Span::from(format!("(v{CODEX_CLI_VERSION})")).dim(),
-        ]));
-
         let available_inner_width = usize::from(width.saturating_sub(4));
         if available_inner_width == 0 {
             return Vec::new();
         }
+        let mut lines = adaptive_wrap_lines(
+            [Line::from(vec![
+                Span::from(format!("{}>_ ", FieldFormatter::INDENT)).dim(),
+                Span::from("codex-extended-workflow").bold(),
+                Span::from(" ").dim(),
+                Span::from(format!("(v{CODEX_CLI_VERSION})")).dim(),
+            ])],
+            RtOptions::new(available_inner_width)
+                .subsequent_indent(Line::from(FieldFormatter::INDENT)),
+        );
 
         let account_value = self.account.as_ref().map(|account| match account {
             StatusAccountDisplay::ChatGpt { email, plan } => match (email, plan) {
@@ -726,7 +728,7 @@ impl HistoryCell for StatusHistoryCell {
                 (None, None) => "ChatGPT".to_string(),
             },
             StatusAccountDisplay::ApiKey => {
-                "API key configured (run codex login to use ChatGPT)".to_string()
+                "API key configured (run codex-extended-workflow login to use ChatGPT)".to_string()
             }
         });
 

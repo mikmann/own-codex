@@ -1,6 +1,9 @@
 use super::*;
 use crate::StartThreadOptions;
 use crate::ThreadManager;
+use crate::agent::control::SpawnAgentOptions;
+use crate::agent_communication::AgentCommunicationContext;
+use crate::agent_communication::AgentCommunicationKind;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::config::PermissionProfileSnapshot;
@@ -14,12 +17,15 @@ use crate::session::turn_context::TurnContext;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
+use crate::tools::handlers::ValidateWorkflowResultHandler;
+use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
+use crate::tools::handlers::multi_agents_v2::close_agent::CloseAgentResult as CloseAgentResultV2;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
@@ -44,6 +50,7 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ExtendedThreadSpawnRoleMetadata;
 use codex_protocol::protocol::FileSystemAccessMode;
 use codex_protocol::protocol::FileSystemPath;
 use codex_protocol::protocol::FileSystemSandboxEntry;
@@ -59,6 +66,7 @@ use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::protocol::encode_extended_thread_spawn_role_metadata;
 use codex_protocol::user_input::UserInput;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use core_test_support::TempDirExt;
@@ -387,6 +395,385 @@ async fn multi_agent_v2_spawn_fork_turns_all_rejects_agent_type_override() {
         err,
         FunctionCallError::RespondToModel(
             "Full-history forked agents inherit the parent agent type; omit agent_type, or spawn without a full-history fork.".to_string(),
+        )
+    );
+}
+
+#[test]
+fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
+    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+    let handle = std::thread::Builder::new()
+        .name("multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling".to_string())
+        .stack_size(TEST_STACK_SIZE_BYTES)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime");
+            runtime.block_on(async {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        task_name: String,
+        nickname: Option<String>,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let role_name = install_role_with_model_override(&mut turn).await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config.multi_agent_v2.hide_spawn_agent_metadata = false;
+    let profile = config
+        .extended_workflow
+        .experts
+        .profiles
+        .iter_mut()
+        .find(|profile| profile.name == "architecture")
+        .expect("default architecture profile");
+    profile.agent_type = Some(role_name.clone());
+    profile.model = Some("gpt-5.4".to_string());
+    profile.reasoning_effort = Some(ReasoningEffort::High);
+
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    set_turn_config(&mut turn, config);
+    let turn = TurnContext {
+        multi_agent_version: codex_protocol::protocol::MultiAgentVersion::V2,
+        ..turn
+    };
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let output = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "Inspect the architecture and return the ExpertResult contract.",
+                "task_name": "architecture_review",
+                "agent_type": role_name,
+                "fork_turns": "none",
+                "read_only": true,
+                "workflow_name": "architecture",
+                "workflow_type": "expert",
+                "workflow_role": "Architecture",
+                "model": "gpt-5.4",
+                "reasoning_effort": "high"
+            })),
+        ))
+        .await
+        .expect("matching workflow profile should spawn");
+    let (content, _) = expect_text_output(output);
+    let result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    assert_eq!(result.nickname.as_deref(), Some("architecture"));
+
+    let child_thread_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(
+            session.thread_id,
+            &turn.session_source,
+            result.task_name.as_str(),
+        )
+        .await
+        .expect("spawned task name should resolve");
+    let child = manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("spawned workflow agent should exist");
+    let snapshot = child.config_snapshot().await;
+    assert_eq!(
+        child.multi_agent_version(),
+        Some(codex_protocol::protocol::MultiAgentVersion::V2)
+    );
+    assert_eq!(snapshot.model, "gpt-5.4");
+    assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::High));
+    assert_eq!(snapshot.approval_policy, AskForApproval::Never);
+    assert_eq!(snapshot.permission_profile, PermissionProfile::read_only());
+    assert_eq!(
+        snapshot.session_source.get_agent_display_role().as_deref(),
+        Some("Expert | Architecture")
+    );
+    assert!(snapshot.session_source.is_read_only_subagent());
+
+    let child_config = child.config().await;
+    assert!(!child_config.agents_enabled);
+    assert!(!child_config.extended_workflow.enabled);
+    assert!(!child_config.features.enabled(Feature::Collab));
+    assert!(!child_config.features.enabled(Feature::MultiAgentV2));
+    assert!(!child_config.include_apps_instructions);
+
+    let terminal_result = json!({
+        "subject": "architecture workflow review",
+        "summary": "The architecture workflow uses the selected read-only profile.",
+        "findings": ["The architecture profile is applied after role defaults."],
+        "recommendations": ["Keep the architecture spawn and validation regression tests."],
+        "evidence": [{
+            "file": "codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs",
+            "symbol": "handle_spawn_agent",
+            "explanation": "The architecture workflow profile controls the effective child model."
+        }],
+        "uncertainties": ["No unresolved architecture uncertainty in this test fixture."]
+    });
+    let validation_path = AgentPath::try_from("/root/validation_expert")
+        .expect("validation agent path");
+    let validation_task = "Inspect the architecture workflow result.";
+    let validation_name = "architecture-validator";
+    let validation_assignment_sha256 = crate::extended_workflow::workflow_assignment_sha256(
+        &turn.sub_id,
+        crate::extended_workflow::WorkflowAgentKind::Expert,
+        validation_name,
+        "Architecture",
+        validation_task,
+    );
+    let validation_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: session.thread_id,
+        depth: 1,
+        agent_path: Some(validation_path.clone()),
+        agent_nickname: Some(validation_name.to_string()),
+        agent_role: encode_extended_thread_spawn_role_metadata(
+            ExtendedThreadSpawnRoleMetadata {
+                config_role: None,
+                read_only: true,
+                workflow_type: Some("Expert"),
+                workflow_role: Some("Architecture"),
+                workflow_name: Some(validation_name),
+                workflow_turn_id: Some(turn.sub_id.as_str()),
+                assignment_sha256: Some(validation_assignment_sha256.as_str()),
+            },
+        ),
+    });
+    let mut validation_config = (*turn.config).clone();
+    validation_config.model = Some("gpt-5.4".to_string());
+    validation_config.model_reasoning_effort = Some(ReasoningEffort::High);
+    validation_config
+        .apply_read_only_subagent_ceiling()
+        .expect("validation child should be read-only");
+    let validation_communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        validation_path,
+        Vec::new(),
+        validation_task.to_string(),
+        /*trigger_turn*/ false,
+    );
+    let validation_agent = session
+        .services
+        .agent_control
+        .spawn_agent_with_communication(
+            validation_config,
+            validation_communication.clone(),
+            AgentCommunicationContext::new(
+                AgentCommunicationKind::Spawn,
+                session.thread_id,
+            ),
+            Some(validation_source),
+            SpawnAgentOptions {
+                parent_thread_id: Some(session.thread_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("validation fixture agent should spawn without starting a turn");
+    let validation_child = manager
+        .get_thread(validation_agent.thread_id)
+        .await
+        .expect("validation fixture agent should exist");
+    validation_child
+        .append_rollout_items(&[RolloutItem::InterAgentCommunication(
+            validation_communication,
+        )])
+        .await
+        .expect("validation task should be persisted as server-owned evidence");
+    let child_turn = validation_child.session.new_default_turn().await;
+    validation_child
+        .session
+        .send_event(
+            child_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: child_turn.sub_id.clone(),
+                started_at: None,
+                last_agent_message: Some(terminal_result.to_string()),
+                error: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+    validation_child
+        .flush_rollout()
+        .await
+        .expect("terminal workflow result should be persisted before validation");
+    let validation_target = validation_agent.thread_id.to_string();
+
+    let mut substituted_result = terminal_result.clone();
+    substituted_result["summary"] =
+        json!("A parent-supplied substitute that the child never returned.");
+    let rejected = ValidateWorkflowResultHandler
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "validate_workflow_result",
+            function_payload(json!({
+                "kind": "expert",
+                "result_id": "parent-controlled-id-one",
+                "expected_subject": "parent-controlled subject",
+                "agent_task": validation_target.clone(),
+                "result": substituted_result
+            })),
+        ))
+        .await
+        .expect("a mismatched terminal result should be a structured rejection");
+    let (rejected_content, rejected_success) = expect_text_output(rejected);
+    let rejected_payload: serde_json::Value =
+        serde_json::from_str(&rejected_content).expect("rejection should be JSON");
+    assert_eq!(rejected_success, Some(false));
+    assert_eq!(rejected_payload["accepted"], false);
+    assert_eq!(rejected_payload["retry_allowed"], true);
+    assert_eq!(rejected_payload["attempts"], 1);
+
+    let correction_turn = validation_child.session.new_default_turn().await;
+    validation_child
+        .session
+        .send_event(
+            correction_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: correction_turn.sub_id.clone(),
+                started_at: None,
+                last_agent_message: Some(terminal_result.to_string()),
+                error: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+    validation_child
+        .flush_rollout()
+        .await
+        .expect("targeted correction revision should be persisted before retry");
+
+    let accepted = ValidateWorkflowResultHandler
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "validate_workflow_result",
+            function_payload(json!({
+                "kind": "expert",
+                "result_id": "parent-controlled-id-two",
+                "expected_subject": "another parent-controlled subject",
+                "agent_task": validation_target,
+                "result": terminal_result
+            })),
+        ))
+        .await
+        .expect("the exact completed child result should validate on the one allowed retry");
+    let (accepted_content, accepted_success) = expect_text_output(accepted);
+    let accepted_payload: serde_json::Value =
+        serde_json::from_str(&accepted_content).expect("acceptance should be JSON");
+    assert_eq!(
+        accepted_success,
+        Some(true),
+        "exact child payload should validate: {accepted_payload:#}"
+    );
+    assert_eq!(accepted_payload["accepted"], true);
+    assert_eq!(accepted_payload["attempts"], 2);
+            });
+        })
+        .expect("spawn workflow end-to-end regression test thread");
+    handle
+        .join()
+        .expect("workflow end-to-end regression test thread panicked");
+}
+
+#[tokio::test]
+async fn multi_agent_v2_workflow_spawn_rejects_unverified_identity_or_write_access() {
+    let (session, turn) = make_session_and_context().await;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let writable_error = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect",
+                "task_name": "writable_expert",
+                "fork_turns": "none",
+                "workflow_name": "architecture",
+                "workflow_type": "expert",
+                "workflow_role": "Architecture"
+            })),
+        ))
+        .await
+        .err()
+        .expect("workflow agents must be read-only");
+    assert_eq!(
+        writable_error,
+        FunctionCallError::RespondToModel(
+            "workflow experts and reviewers must be spawned with read_only=true".to_string()
+        )
+    );
+
+    let inherited_context_error = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect",
+                "task_name": "unbounded_context_expert",
+                "fork_turns": "all",
+                "read_only": true,
+                "workflow_name": "architecture",
+                "workflow_type": "expert",
+                "workflow_role": "Architecture"
+            })),
+        ))
+        .await
+        .err()
+        .expect("workflow agents must receive only their compact task contract");
+    assert_eq!(
+        inherited_context_error,
+        FunctionCallError::RespondToModel(
+            "workflow experts and reviewers must use fork_turns=\"none\" so only the compact task contract is transferred"
+                .to_string()
+        )
+    );
+
+    let identity_error = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session,
+            turn,
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect",
+                "task_name": "unknown_expert",
+                "fork_turns": "none",
+                "read_only": true,
+                "workflow_name": "not_configured",
+                "workflow_type": "expert",
+                "workflow_role": "Architecture"
+            })),
+        ))
+        .await
+        .err()
+        .expect("unknown workflow identity must be rejected");
+    assert_eq!(
+        identity_error,
+        FunctionCallError::RespondToModel(
+            "unknown configured expert profile `not_configured` with role `Architecture`"
+                .to_string()
         )
     );
 }
@@ -1642,7 +2029,7 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
     session
         .services
         .agent_control
-        .close_agent(agent_id)
+        .close_agent(session.thread_id, agent_id)
         .await
         .expect("close_agent should succeed");
 
@@ -2387,7 +2774,9 @@ async fn spawn_agent_allows_depth_up_to_configured_max_depth() {
 
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
+    session.services.agent_control = manager
+        .agent_control()
+        .with_session_id(session.thread_id.into(), usize::MAX);
 
     let mut config = (*turn.config).clone();
     config.agent_max_depth = DEFAULT_AGENT_MAX_DEPTH + 1;
@@ -2679,7 +3068,10 @@ async fn resume_agent_rejects_invalid_id() {
 async fn resume_agent_reports_missing_agent() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
+    session.services.agent_control = manager
+        .agent_control()
+        .with_session_id(session.thread_id.into(), usize::MAX);
+    let caller_thread_id = session.thread_id;
     let agent_id = ThreadId::new();
     let invocation = invocation(
         Arc::new(session),
@@ -2692,7 +3084,9 @@ async fn resume_agent_reports_missing_agent() {
     };
     assert_eq!(
         err,
-        FunctionCallError::RespondToModel(format!("agent with id {agent_id} not found"))
+        FunctionCallError::RespondToModel(format!(
+            "agent `{agent_id}` is not a resumable descendant of caller `{caller_thread_id}`"
+        ))
     );
 }
 
@@ -2736,10 +3130,13 @@ async fn resume_agent_noops_for_active_agent() {
 }
 
 #[tokio::test]
-async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
+async fn resume_agent_rejects_an_unrelated_closed_thread() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
+    session.services.agent_control = manager
+        .agent_control()
+        .with_session_id(session.thread_id.into(), usize::MAX);
+    let caller_thread_id = session.thread_id;
     let config = turn.config.as_ref().clone();
     let thread = manager
         .resume_thread_with_history(
@@ -2778,41 +3175,19 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
         "resume_agent",
         function_payload(json!({"id": agent_id.to_string()})),
     );
-    let output = ResumeAgentHandler
-        .handle(resume_invocation)
-        .await
-        .expect("resume_agent should succeed");
-    let (content, success) = expect_text_output(output);
-    let result: resume_agent::ResumeAgentResult =
-        serde_json::from_str(&content).expect("resume_agent result should be json");
-    assert_ne!(result.status, AgentStatus::NotFound);
-    assert_eq!(success, Some(true));
-
-    let send_invocation = invocation(
-        session,
-        turn,
-        "send_input",
-        function_payload(json!({"target": agent_id.to_string(), "message": "hello"})),
+    let Err(err) = ResumeAgentHandler.handle(resume_invocation).await else {
+        panic!("resume_agent must reject a thread outside the caller's spawn tree");
+    };
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(format!(
+            "agent `{agent_id}` is not a resumable descendant of caller `{caller_thread_id}`"
+        ))
     );
-    let output = SendInputHandler
-        .handle(send_invocation)
-        .await
-        .expect("send_input should succeed after resume");
-    let (content, success) = expect_text_output(output);
-    let result: serde_json::Value =
-        serde_json::from_str(&content).expect("send_input result should be json");
-    let submission_id = result
-        .get("submission_id")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    assert!(!submission_id.is_empty());
-    assert_eq!(success, Some(true));
-
-    let _ = manager
-        .agent_control()
-        .shutdown_live_agent(agent_id)
-        .await
-        .expect("shutdown resumed agent");
+    assert_eq!(
+        manager.agent_control().get_status(agent_id).await,
+        AgentStatus::NotFound
+    );
 }
 
 #[tokio::test]
@@ -4155,17 +4530,258 @@ async fn multi_agent_v2_interrupt_agent_rejects_self_target_by_task_name() {
 }
 
 #[tokio::test]
+async fn multi_agent_v2_close_agent_closes_a_task_subtree_and_is_idempotent_by_id() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    let root = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    set_turn_config(&mut turn, config);
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "worker"
+            })),
+        ))
+        .await
+        .expect("worker spawn should succeed");
+    let worker_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+        .await
+        .expect("worker path should resolve");
+    let worker_thread = manager
+        .get_thread(worker_id)
+        .await
+        .expect("worker should be resident");
+    let worker_session = worker_thread.session.clone();
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            worker_session.clone(),
+            worker_session.new_default_turn().await,
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect the child task",
+                "task_name": "child"
+            })),
+        ))
+        .await
+        .expect("child spawn should succeed");
+    let child_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "worker/child")
+        .await
+        .expect("child path should resolve");
+
+    let self_close_error = CloseAgentHandlerV2
+        .handle(invocation(
+            worker_session.clone(),
+            worker_session.new_default_turn().await,
+            "close_agent",
+            function_payload(json!({"target": worker_id.to_string()})),
+        ))
+        .await
+        .err()
+        .expect("an agent should not close itself");
+    assert_eq!(
+        self_close_error,
+        FunctionCallError::RespondToModel(
+            "an agent cannot close itself; return your result and let the parent close you if needed"
+                .to_string()
+        )
+    );
+
+    let status_before = manager.agent_control().get_status(worker_id).await;
+    let output = CloseAgentHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "close_agent",
+            function_payload(json!({"target": "worker"})),
+        ))
+        .await
+        .expect("close_agent should accept a v2 task name");
+    let (content, success) = expect_text_output(output);
+    let result: CloseAgentResultV2 =
+        serde_json::from_str(&content).expect("close_agent result should be json");
+    assert_eq!(
+        result,
+        CloseAgentResultV2 {
+            previous_status: status_before
+        }
+    );
+    assert_eq!(success, Some(true));
+    assert_eq!(
+        manager.agent_control().get_status(worker_id).await,
+        AgentStatus::NotFound
+    );
+    assert_eq!(
+        manager.agent_control().get_status(child_id).await,
+        AgentStatus::NotFound
+    );
+    let shutdowns_after_first_close = manager
+        .captured_ops()
+        .into_iter()
+        .filter(|(thread_id, op)| {
+            (*thread_id == worker_id || *thread_id == child_id) && matches!(op, Op::Shutdown)
+        })
+        .count();
+    assert_eq!(shutdowns_after_first_close, 2);
+
+    let repeated_output = CloseAgentHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "close_agent",
+            function_payload(json!({"target": worker_id.to_string()})),
+        ))
+        .await
+        .expect("repeating close_agent by thread id should be safe");
+    let (repeated_content, repeated_success) = expect_text_output(repeated_output);
+    let repeated_result: CloseAgentResultV2 = serde_json::from_str(&repeated_content)
+        .expect("repeated close_agent result should be json");
+    assert_eq!(
+        repeated_result,
+        CloseAgentResultV2 {
+            previous_status: AgentStatus::NotFound
+        }
+    );
+    assert_eq!(repeated_success, Some(true));
+    let shutdowns_after_repeated_close = manager
+        .captured_ops()
+        .into_iter()
+        .filter(|(thread_id, op)| {
+            (*thread_id == worker_id || *thread_id == child_id) && matches!(op, Op::Shutdown)
+        })
+        .count();
+    assert_eq!(shutdowns_after_repeated_close, shutdowns_after_first_close);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_close_agent_rejects_root_and_unknown_task_paths() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    let root = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    set_turn_config(&mut turn, config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    for target in ["/root".to_string(), root.thread_id.to_string()] {
+        let error = CloseAgentHandlerV2
+            .handle(invocation(
+                session.clone(),
+                turn.clone(),
+                "close_agent",
+                function_payload(json!({"target": target})),
+            ))
+            .await
+            .err()
+            .expect("close_agent should reject the root agent");
+        assert_eq!(
+            error,
+            FunctionCallError::RespondToModel(
+                "an agent cannot close itself; return your result and let the parent close you if needed"
+                    .to_string()
+            )
+        );
+    }
+
+    let error = CloseAgentHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "close_agent",
+            function_payload(json!({"target": "missing"})),
+        ))
+        .await
+        .err()
+        .expect("close_agent should reject an unknown task path");
+    assert_eq!(
+        error,
+        FunctionCallError::RespondToModel("live agent path `/root/missing` not found".to_string())
+    );
+
+    let unknown_thread_id = ThreadId::new();
+    let (mut session, turn) = make_session_and_context().await;
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let error = CloseAgentHandlerV2
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "close_agent",
+            function_payload(json!({"target": unknown_thread_id.to_string()})),
+        ))
+        .await
+        .err()
+        .expect("close_agent should reject an unknown thread id");
+    assert_eq!(
+        error,
+        FunctionCallError::RespondToModel(format!(
+            "thread `{unknown_thread_id}` is not a descendant of the calling agent"
+        ))
+    );
+}
+
+#[tokio::test]
 async fn close_agent_submits_shutdown_and_returns_previous_status() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
     let config = turn.config.as_ref().clone();
-    let thread = manager
+    let root = manager
         .start_thread(StartThreadOptions::new(config.clone()))
         .await
-        .expect("start thread");
-    let agent_id = thread.thread_id;
-    let status_before = manager.agent_control().get_status(agent_id).await;
+        .expect("start root thread");
+    session.thread_id = root.thread_id;
+    let agent_id = session
+        .services
+        .agent_control
+        .spawn_agent(
+            config,
+            vec![UserInput::Text {
+                text: "close me".to_string(),
+                text_elements: Vec::new(),
+            }],
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root.thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("worker".to_string()),
+            })),
+        )
+        .await
+        .expect("spawn close target");
+    let status_before = session.services.agent_control.get_status(agent_id).await;
+    let agent_control = session.services.agent_control.clone();
 
     let invocation = invocation(
         Arc::new(session),
@@ -4189,7 +4805,7 @@ async fn close_agent_submits_shutdown_and_returns_previous_status() {
         .any(|(id, op)| *id == agent_id && matches!(op, Op::Shutdown));
     assert_eq!(submitted_shutdown, true);
 
-    let status_after = manager.agent_control().get_status(agent_id).await;
+    let status_after = agent_control.get_status(agent_id).await;
     assert_eq!(status_after, AgentStatus::NotFound);
 }
 
@@ -4368,7 +4984,7 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
         AgentStatus::NotFound
     );
 
-    let parent_resume_output = ResumeAgentHandler
+    let Err(parent_resume_error) = ResumeAgentHandler
         .handle(invocation(
             operator_session,
             operator.thread.session.new_default_turn().await,
@@ -4376,13 +4992,17 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
             function_payload(json!({"id": parent_thread_id.to_string()})),
         ))
         .await
-        .expect("resume_agent should reopen the parent thread");
-    let (parent_resume_content, parent_resume_success) = expect_text_output(parent_resume_output);
-    let parent_resume_result: resume_agent::ResumeAgentResult =
-        serde_json::from_str(&parent_resume_content).expect("parent resume result should be json");
-    assert_ne!(parent_resume_result.status, AgentStatus::NotFound);
-    assert_eq!(parent_resume_success, Some(true));
-    assert_ne!(
+    else {
+        panic!("an unrelated root must not reopen another root's subtree");
+    };
+    assert_eq!(
+        parent_resume_error,
+        FunctionCallError::RespondToModel(format!(
+            "agent `{parent_thread_id}` is not a resumable descendant of caller `{}`",
+            operator.thread_id
+        ))
+    );
+    assert_eq!(
         manager.agent_control().get_status(parent_thread_id).await,
         AgentStatus::NotFound
     );

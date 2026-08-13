@@ -857,6 +857,7 @@ fn loader_overrides_are_default(loader_overrides: &LoaderOverrides) -> bool {
         && !loader_overrides.ignore_managed_requirements
         && !loader_overrides.ignore_user_config
         && !loader_overrides.ignore_user_and_project_exec_policy_rules
+        && !loader_overrides.extended_workflow_default_enabled
         && loader_overrides
             .macos_managed_config_requirements_base64
             .is_none();
@@ -1470,7 +1471,7 @@ async fn run_ratatui_app(
             resume_hint: None,
             update_action: None,
             exit_reason: ExitReason::Fatal(format!(
-                "No saved session found with ID {id_str}. Run `codex {action}` without an ID to choose from existing sessions."
+                "No saved session found with ID {id_str}. Run `codex-extended-workflow {action}` without an ID to choose from existing sessions."
             )),
         })
     };

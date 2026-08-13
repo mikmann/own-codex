@@ -37,6 +37,7 @@ pub enum SlashCommand {
     Fork,
     App,
     Init,
+    PrepareExtendWorkflow,
     Compact,
     Plan,
     Goal,
@@ -85,6 +86,9 @@ impl SlashCommand {
             SlashCommand::Feedback => "send logs to maintainers",
             SlashCommand::New => "start a new chat during a conversation",
             SlashCommand::Init => "create an AGENTS.md file with instructions for Codex",
+            SlashCommand::PrepareExtendWorkflow => {
+                "preview or apply the minimal repository workflow configuration"
+            }
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
             SlashCommand::Review => "review my current changes and find issues",
             SlashCommand::Rename => "rename the current thread",
@@ -170,6 +174,7 @@ impl SlashCommand {
                 | SlashCommand::Btw
                 | SlashCommand::Resume
                 | SlashCommand::SandboxReadRoot
+                | SlashCommand::PrepareExtendWorkflow
         )
     }
 
@@ -195,6 +200,7 @@ impl SlashCommand {
             | SlashCommand::Delete
             | SlashCommand::Fork
             | SlashCommand::Init
+            | SlashCommand::PrepareExtendWorkflow
             | SlashCommand::Compact
             | SlashCommand::Keymap
             | SlashCommand::Vim
@@ -307,5 +313,16 @@ mod tests {
             SlashCommand::from_str("approve"),
             Ok(SlashCommand::AutoReview)
         );
+    }
+
+    #[test]
+    fn prepare_extended_workflow_is_safe_by_default() {
+        assert_eq!(
+            SlashCommand::PrepareExtendWorkflow.command(),
+            "prepare-extend-workflow"
+        );
+        assert!(SlashCommand::PrepareExtendWorkflow.supports_inline_args());
+        assert!(!SlashCommand::PrepareExtendWorkflow.available_during_task());
+        assert!(!SlashCommand::PrepareExtendWorkflow.available_in_side_conversation());
     }
 }

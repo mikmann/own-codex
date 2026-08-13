@@ -337,6 +337,32 @@ pub fn create_close_agent_tool_v1() -> ToolSpec {
     })
 }
 
+pub fn create_close_agent_tool_v2() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "target".to_string(),
+        JsonSchema::string(Some(
+            "Agent id or canonical task name to close (from spawn_agent). Repeating a close for an already closed thread id is safe."
+                .to_string(),
+        )),
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "close_agent".to_string(),
+        description: "Close a spawned agent and all of its open descendants, release their concurrency slots, and return the target's status observed before shutdown. A repeated call by thread id is an idempotent no-op that returns not_found."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            Some(vec!["target".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: Some(agent_previous_status_output_schema(
+            "The agent status observed before the close request was handled.",
+        )),
+    })
+}
+
 pub fn create_interrupt_agent_tool_v2() -> ToolSpec {
     let properties = BTreeMap::from([(
         "target".to_string(),
@@ -667,6 +693,33 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
             "service_tier".to_string(),
             JsonSchema::string(Some(
                 SPAWN_AGENT_SERVICE_TIER_OVERRIDE_DESCRIPTION.to_string(),
+            )),
+        ),
+        (
+            "read_only".to_string(),
+            JsonSchema::boolean(Some(
+                "Restrict the child to a read-only permission profile, approval policy `never`, and no child-agent spawning. Use true for experts and reviewers."
+                    .to_string(),
+            )),
+        ),
+        (
+            "workflow_name".to_string(),
+            JsonSchema::string(Some(
+                "Configured expert or reviewer profile name. Supply together with workflow_type and workflow_role."
+                    .to_string(),
+            )),
+        ),
+        (
+            "workflow_type".to_string(),
+            JsonSchema::string_enum(
+                vec![serde_json::json!("expert"), serde_json::json!("reviewer")],
+                Some("Extended-workflow agent type.".to_string()),
+            ),
+        ),
+        (
+            "workflow_role".to_string(),
+            JsonSchema::string(Some(
+                "Configured domain role for the expert or reviewer.".to_string(),
             )),
         ),
     ])

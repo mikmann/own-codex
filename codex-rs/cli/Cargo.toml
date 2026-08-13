@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 build = "build.rs"
-default-run = "codex"
+default-run = "codex-extended-workflow"
+
+[[bin]]
+name = "codex-extended-workflow"
+path = "src/bin/codex_extended_workflow.rs"
+test = false
 
 [[bin]]
 name = "codex"

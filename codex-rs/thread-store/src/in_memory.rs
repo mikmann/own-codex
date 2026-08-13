@@ -509,7 +509,7 @@ impl InMemoryThreadStore {
             parent_thread_id: params.parent_thread_id,
             cwd: params.metadata.cwd.clone().unwrap_or_default(),
             agent_nickname: params.source.get_nickname(),
-            agent_role: params.source.get_agent_role(),
+            agent_role: params.source.get_agent_display_role(),
             agent_path: params.source.get_agent_path().map(Into::into),
             originator: params.originator.clone(),
             source: params.source.clone(),

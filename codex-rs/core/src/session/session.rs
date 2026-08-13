@@ -793,7 +793,7 @@ impl Session {
                 agent_path: trace_agent_path.to_string(),
                 task_name: trace_task_name,
                 nickname: session_configuration.session_source.get_nickname(),
-                agent_role: session_configuration.session_source.get_agent_role(),
+                agent_role: session_configuration.session_source.get_agent_display_role(),
                 session_source: session_configuration.session_source.clone(),
                 cwd: session_configuration.cwd().to_path_buf(),
                 rollout_path: rollout_path.clone(),

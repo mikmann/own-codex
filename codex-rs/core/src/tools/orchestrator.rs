@@ -154,6 +154,16 @@ impl ToolOrchestrator {
         let permission_profile = environment.permission_profile();
         let permissions = environment.permission_profile_with_workspace_roots();
         let file_system_sandbox_policy = permissions.file_system_sandbox_policy();
+        let read_only_subagent = turn_ctx.session_source.is_read_only_subagent();
+        if read_only_subagent
+            && tool
+                .sandbox_permissions(req)
+                .requires_escalated_permissions()
+        {
+            return Err(ToolError::Rejected(
+                "read-only workflow agents cannot request escalated execution".to_string(),
+            ));
+        }
         let requirement = tool.exec_approval_requirement(req).unwrap_or_else(|| {
             default_exec_approval_requirement(approval_policy, &file_system_sandbox_policy)
         });
@@ -215,11 +225,15 @@ impl ToolOrchestrator {
         }
 
         // 2) First attempt under the selected sandbox.
-        let sandbox_override = sandbox_override_for_first_attempt(
-            tool.sandbox_permissions(req),
-            &requirement,
-            &file_system_sandbox_policy,
-        );
+        let sandbox_override = if read_only_subagent {
+            SandboxOverride::NoOverride
+        } else {
+            sandbox_override_for_first_attempt(
+                tool.sandbox_permissions(req),
+                &requirement,
+                &file_system_sandbox_policy,
+            )
+        };
         let managed_network_active = turn_ctx.network.is_some();
         let sandbox_preference = tool.sandbox_preference();
         let sandbox_requested = match sandbox_override {
@@ -240,6 +254,14 @@ impl ToolOrchestrator {
         } else {
             SandboxType::None
         };
+        if read_only_subagent
+            && (!sandbox_requested || matches!(initial_sandbox, SandboxType::None))
+        {
+            return Err(ToolError::Rejected(
+                "read-only workflow agent execution requires an available filesystem sandbox"
+                    .to_string(),
+            ));
+        }
 
         // Platform-specific flag gating is handled by SandboxManager::select_initial.
         let use_legacy_landlock = turn_ctx.config.features.use_legacy_landlock();
@@ -320,7 +342,7 @@ impl ToolOrchestrator {
                     );
                     return Err(ToolError::Codex(err));
                 }
-                if !tool.escalate_on_failure() {
+                if read_only_subagent || !tool.escalate_on_failure() {
                     otel.sandbox_outcome(
                         &otel_tn,
                         otel_ci,

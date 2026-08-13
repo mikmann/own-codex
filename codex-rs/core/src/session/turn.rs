@@ -463,6 +463,40 @@ pub(crate) async fn run_turn(
 
                 if !needs_follow_up {
                     last_agent_message = sampling_request_last_agent_message;
+                    match super::extended_workflow_gate::completion_gate(
+                        sess.as_ref(),
+                        turn_context.as_ref(),
+                    )
+                    .await
+                    {
+                        crate::extended_workflow::WorkflowCompletionGate::Satisfied => {}
+                        crate::extended_workflow::WorkflowCompletionGate::Continue(message) => {
+                            if let Some(item) =
+                                crate::context_manager::updates::build_developer_update_item(vec![
+                                    message,
+                                ])
+                            {
+                                sess.record_conversation_items(
+                                    &turn_context,
+                                    std::slice::from_ref(&item),
+                                )
+                                .await;
+                                continue;
+                            }
+                        }
+                        crate::extended_workflow::WorkflowCompletionGate::Blocked(message) => {
+                            sess.send_event(
+                                &turn_context,
+                                EventMsg::Error(ErrorEvent {
+                                    message: message.clone(),
+                                    codex_error_info: None,
+                                }),
+                            )
+                            .await;
+                            last_agent_message = Some(message);
+                            break;
+                        }
+                    }
                     let stop_outcome = run_turn_stop_hooks(
                         &sess,
                         &turn_context,
@@ -849,6 +883,41 @@ async fn build_skills_and_plugins(
             .collect(),
         None => skill_items,
     };
+    if turn_context.config.extended_workflow.enabled
+        && crate::extended_workflow::is_root_workflow_source(&turn_context.session_source)
+    {
+        let request_text = user_input
+            .iter()
+            .filter_map(|input| match input {
+                UserInput::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let plan = crate::extended_workflow::plan_turn(
+            &request_text,
+            &turn_context.config.extended_workflow,
+        );
+        turn_context.extension_data.insert(
+            crate::extended_workflow::WorkflowTurnRuntimeState::new(&plan),
+        );
+        let turn_context_fragment =
+            match crate::context::ExtendedWorkflowTurnContext::try_new(&plan) {
+                Ok(fragment) => fragment,
+                Err(message) => {
+                    sess.send_event(
+                        turn_context,
+                        EventMsg::Error(ErrorEvent {
+                            message,
+                            codex_error_info: None,
+                        }),
+                    )
+                    .await;
+                    return None;
+                }
+            };
+        injection_items.push(ContextualUserFragment::into(turn_context_fragment));
+    }
     injection_items.extend(plugin_items);
     injection_items.extend(extension_injection_items);
     Some((injection_items, explicitly_enabled_connectors))

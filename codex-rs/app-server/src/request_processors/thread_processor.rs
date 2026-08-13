@@ -3820,7 +3820,7 @@ impl ThreadRequestProcessor {
         if stored_thread.archived_at.is_some() {
             let thread_id = stored_thread.thread_id;
             return Err(invalid_request(format!(
-                "session {thread_id} is archived. Run `codex unarchive {thread_id}` to unarchive it first."
+                "session {thread_id} is archived. Run `codex-extended-workflow unarchive {thread_id}` to unarchive it first."
             )));
         }
 
@@ -5195,7 +5195,7 @@ pub(crate) fn thread_from_stored_thread(
         cwd,
         cli_version: thread.cli_version,
         agent_nickname: source.get_nickname(),
-        agent_role: source.get_agent_role(),
+        agent_role: source.get_agent_display_role(),
         source: source.into(),
         can_accept_direct_input: None,
         thread_source: thread.thread_source.map(Into::into),
@@ -5404,7 +5404,7 @@ fn build_thread_from_snapshot(
         cwd: config_snapshot.cwd().clone(),
         cli_version: env!("CARGO_PKG_VERSION").to_string(),
         agent_nickname: config_snapshot.session_source.get_nickname(),
-        agent_role: config_snapshot.session_source.get_agent_role(),
+        agent_role: config_snapshot.session_source.get_agent_display_role(),
         source: config_snapshot.session_source.clone().into(),
         can_accept_direct_input: Some(can_accept_direct_input(
             multi_agent_version,

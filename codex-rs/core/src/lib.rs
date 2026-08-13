@@ -50,6 +50,7 @@ mod environment_selection;
 pub mod exec;
 pub mod exec_env;
 mod exec_policy;
+pub mod extended_workflow;
 #[cfg(test)]
 mod git_info_tests;
 mod guardian;

@@ -202,6 +202,7 @@ use codex_protocol::exec_output::StreamOutput;
 mod code_mode_warning;
 mod config_lock;
 pub(crate) mod context_window;
+mod extended_workflow_gate;
 mod extension_metrics;
 mod handlers;
 mod inject;
@@ -564,7 +565,18 @@ impl Session {
         config
             .startup_warnings
             .extend(user_instruction_provider_warnings);
-        let exec_policy = if crate::guardian::is_guardian_reviewer_source(&session_source) {
+        // The persisted workflow marker is an authorization ceiling, not merely UI metadata.
+        // Reapply it at the common session construction boundary so every resume path, including
+        // app-server and direct ThreadManager resumes, fails closed before tools or MCP clients
+        // can observe a more permissive parent configuration.
+        if session_source.is_read_only_subagent() {
+            config
+                .apply_read_only_subagent_ceiling()
+                .map_err(CodexErr::InvalidRequest)?;
+        }
+        let exec_policy = if crate::guardian::is_guardian_reviewer_source(&session_source)
+            || session_source.is_read_only_subagent()
+        {
             // Guardian review should rely on the built-in shell safety checks,
             // not on caller-provided exec-policy rules that could shape the
             // reviewer or silently auto-approve commands.
@@ -644,9 +656,21 @@ impl Session {
         {
             self::token_budget::apply_model_defaults(Arc::make_mut(&mut config), &model_info);
         }
-        let multi_agent_version = config.multi_agent_version_override().or_else(|| {
-            resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
-        });
+        let inherited_multi_agent_version =
+            resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version);
+        // Extended-workflow children deliberately disable their own agent features so
+        // they cannot delegate. Keep the already-established V2 lineage nevertheless:
+        // it is persisted with the rollout and is required to reload an evicted child
+        // without silently losing its read-only workflow metadata.
+        let multi_agent_version = if session_source.is_read_only_subagent()
+            && inherited_multi_agent_version == Some(MultiAgentVersion::V2)
+        {
+            Some(MultiAgentVersion::V2)
+        } else {
+            config
+                .multi_agent_version_override()
+                .or(inherited_multi_agent_version)
+        };
         let history_mode = conversation_history.get_history_mode(
             requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
         );

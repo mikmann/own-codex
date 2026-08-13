@@ -1108,6 +1108,16 @@
               ],
               "title": "SubAgentActivityThreadItemType",
               "type": "string"
+            },
+            "workflowAgent": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/WorkflowAgentDisplay"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -1617,6 +1627,51 @@
           "type": "object"
         }
       ]
+    },
+    "WorkflowAgentDisplay": {
+      "properties": {
+        "agentType": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "reasoningEffort": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/WorkflowAgentDisplayStatus"
+        }
+      },
+      "required": [
+        "agentType",
+        "model",
+        "name",
+        "role",
+        "status"
+      ],
+      "type": "object"
+    },
+    "WorkflowAgentDisplayStatus": {
+      "enum": [
+        "running",
+        "validated",
+        "rejected"
+      ],
+      "type": "string"
     }
   },
   "properties": {

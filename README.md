@@ -1,17 +1,69 @@
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
+<p align="center"><strong>codex-extended-workflow</strong> is a compatibility-focused extension of the official OpenAI Codex CLI with deterministic expert, ticket, and review orchestration.
 <p align="center">
   <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
 </p>
 </br>
 If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
+</br>If you want the desktop app experience, run <code>codex-extended-workflow app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
 </br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
 
 ---
 
+> [!IMPORTANT]
+> This repository is an independently maintained fork, based on the official
+> `rust-v0.147.0` tag (commit `be6e8eac029b183056b7e4402879f15d2c85f61b`).
+> It is not an official OpenAI release. The requested short tag `v0.147.0` did
+> not exist upstream; use of the verified official tag was explicitly approved
+> for this fork.
+
+## Extended workflow
+
+The primary executable is `codex-extended-workflow`; the `codex` executable is
+retained as a compatibility entry point. The primary launcher enables the
+extended workflow only when no CLI, repository, or global setting explicitly
+sets `extended_workflow.enabled`; the compatibility launcher preserves the
+upstream disabled default. The visible distribution version is
+`v0.147.1-alpha-1`. Automatic updates are disabled so this fork cannot silently
+replace itself with an official Codex package.
+
+Prepare a repository safely with a preview first:
+
+```shell
+codex-extended-workflow prepare-extend-workflow
+codex-extended-workflow prepare-extend-workflow --apply
+```
+
+Inside the TUI, use `/prepare-extend-workflow` for the preview and
+`/prepare-extend-workflow apply` to apply it. Resume remains compatible:
+
+```shell
+codex-extended-workflow resume <session-id>
+```
+
+MultiAgentV2 also exposes `close_agent`: the main agent uses it after a
+subagent result has been accepted or terminally rejected to cascade-close that
+agent's descendants and release concurrency slots.
+
+See [Extended workflow architecture and configuration](./EXTENDED_WORKFLOW.md)
+for the classifier, expert/reviewer contracts, budget semantics, severity
+rules, repository preparation, and implementation references.
+
 ## Quickstart
 
-### Installing and running Codex CLI
+### Building and running this fork
+
+Build the Rust launcher locally with the repository's normal toolchain:
+
+```shell
+cd codex-rs
+cargo build --bin codex-extended-workflow
+./target/debug/codex-extended-workflow --version
+```
+
+The following upstream installation instructions install the official Codex
+CLI, not this fork. They are retained as upstream reference material.
+
+### Installing and running the upstream Codex CLI
 
 Run the following on Mac or Linux to install Codex CLI:
 

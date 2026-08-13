@@ -42,7 +42,7 @@ export type CodexExecArgs = {
 
 const INTERNAL_ORIGINATOR_ENV = "CODEX_INTERNAL_ORIGINATOR_OVERRIDE";
 const TYPESCRIPT_SDK_ORIGINATOR = "codex_sdk_ts";
-const CODEX_NPM_NAME = "@openai/codex";
+const CODEX_NPM_NAMES = ["codex-extended-workflow", "@openai/codex"] as const;
 
 const PLATFORM_PACKAGE_BY_TARGET: Record<string, string> = {
   "x86_64-unknown-linux-musl": "@openai/codex-linux-x64",
@@ -386,15 +386,22 @@ function findCodexPath(): CodexPathResolution {
     throw new Error(`Unsupported target triple: ${targetTriple}`);
   }
 
+  const installedPackage = resolveInstalledCodexPackage((specifier) =>
+    moduleRequire.resolve(specifier),
+  );
+  if (!installedPackage) {
+    throw new Error(
+      `Unable to locate Codex CLI binaries. Ensure one of ${CODEX_NPM_NAMES.join(", ")} is installed with optional dependencies.`,
+    );
+  }
   let vendorRoot: string;
   try {
-    const codexPackageJsonPath = moduleRequire.resolve(`${CODEX_NPM_NAME}/package.json`);
-    const codexRequire = createRequire(codexPackageJsonPath);
+    const codexRequire = createRequire(installedPackage.packageJsonPath);
     const platformPackageJsonPath = codexRequire.resolve(`${platformPackage}/package.json`);
     vendorRoot = path.join(path.dirname(platformPackageJsonPath), "vendor");
   } catch {
     throw new Error(
-      `Unable to locate Codex CLI binaries. Ensure ${CODEX_NPM_NAME} is installed with optional dependencies.`,
+      `Unable to locate Codex CLI binaries for ${targetTriple}. Ensure ${installedPackage.packageName} is installed with optional dependencies.`,
     );
   }
 
@@ -402,11 +409,27 @@ function findCodexPath(): CodexPathResolution {
   const nativePackage = resolveNativePackage(vendorRoot, targetTriple, codexBinaryName);
   if (!nativePackage) {
     throw new Error(
-      `Unable to locate Codex CLI binaries for ${targetTriple}. Ensure ${CODEX_NPM_NAME} is installed with optional dependencies.`,
+      `Unable to locate Codex CLI binaries for ${targetTriple}. Ensure ${installedPackage.packageName} is installed with optional dependencies.`,
     );
   }
 
   return nativePackage;
+}
+
+export function resolveInstalledCodexPackage(
+  resolvePackageJson: (specifier: string) => string,
+): { packageName: string; packageJsonPath: string } | null {
+  for (const packageName of CODEX_NPM_NAMES) {
+    try {
+      return {
+        packageName,
+        packageJsonPath: resolvePackageJson(`${packageName}/package.json`),
+      };
+    } catch {
+      // Try the compatibility package next.
+    }
+  }
+  return null;
 }
 
 export function resolveNativePackage(

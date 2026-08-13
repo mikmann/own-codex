@@ -5014,6 +5014,7 @@ async fn rebuild_preserving_session_layers_refreshes_requirements() -> std::io::
         },
         codex_home.abs(),
         refreshed_layer_stack,
+        /*extended_workflow_default_enabled*/ false,
     )
     .await?;
     let thread_layer_stack = ConfigLayerStack::new(
@@ -5081,6 +5082,7 @@ async fn rebuild_preserving_session_layers_refreshes_requirements() -> std::io::
         },
         codex_home.abs(),
         thread_layer_stack,
+        /*extended_workflow_default_enabled*/ false,
     )
     .await?;
     let config = thread_config
@@ -5177,6 +5179,7 @@ async fn rebuild_preserving_session_layers_refreshes_plugin_derived_mcp_config()
         },
         codex_home.abs(),
         refreshed_layer_stack,
+        /*extended_workflow_default_enabled*/ false,
     )
     .await?;
     let thread_layer_stack = ConfigLayerStack::new(
@@ -5206,6 +5209,7 @@ async fn rebuild_preserving_session_layers_refreshes_plugin_derived_mcp_config()
         },
         codex_home.abs(),
         thread_layer_stack,
+        /*extended_workflow_default_enabled*/ false,
     )
     .await?;
     let config = thread_config
@@ -6040,6 +6044,202 @@ model = "gpt-project-local"
         config.startup_warnings
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn extended_workflow_uses_cli_then_repository_then_global_precedence() -> std::io::Result<()>
+{
+    let codex_home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    let workspace_key = workspace.path().to_string_lossy().replace('\\', "\\\\");
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        format!(
+            r#"
+[extended_workflow.experts]
+min = 1
+max = 1
+
+[projects."{workspace_key}"]
+trust_level = "trusted"
+"#,
+        ),
+    )?;
+    let project_config_dir = workspace.path().join(".codex");
+    std::fs::create_dir_all(&project_config_dir)?;
+    std::fs::write(
+        project_config_dir.join(CONFIG_TOML_FILE),
+        r#"
+[extended_workflow.experts]
+min = 2
+max = 2
+"#,
+    )?;
+
+    let repository_config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(ConfigOverrides {
+            cwd: Some(workspace.path().to_path_buf()),
+            ..Default::default()
+        })
+        .build()
+        .await?;
+    assert_eq!(
+        (
+            repository_config.extended_workflow.experts.min,
+            repository_config.extended_workflow.experts.max,
+        ),
+        (2, 2)
+    );
+
+    let cli_config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .cli_overrides(vec![
+            (
+                "extended_workflow.experts.min".to_string(),
+                toml::Value::Integer(3),
+            ),
+            (
+                "extended_workflow.experts.max".to_string(),
+                toml::Value::Integer(3),
+            ),
+        ])
+        .harness_overrides(ConfigOverrides {
+            cwd: Some(workspace.path().to_path_buf()),
+            ..Default::default()
+        })
+        .build()
+        .await?;
+    assert_eq!(
+        (
+            cli_config.extended_workflow.experts.min,
+            cli_config.extended_workflow.experts.max,
+        ),
+        (3, 3)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn disabled_extended_workflow_does_not_force_multi_agent_v2() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        r#"
+[extended_workflow]
+enabled = false
+
+[features.multi_agent_v2]
+enabled = false
+"#,
+    )?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await?;
+
+    assert!(!config.extended_workflow.enabled);
+    assert_eq!(config.multi_agent_version_override(), None);
+    assert_eq!(
+        config.multi_agent_version_for_model(Some(MultiAgentVersion::V1)),
+        MultiAgentVersion::V1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn launcher_workflow_default_is_lowest_priority() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let loader_overrides = LoaderOverrides {
+        extended_workflow_default_enabled: true,
+        ..LoaderOverrides::without_managed_config_for_tests()
+    };
+
+    let defaulted = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .loader_overrides(loader_overrides.clone())
+        .build()
+        .await?;
+    assert!(defaulted.extended_workflow.enabled);
+
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        "[extended_workflow]\nenabled = false\n",
+    )?;
+    let explicitly_disabled = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .loader_overrides(loader_overrides)
+        .build()
+        .await?;
+    assert!(!explicitly_disabled.extended_workflow.enabled);
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_only_subagent_ceiling_removes_writes_and_nested_agents() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cwd = TempDir::new()?;
+    let mut config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides {
+            cwd: Some(cwd.path().to_path_buf()),
+            approval_policy: Some(AskForApproval::OnRequest),
+            permission_profile: Some(PermissionProfile::workspace_write()),
+            ..Default::default()
+        },
+        codex_home.abs(),
+    )
+    .await?;
+
+    config
+        .apply_read_only_subagent_ceiling()
+        .expect("read-only reduction");
+
+    assert_eq!(
+        config.permissions.approval_policy.value(),
+        AskForApproval::Never
+    );
+    assert!(!config.agents_enabled);
+    assert!(!config.extended_workflow.enabled);
+    assert!(matches!(
+        config.permissions.permission_profile(),
+        PermissionProfile::Managed {
+            file_system: ManagedFileSystemPermissions::Restricted { entries, .. },
+            network: NetworkSandboxPolicy::Restricted,
+        } if entries.iter().all(|entry| !entry.access.can_write())
+    ));
+    let locked_snapshot = config.permissions.permission_profile_state().snapshot();
+    config
+        .apply_read_only_subagent_ceiling()
+        .expect("reapplying the read-only ceiling should be idempotent");
+    assert_eq!(
+        config.permissions.permission_profile_state().snapshot(),
+        locked_snapshot
+    );
+    config
+        .permissions
+        .approval_policy
+        .set(AskForApproval::OnRequest)
+        .expect_err("approval policy must remain locked to never");
+    config
+        .permissions
+        .set_permission_profile_from_session_snapshot(
+            PermissionProfileSnapshot::active_with_profile_workspace_roots(
+                config.permissions.permission_profile().clone(),
+                ActivePermissionProfile::new("different-read-only-profile"),
+                vec![cwd.path().join("different-root").abs()],
+            ),
+        )
+        .expect_err("active profile identity and roots must remain locked");
+    config
+        .permissions
+        .set_permission_profile(PermissionProfile::workspace_write())
+        .expect_err("permission profile must remain read-only");
     Ok(())
 }
 
@@ -7641,6 +7841,7 @@ async fn load_config_uses_requirements_guardian_policy_config() -> std::io::Resu
         },
         codex_home.abs(),
         config_layer_stack,
+        /*extended_workflow_default_enabled*/ false,
     )
     .await?;
 
@@ -7726,6 +7927,7 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
         },
         codex_home.abs(),
         config_layer_stack,
+        /*extended_workflow_default_enabled*/ false,
     )
     .await?;
 
@@ -7784,6 +7986,7 @@ async fn load_config_ignores_empty_requirements_guardian_policy_config() -> std:
         },
         codex_home.abs(),
         config_layer_stack,
+        /*extended_workflow_default_enabled*/ false,
     )
     .await?;
 
@@ -7925,6 +8128,7 @@ config_file = "./agents/researcher.toml"
         },
         codex_home.abs(),
         config_layer_stack,
+        /*extended_workflow_default_enabled*/ false,
     )
     .await?;
 
@@ -9515,6 +9719,7 @@ async fn test_requirements_web_search_mode_allowlist_does_not_warn_when_unset() 
         },
         fixture.codex_home(),
         config_layer_stack,
+        /*extended_workflow_default_enabled*/ false,
     )
     .await?;
 

@@ -50,6 +50,8 @@ pub struct JsonSchema {
     pub encrypted: Option<bool>,
     #[serde(rename = "enum", skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<JsonValue>>,
+    #[serde(rename = "maxLength", skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub items: Option<Box<JsonSchema>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -117,6 +119,11 @@ impl JsonSchema {
 
     pub fn with_encrypted(mut self) -> Self {
         self.encrypted = Some(true);
+        self
+    }
+
+    pub fn with_max_length(mut self, max_length: usize) -> Self {
+        self.max_length = Some(max_length);
         self
     }
 

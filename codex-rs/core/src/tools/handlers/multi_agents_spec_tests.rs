@@ -480,3 +480,35 @@ fn list_agents_tool_status_schema_includes_interrupted() {
         ])
     );
 }
+
+#[test]
+fn close_agent_v2_accepts_one_target_and_documents_idempotent_shutdown() {
+    let ToolSpec::Function(ResponsesApiTool {
+        name,
+        description,
+        parameters,
+        output_schema,
+        ..
+    }) = create_close_agent_tool_v2()
+    else {
+        panic!("close_agent should be a function tool");
+    };
+
+    assert_eq!(name, "close_agent");
+    assert!(description.contains("idempotent no-op"));
+    assert_eq!(parameters.required, Some(vec!["target".to_string()]));
+    assert_eq!(
+        parameters
+            .properties
+            .as_ref()
+            .expect("close_agent should use object params")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["target".to_string()]
+    );
+    assert_eq!(
+        output_schema.expect("close_agent output schema")["required"],
+        json!(["previous_status"])
+    );
+}

@@ -317,10 +317,10 @@ impl HistoryCell for SessionHeaderHistoryCell {
 
         let make_row = |spans: Vec<Span<'static>>| Line::from(spans);
 
-        // Title line rendered inside the box: ">_ OpenAI Codex (vX)"
+        // Title line rendered inside the box: ">_ codex-extended-workflow (vX)"
         let title_spans: Vec<Span<'static>> = vec![
             Span::from(">_ ").dim(),
-            Span::from("OpenAI Codex").bold(),
+            Span::from("codex-extended-workflow").bold(),
             Span::from(" ").dim(),
             Span::from(format!("(v{})", self.version)).dim(),
         ];
@@ -367,12 +367,15 @@ impl HistoryCell for SessionHeaderHistoryCell {
         let dir = self.format_directory(Some(dir_max_width));
         let dir_spans = vec![Span::from(dir_prefix).dim(), Span::from(dir)];
 
-        let mut lines = vec![
-            make_row(title_spans),
+        let mut lines = adaptive_wrap_lines(
+            [make_row(title_spans)],
+            RtOptions::new(inner_width).subsequent_indent(Line::from("   ")),
+        );
+        lines.extend([
             make_row(Vec::new()),
             make_row(model_spans),
             make_row(dir_spans),
-        ];
+        ]);
 
         if self.yolo_mode {
             let permissions_label = format!("{PERMISSIONS_LABEL:<label_width$}");
@@ -391,7 +394,7 @@ impl HistoryCell for SessionHeaderHistoryCell {
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
         let mut lines = vec![
-            Line::from(format!("OpenAI Codex (v{})", self.version)),
+            Line::from(format!("codex-extended-workflow (v{})", self.version)),
             Line::from(format!(
                 "model: {}{}",
                 self.model,

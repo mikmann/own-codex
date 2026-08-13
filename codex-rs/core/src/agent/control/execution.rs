@@ -32,9 +32,20 @@ impl AgentControl {
         &self,
         thread_id: ThreadId,
         op: &Op,
-    ) -> CodexResult<()> {
+    ) -> CodexResult<tokio::sync::OwnedRwLockReadGuard<()>> {
+        let lifecycle_guard = self.acquire_agent_operation(thread_id).await?;
         self.ensure_execution_capacity_for_turn_start(thread_id, op_starts_turn(op))
-            .await
+            .await?;
+        Ok(lifecycle_guard)
+    }
+
+    pub(super) async fn acquire_agent_operation(
+        &self,
+        thread_id: ThreadId,
+    ) -> CodexResult<tokio::sync::OwnedRwLockReadGuard<()>> {
+        let lifecycle_guard = Arc::clone(&self.lifecycle_gate).read_owned().await;
+        self.ensure_agent_lifecycle_open(thread_id).await?;
+        Ok(lifecycle_guard)
     }
 
     pub(super) async fn ensure_execution_capacity_for_turn_start(

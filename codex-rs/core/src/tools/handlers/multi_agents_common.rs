@@ -102,21 +102,48 @@ pub(crate) fn collab_agent_error(agent_id: ThreadId, err: CodexErr) -> FunctionC
         CodexErrorDetails::InternalAgentDied => {
             FunctionCallError::RespondToModel(format!("agent with id {agent_id} is closed"))
         }
-        CodexErrorDetails::UnsupportedOperation(_) => {
+        CodexErrorDetails::UnsupportedOperation(message) if message == "thread manager dropped" => {
             FunctionCallError::RespondToModel("collab manager unavailable".to_string())
+        }
+        CodexErrorDetails::UnsupportedOperation(message) => {
+            FunctionCallError::RespondToModel(message.clone())
         }
         _ => FunctionCallError::RespondToModel(format!("collab tool failed: {err}")),
     }
+}
+
+pub(crate) fn close_agent_error(agent_id: ThreadId, err: CodexErr) -> FunctionCallError {
+    match err.details() {
+        CodexErrorDetails::UnsupportedOperation(_) | CodexErrorDetails::ThreadNotFound(_) => {
+            FunctionCallError::RespondToModel(format!(
+                "thread `{agent_id}` is not a descendant of the calling agent"
+            ))
+        }
+        _ => collab_agent_error(agent_id, err),
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ThreadSpawnMetadata<'a> {
+    pub(crate) agent_role: Option<&'a str>,
+    pub(crate) task_name: Option<String>,
+    pub(crate) read_only: bool,
+    pub(crate) preferred_nickname: Option<&'a str>,
+    pub(crate) workflow_type: Option<&'a str>,
+    pub(crate) workflow_role: Option<&'a str>,
+    pub(crate) workflow_name: Option<&'a str>,
+    pub(crate) workflow_turn_id: Option<&'a str>,
+    pub(crate) assignment_sha256: Option<&'a str>,
 }
 
 pub(crate) fn thread_spawn_source(
     parent_thread_id: ThreadId,
     parent_session_source: &SessionSource,
     depth: i32,
-    agent_role: Option<&str>,
-    task_name: Option<String>,
+    metadata: ThreadSpawnMetadata<'_>,
 ) -> Result<SessionSource, FunctionCallError> {
-    let agent_path = task_name
+    let agent_path = metadata
+        .task_name
         .as_deref()
         .map(|task_name| {
             parent_session_source
@@ -126,12 +153,23 @@ pub(crate) fn thread_spawn_source(
                 .map_err(FunctionCallError::RespondToModel)
         })
         .transpose()?;
+    let agent_role = codex_protocol::protocol::encode_extended_thread_spawn_role_metadata(
+        codex_protocol::protocol::ExtendedThreadSpawnRoleMetadata {
+            config_role: metadata.agent_role,
+            read_only: metadata.read_only,
+            workflow_type: metadata.workflow_type,
+            workflow_role: metadata.workflow_role,
+            workflow_name: metadata.workflow_name,
+            workflow_turn_id: metadata.workflow_turn_id,
+            assignment_sha256: metadata.assignment_sha256,
+        },
+    );
     Ok(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
         parent_thread_id,
         depth,
         agent_path,
-        agent_nickname: None,
-        agent_role: agent_role.map(str::to_string),
+        agent_nickname: metadata.preferred_nickname.map(str::to_string),
+        agent_role,
     }))
 }
 

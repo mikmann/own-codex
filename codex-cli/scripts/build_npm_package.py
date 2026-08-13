@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage and optionally package the @openai/codex npm module."""
+"""Stage and optionally package the codex-extended-workflow npm module."""
 
 import argparse
 import json
@@ -15,11 +15,12 @@ CODEX_CLI_ROOT = SCRIPT_DIR.parent
 REPO_ROOT = CODEX_CLI_ROOT.parent
 RESPONSES_API_PROXY_NPM_ROOT = REPO_ROOT / "codex-rs" / "responses-api-proxy" / "npm"
 CODEX_SDK_ROOT = REPO_ROOT / "sdk" / "typescript"
-CODEX_NPM_NAME = "@openai/codex"
+CODEX_NPM_NAME = "codex-extended-workflow"
 CODEX_PACKAGE_COMPONENT = "codex-package"
 
 # `npm_name` is the local optional-dependency alias consumed by `bin/codex.js`.
-# The underlying package published to npm is always `@openai/codex`.
+# The aliases remain stable platform selectors; the underlying local package is
+# this fork and never the official OpenAI package.
 CODEX_PLATFORM_PACKAGES: dict[str, dict[str, str]] = {
     "codex-linux-x64": {
         "npm_name": "@openai/codex-linux-x64",
@@ -178,7 +179,7 @@ def main() -> int:
                 print(
                     f"Staged version {version} for release in {staging_dir_str}\n\n"
                     "Verify the CLI:\n"
-                    f"    node {staging_dir_str}/bin/codex.js --version\n"
+                    f"    node {staging_dir_str}/bin/codex-extended-workflow.js --version\n"
                     f"    node {staging_dir_str}/bin/codex.js --help\n\n"
                 )
             elif package == "codex-responses-api-proxy":
@@ -234,6 +235,10 @@ def stage_sources(staging_dir: Path, version: str, package: str) -> None:
         bin_dir = staging_dir / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(CODEX_CLI_ROOT / "bin" / "codex.js", bin_dir / "codex.js")
+        shutil.copy2(
+            CODEX_CLI_ROOT / "bin" / "codex-extended-workflow.js",
+            bin_dir / "codex-extended-workflow.js",
+        )
 
         readme_src = REPO_ROOT / "README.md"
         if readme_src.exists():
@@ -292,7 +297,10 @@ def stage_sources(staging_dir: Path, version: str, package: str) -> None:
         package_json["version"] = version
 
     if package == "codex":
-        package_json["files"] = ["bin/codex.js"]
+        package_json["files"] = [
+            "bin/codex.js",
+            "bin/codex-extended-workflow.js",
+        ]
         package_json["optionalDependencies"] = {
             CODEX_PLATFORM_PACKAGES[platform_package]["npm_name"]: (
                 f"npm:{CODEX_NPM_NAME}@"
@@ -303,15 +311,7 @@ def stage_sources(staging_dir: Path, version: str, package: str) -> None:
         }
 
     elif package == "codex-sdk":
-        scripts = package_json.get("scripts")
-        if isinstance(scripts, dict):
-            scripts.pop("prepare", None)
-
-        dependencies = package_json.get("dependencies")
-        if not isinstance(dependencies, dict):
-            dependencies = {}
-        dependencies[CODEX_NPM_NAME] = version
-        package_json["dependencies"] = dependencies
+        configure_sdk_package_json(package_json, version)
 
     with open(staging_dir / "package.json", "w", encoding="utf-8") as out:
         json.dump(package_json, out, indent=2)
@@ -322,6 +322,18 @@ def compute_platform_package_version(version: str, platform_tag: str) -> str:
     # npm forbids republishing the same package name/version, so each
     # platform-specific tarball needs a unique version string.
     return f"{version}-{platform_tag}"
+
+
+def configure_sdk_package_json(package_json: dict, version: str) -> None:
+    scripts = package_json.get("scripts")
+    if isinstance(scripts, dict):
+        scripts.pop("prepare", None)
+
+    dependencies = package_json.get("dependencies")
+    if not isinstance(dependencies, dict):
+        dependencies = {}
+    dependencies[CODEX_NPM_NAME] = version
+    package_json["dependencies"] = dependencies
 
 
 def run_command(cmd: list[str], cwd: Path | None = None) -> None:
@@ -420,8 +432,9 @@ def run_npm_pack(staging_dir: Path, output_path: Path) -> Path:
         env = os.environ.copy()
         env["NPM_CONFIG_CACHE"] = str(npm_cache_dir)
         env["NPM_CONFIG_LOGS_DIR"] = str(npm_logs_dir)
+        npm_command = "npm.cmd" if os.name == "nt" else "npm"
         stdout = subprocess.check_output(
-            ["npm", "pack", "--json", "--pack-destination", str(pack_dir)],
+            [npm_command, "pack", "--json", "--pack-destination", str(pack_dir)],
             cwd=staging_dir,
             env=env,
             text=True,

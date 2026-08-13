@@ -11,3 +11,8 @@ pub use local::LocalAgentGraphStore;
 pub use store::AgentGraphStore;
 pub use store::AgentGraphStoreFuture;
 pub use types::ThreadSpawnEdgeStatus;
+pub use types::ThreadSpawnSubtreeClose;
+pub use types::WorkflowReviewerValidation;
+pub use types::WorkflowValidationCompletion;
+pub use types::WorkflowValidationDecision;
+pub use types::WorkflowValidationSubmission;

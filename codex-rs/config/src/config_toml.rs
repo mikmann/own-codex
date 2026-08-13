@@ -431,6 +431,9 @@ pub struct ConfigToml {
     /// Agent-related settings (thread limits, etc.).
     pub agents: Option<AgentsToml>,
 
+    /// Classification, expert, ticket, and reviewer workflow settings.
+    pub extended_workflow: Option<crate::extended_workflow::ExtendedWorkflowToml>,
+
     /// Memories subsystem settings.
     pub memories: Option<MemoriesToml>,
 

@@ -51,6 +51,9 @@ pub struct LoaderOverrides {
     pub ignore_login_requirements: bool,
     pub ignore_user_config: bool,
     pub ignore_user_and_project_exec_policy_rules: bool,
+    /// Internal product default used only when `extended_workflow.enabled` is not configured.
+    /// Explicit CLI, repository, and user configuration still take precedence.
+    pub extended_workflow_default_enabled: bool,
     //TODO(gt): Add a macos_ prefix to this field and remove the target_os check.
     #[cfg(target_os = "macos")]
     pub managed_preferences_base64: Option<String>,
@@ -73,6 +76,7 @@ impl LoaderOverrides {
             ignore_login_requirements: false,
             ignore_user_config: false,
             ignore_user_and_project_exec_policy_rules: false,
+            extended_workflow_default_enabled: false,
             #[cfg(target_os = "macos")]
             managed_preferences_base64: Some(String::new()),
             macos_managed_config_requirements_base64: Some(String::new()),

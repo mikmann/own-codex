@@ -11,6 +11,7 @@ use crate::tasks::InterruptedTurnHistoryMarker;
 use crate::tasks::interrupted_turn_history_marker;
 use codex_extension_api::empty_extension_registry;
 use codex_models_manager::manager::RefreshStrategy;
+use codex_protocol::AgentPath;
 use codex_protocol::ResponseItemId;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -18,10 +19,12 @@ use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::MCP_APP_UI_EXTENSION_ID;
 use codex_protocol::mcp::OPENAI_FORM_EXTENSION_ID;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::AgentMessageEvent;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::ResumedHistory;
@@ -32,6 +35,7 @@ use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
+use codex_protocol::protocol::encode_extended_thread_spawn_role;
 use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
 use core_test_support::PathExt;
@@ -43,6 +47,102 @@ use tempfile::tempdir;
 use wiremock::MockServer;
 
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
+
+#[test]
+fn rollout_resume_reapplies_persisted_read_only_workflow_ceiling() {
+    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+    let handle = std::thread::Builder::new()
+        .name("rollout_resume_reapplies_persisted_read_only_workflow_ceiling".to_string())
+        .stack_size(TEST_STACK_SIZE_BYTES)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime");
+            runtime.block_on(async {
+                let mut config = test_config().await;
+                config.agents_enabled = true;
+                config.extended_workflow.enabled = true;
+                let manager = ThreadManager::with_models_provider_for_tests(
+                    CodexAuth::from_api_key("dummy"),
+                    config.model_provider.clone(),
+                );
+                let parent_thread_id = ThreadId::new();
+                let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id,
+                    depth: 1,
+                    agent_path: Some(
+                        AgentPath::try_from("/root/security").expect("valid agent path"),
+                    ),
+                    agent_nickname: Some("security".to_string()),
+                    agent_role: encode_extended_thread_spawn_role(
+                        None,
+                        /*read_only*/ true,
+                        Some("Reviewer"),
+                        Some("Security"),
+                    ),
+                });
+
+                let original = manager
+                    .start_thread(StartThreadOptions {
+                        session_source: Some(session_source),
+                        ..StartThreadOptions::new(config.clone())
+                    })
+                    .await
+                    .expect("workflow child should start");
+                let rollout_path = original
+                    .thread
+                    .rollout_path()
+                    .expect("workflow child should have a rollout path");
+                original.thread.ensure_rollout_materialized().await;
+                original
+                    .thread
+                    .flush_rollout()
+                    .await
+                    .expect("workflow child rollout should flush");
+                original
+                    .thread
+                    .shutdown_and_wait()
+                    .await
+                    .expect("workflow child should shut down");
+                assert!(manager.remove_thread(&original.thread_id).await.is_some());
+
+                assert!(config.agents_enabled, "resume caller remains permissive");
+                assert!(
+                    config.extended_workflow.enabled,
+                    "resume caller keeps the root workflow enabled"
+                );
+                let resumed = manager
+                    .resume_thread_from_rollout(
+                        config,
+                        rollout_path,
+                        Arc::clone(&manager.state.auth_manager),
+                        /*parent_trace*/ None,
+                        ClientMcpExtensions::default(),
+                    )
+                    .await
+                    .expect("rollout resume should succeed");
+
+                let snapshot = resumed.thread.config_snapshot().await;
+                assert_eq!(snapshot.approval_policy, AskForApproval::Never);
+                assert_eq!(snapshot.permission_profile, PermissionProfile::read_only());
+                assert!(snapshot.session_source.is_read_only_subagent());
+                let effective = resumed.thread.config().await;
+                assert!(!effective.agents_enabled);
+                assert!(!effective.extended_workflow.enabled);
+
+                resumed
+                    .thread
+                    .shutdown_and_wait()
+                    .await
+                    .expect("resumed child should shut down");
+            });
+        })
+        .expect("spawn resume regression test thread");
+    handle
+        .join()
+        .expect("resume regression test thread panicked");
+}
 
 #[tokio::test]
 async fn child_session_inherits_client_mcp_extensions() {
@@ -113,6 +213,67 @@ impl codex_agent_graph_store::AgentGraphStore for FakeAgentGraphStore {
         Box::pin(async { panic!("unexpected graph status update") })
     }
 
+    fn ensure_thread_spawn_edge_open(
+        &self,
+        _root_thread_id: ThreadId,
+        _parent_thread_id: ThreadId,
+        _child_thread_id: ThreadId,
+    ) -> codex_agent_graph_store::AgentGraphStoreFuture<'_, bool> {
+        Box::pin(async { panic!("unexpected graph open") })
+    }
+
+    fn thread_spawn_edge_status(
+        &self,
+        _child_thread_id: ThreadId,
+    ) -> codex_agent_graph_store::AgentGraphStoreFuture<
+        '_,
+        Option<codex_agent_graph_store::ThreadSpawnEdgeStatus>,
+    > {
+        Box::pin(async { panic!("unexpected graph status read") })
+    }
+
+    fn thread_spawn_path_is_open(
+        &self,
+        _thread_id: ThreadId,
+    ) -> codex_agent_graph_store::AgentGraphStoreFuture<'_, bool> {
+        Box::pin(async { panic!("unexpected graph path check") })
+    }
+
+    fn begin_thread_spawn_subtree_close(
+        &self,
+        _root_thread_id: ThreadId,
+        _caller_thread_id: ThreadId,
+        _target_thread_id: ThreadId,
+    ) -> codex_agent_graph_store::AgentGraphStoreFuture<
+        '_,
+        Option<codex_agent_graph_store::ThreadSpawnSubtreeClose>,
+    > {
+        Box::pin(async { panic!("unexpected graph close reservation") })
+    }
+
+    fn finish_thread_spawn_subtree_close(
+        &self,
+        _target_thread_id: ThreadId,
+    ) -> codex_agent_graph_store::AgentGraphStoreFuture<'_, bool> {
+        Box::pin(async { panic!("unexpected graph close completion") })
+    }
+
+    fn reopen_closed_thread_spawn_edge(
+        &self,
+        _root_thread_id: ThreadId,
+        _caller_thread_id: ThreadId,
+        _target_thread_id: ThreadId,
+    ) -> codex_agent_graph_store::AgentGraphStoreFuture<'_, bool> {
+        Box::pin(async { panic!("unexpected graph reopen") })
+    }
+
+    fn list_closing_thread_spawn_targets(
+        &self,
+        _root_thread_id: ThreadId,
+    ) -> codex_agent_graph_store::AgentGraphStoreFuture<'_, Vec<ThreadId>> {
+        Box::pin(async { panic!("unexpected closing-target listing") })
+    }
+
     fn list_thread_spawn_children(
         &self,
         _parent_thread_id: ThreadId,
@@ -130,6 +291,34 @@ impl codex_agent_graph_store::AgentGraphStore for FakeAgentGraphStore {
         assert_eq!(status_filter, None);
         let descendant_thread_ids = self.descendant_thread_ids.clone();
         Box::pin(async move { Ok(descendant_thread_ids) })
+    }
+
+    fn begin_workflow_validation(
+        &self,
+        _submission: codex_agent_graph_store::WorkflowValidationSubmission,
+    ) -> codex_agent_graph_store::AgentGraphStoreFuture<
+        '_,
+        codex_agent_graph_store::WorkflowValidationDecision,
+    > {
+        Box::pin(async { panic!("unexpected workflow validation reservation") })
+    }
+
+    fn complete_workflow_validation(
+        &self,
+        _completion: codex_agent_graph_store::WorkflowValidationCompletion,
+    ) -> codex_agent_graph_store::AgentGraphStoreFuture<'_, bool> {
+        Box::pin(async { panic!("unexpected workflow validation completion") })
+    }
+
+    fn list_workflow_reviewer_validations(
+        &self,
+        _root_thread_id: ThreadId,
+        _turn_id: &str,
+    ) -> codex_agent_graph_store::AgentGraphStoreFuture<
+        '_,
+        Vec<codex_agent_graph_store::WorkflowReviewerValidation>,
+    > {
+        Box::pin(async { panic!("unexpected workflow reviewer validation listing") })
     }
 }
 

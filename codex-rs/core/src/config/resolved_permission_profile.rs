@@ -230,6 +230,14 @@ pub(crate) struct PermissionProfileState {
 }
 
 impl PermissionProfileState {
+    pub(crate) fn locked_to_snapshot(snapshot: PermissionProfileSnapshot) -> Self {
+        Self {
+            resolved_permission_profile: Constrained::allow_only(
+                snapshot.into_resolved_permission_profile(),
+            ),
+        }
+    }
+
     pub(crate) fn from_constrained_legacy(
         constrained_permission_profile: Constrained<PermissionProfile>,
     ) -> ConstraintResult<Self> {

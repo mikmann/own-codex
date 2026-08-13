@@ -6,6 +6,8 @@ mod config_requirements;
 pub mod config_toml;
 mod constraint;
 mod diagnostics;
+pub mod extended_workflow;
+pub mod extended_workflow_prepare;
 mod fingerprint;
 mod hook_config;
 mod host_name;

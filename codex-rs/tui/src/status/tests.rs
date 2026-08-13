@@ -45,6 +45,7 @@ use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::num_format::format_with_separators;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
@@ -58,6 +59,12 @@ use ratatui::prelude::*;
 use std::sync::Arc;
 use tempfile::TempDir;
 use unicode_width::UnicodeWidthStr;
+
+fn normalize_enterprise_limit_numbers(rendered: String) -> String {
+    rendered
+        .replace(&format_with_separators(8_000), "8,000")
+        .replace(&format_with_separators(25_000), "25,000")
+}
 
 #[test]
 fn stale_monthly_limit_marks_fresh_rolling_snapshot_stale() {
@@ -1110,7 +1117,8 @@ async fn status_snapshot_includes_enterprise_monthly_credit_limit() {
             *line = line.replace('\\', "/");
         }
     }
-    let sanitized = sanitize_directory(rendered_lines).join("\n");
+    let sanitized =
+        normalize_enterprise_limit_numbers(sanitize_directory(rendered_lines).join("\n"));
     assert_snapshot!(sanitized);
 
     let mut rendered_lines = render_lines(&composite.display_lines(/*width*/ 46));
@@ -1119,7 +1127,8 @@ async fn status_snapshot_includes_enterprise_monthly_credit_limit() {
             *line = line.replace('\\', "/");
         }
     }
-    let sanitized = sanitize_directory(rendered_lines).join("\n");
+    let sanitized =
+        normalize_enterprise_limit_numbers(sanitize_directory(rendered_lines).join("\n"));
     assert_snapshot!(
         "status_snapshot_wraps_enterprise_monthly_credit_details_in_narrow_terminal",
         sanitized

@@ -36,6 +36,7 @@ const SIDE_SLASH_COMMAND_UNAVAILABLE_HINT: &str =
     "Press Ctrl+C to return to the main thread first.";
 const GOAL_USAGE_HINT: &str = "Example: /goal improve benchmark coverage";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
+const PREPARE_EXTENDED_WORKFLOW_USAGE: &str = "Usage: /prepare-extend-workflow [apply]";
 const USAGE_CHATGPT_LOGIN_REQUIRED: &str = "Sign in with ChatGPT to use /usage.";
 
 impl ChatWidget {
@@ -129,6 +130,84 @@ impl ChatWidget {
     fn emit_raw_output_mode_changed(&self, enabled: bool) {
         self.app_event_tx
             .send(AppEvent::RawOutputModeChanged { enabled });
+    }
+
+    fn prepare_extended_workflow_repository(&mut self, apply: bool) {
+        let cwd = self
+            .current_cwd
+            .clone()
+            .unwrap_or_else(|| self.config.cwd.to_path_buf());
+        let plan =
+            match codex_config::extended_workflow_prepare::plan_extended_workflow_preparation(&cwd)
+            {
+                Ok(plan) => plan,
+                Err(error) => {
+                    self.add_error_message(format!("Repository preparation failed: {error}"));
+                    return;
+                }
+            };
+        let action = match plan.action {
+            codex_config::extended_workflow_prepare::PrepareAction::Create => "Create",
+            codex_config::extended_workflow_prepare::PrepareAction::Unchanged => "Unchanged",
+            codex_config::extended_workflow_prepare::PrepareAction::Conflict => "Conflict",
+        };
+        let next_step = if plan.action
+            == codex_config::extended_workflow_prepare::PrepareAction::Conflict
+        {
+            "No files changed. Resolve the reported conflict before retrying."
+        } else if plan.action == codex_config::extended_workflow_prepare::PrepareAction::Unchanged {
+            "No files changed; the repository is already prepared."
+        } else if apply {
+            "Applying the displayed plan now."
+        } else {
+            "No files changed. Run /prepare-extend-workflow apply to apply this exact kind of change."
+        };
+        self.add_info_message(
+            format!(
+                "Repository preparation preview\nRepository: {}\n[{action}] {} — {}\n{next_step}",
+                plan.repository_root.display(),
+                plan.config_path.display(),
+                plan.detail
+            ),
+            /*hint*/ None,
+        );
+        if plan.action == codex_config::extended_workflow_prepare::PrepareAction::Conflict || !apply
+        {
+            if plan.action == codex_config::extended_workflow_prepare::PrepareAction::Conflict {
+                self.add_error_message(
+                    "Repository preparation stopped at a configuration conflict; no files were changed."
+                        .to_string(),
+                );
+            }
+            return;
+        }
+        match codex_config::extended_workflow_prepare::apply_extended_workflow_preparation(&plan) {
+            Ok(report) => {
+                let mut lines = vec!["Repository preparation completed.".to_string()];
+                lines.extend(
+                    report
+                        .created
+                        .iter()
+                        .map(|path| format!("Created: {}", path.display())),
+                );
+                lines.extend(
+                    report
+                        .updated
+                        .iter()
+                        .map(|path| format!("Updated: {}", path.display())),
+                );
+                lines.extend(
+                    report
+                        .reused
+                        .iter()
+                        .map(|path| format!("Reused unchanged: {}", path.display())),
+                );
+                self.add_info_message(lines.join("\n"), /*hint*/ None);
+            }
+            Err(error) => {
+                self.add_error_message(format!("Repository preparation failed: {error}"));
+            }
+        }
     }
 
     fn slash_command_blocked_by_active_task(&self, cmd: SlashCommand) -> bool {
@@ -258,6 +337,9 @@ impl ChatWidget {
             SlashCommand::Init => {
                 const INIT_PROMPT: &str = include_str!("../../prompt_for_init_command.md");
                 self.submit_user_message(INIT_PROMPT.to_string().into());
+            }
+            SlashCommand::PrepareExtendWorkflow => {
+                self.prepare_extended_workflow_repository(/*apply*/ false);
             }
             SlashCommand::Compact => {
                 if self.blocks_direct_input {
@@ -909,6 +991,12 @@ impl ChatWidget {
                 self.app_event_tx
                     .send(AppEvent::BeginWindowsSandboxGrantReadRoot { path: args });
             }
+            SlashCommand::PrepareExtendWorkflow if !trimmed.is_empty() => {
+                match trimmed.to_ascii_lowercase().as_str() {
+                    "apply" => self.prepare_extended_workflow_repository(/*apply*/ true),
+                    _ => self.add_error_message(PREPARE_EXTENDED_WORKFLOW_USAGE.to_string()),
+                }
+            }
             SlashCommand::Pets
                 if matches!(
                     args.trim().to_ascii_lowercase().as_str(),
@@ -1097,6 +1185,7 @@ impl ChatWidget {
             | SlashCommand::Resume
             | SlashCommand::Fork
             | SlashCommand::Init
+            | SlashCommand::PrepareExtendWorkflow
             | SlashCommand::Compact
             | SlashCommand::Review
             | SlashCommand::Model

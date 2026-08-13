@@ -407,6 +407,7 @@ impl SubAgentActivityItem {
             agent_thread_id: self.agent_thread_id,
             agent_path: self.agent_path.clone(),
             kind: self.kind,
+            workflow_agent: self.workflow_agent.clone(),
         })
     }
 }

@@ -109,6 +109,18 @@ fn next_add_to_history_event(rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEv
     }
 }
 
+fn drain_unwrapped_history(rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>) -> String {
+    let mut rendered = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::InsertHistoryCell(cell) = event {
+            rendered.push(lines_to_single_string(
+                &cell.display_lines(/*width*/ u16::MAX),
+            ));
+        }
+    }
+    rendered.join("\n")
+}
+
 #[tokio::test]
 async fn service_tier_commands_lowercase_catalog_names() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
@@ -838,6 +850,55 @@ async fn goal_control_slash_command_without_thread_shows_full_usage() {
     insta::assert_snapshot!(
         lines_to_single_string(&cells[0]),
         @"• Usage: /goal [<objective>|clear|edit|pause|resume] The session must start before you can change a goal."
+    );
+}
+
+#[tokio::test]
+async fn prepare_extended_workflow_preview_has_snapshot_coverage() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    std::fs::create_dir(repository.path().join(".git")).expect("git marker");
+    let plan = codex_config::extended_workflow_prepare::plan_extended_workflow_preparation(
+        repository.path(),
+    )
+    .expect("preparation plan");
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.current_cwd = Some(repository.path().to_path_buf());
+
+    chat.dispatch_command(SlashCommand::PrepareExtendWorkflow);
+
+    let rendered = drain_unwrapped_history(&mut rx)
+        .replace(&plan.config_path.display().to_string(), "<CONFIG>")
+        .replace(&plan.repository_root.display().to_string(), "<REPO>")
+        .replace('\\', "/");
+    insta::assert_snapshot!("prepare_extended_workflow_preview", rendered);
+    assert!(!repository.path().join(".codex").exists());
+}
+
+#[tokio::test]
+async fn prepare_extended_workflow_conflict_has_snapshot_coverage() {
+    let repository = tempfile::tempdir().expect("temporary repository");
+    std::fs::create_dir(repository.path().join(".git")).expect("git marker");
+    std::fs::create_dir(repository.path().join(".codex")).expect("Codex directory");
+    let config_path = repository.path().join(".codex/config.toml");
+    std::fs::write(&config_path, "model = \"gpt-test\"\n# preserve exactly\n")
+        .expect("conflicting config");
+    let plan = codex_config::extended_workflow_prepare::plan_extended_workflow_preparation(
+        repository.path(),
+    )
+    .expect("conflict plan");
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.current_cwd = Some(repository.path().to_path_buf());
+
+    chat.dispatch_command(SlashCommand::PrepareExtendWorkflow);
+
+    let rendered = drain_unwrapped_history(&mut rx)
+        .replace(&plan.config_path.display().to_string(), "<CONFIG>")
+        .replace(&plan.repository_root.display().to_string(), "<REPO>")
+        .replace('\\', "/");
+    insta::assert_snapshot!("prepare_extended_workflow_conflict", rendered);
+    assert_eq!(
+        std::fs::read_to_string(config_path).expect("unchanged config"),
+        "model = \"gpt-test\"\n# preserve exactly\n"
     );
 }
 

@@ -21,6 +21,7 @@ use crate::tools::handlers::ListMcpResourceTemplatesHandler;
 use crate::tools::handlers::ListMcpResourcesHandler;
 use crate::tools::handlers::NewContextWindowHandler;
 use crate::tools::handlers::PlanHandler;
+use crate::tools::handlers::PlanWorkflowReviewersHandler;
 use crate::tools::handlers::ReadMcpResourceHandler;
 use crate::tools::handlers::RequestPermissionsHandler;
 use crate::tools::handlers::RequestPluginInstallHandler;
@@ -30,6 +31,7 @@ use crate::tools::handlers::ShellCommandHandlerOptions;
 use crate::tools::handlers::SleepHandler;
 use crate::tools::handlers::TestSyncHandler;
 use crate::tools::handlers::ToolSearchHandlerCache;
+use crate::tools::handlers::ValidateWorkflowResultHandler;
 use crate::tools::handlers::ViewImageHandler;
 use crate::tools::handlers::WaitForEnvironmentHandler;
 use crate::tools::handlers::WriteStdinHandler;
@@ -44,6 +46,7 @@ use crate::tools::handlers::multi_agents_common::MAX_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_common::MIN_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
+use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
@@ -143,6 +146,7 @@ pub(crate) fn build_tool_router(
     add_core_tool_sources(&context, &mut registry);
 
     let hosted_specs = if crate::guardian::is_guardian_reviewer_source(&turn_context.session_source)
+        || turn_context.session_source.is_read_only_subagent()
     {
         Vec::new()
     } else {
@@ -279,7 +283,9 @@ pub(crate) fn append_source_tools(
     extension_tool_executors: impl IntoIterator<Item = Arc<dyn ToolExecutor<ExtensionToolCall>>>,
     dynamic_tools: &[DynamicToolSpec],
 ) -> Vec<ToolSpec> {
-    if crate::guardian::is_guardian_reviewer_source(&turn_context.session_source) {
+    if crate::guardian::is_guardian_reviewer_source(&turn_context.session_source)
+        || turn_context.session_source.is_read_only_subagent()
+    {
         return Vec::new();
     }
 
@@ -531,6 +537,9 @@ fn multi_agent_v2_enabled(turn_context: &TurnContext) -> bool {
 }
 
 fn collab_tools_enabled(turn_context: &TurnContext) -> bool {
+    if turn_context.session_source.is_read_only_subagent() {
+        return false;
+    }
     match turn_context.multi_agent_version {
         MultiAgentVersion::Disabled => false,
         MultiAgentVersion::V1 => !exceeds_thread_spawn_depth_limit(
@@ -845,6 +854,29 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
         return;
     }
 
+    // Workflow experts and reviewers are deliberately read-only. Shell reads remain available
+    // under the session's read-only sandbox, as do the three resource-only MCP operations and
+    // local image inspection. Callable MCP tools, dynamic tools, hosted tools, extension tools,
+    // apply_patch, permission elevation, plugin installation, and further collaboration are
+    // excluded by construction.
+    if context.turn_context.session_source.is_read_only_subagent() {
+        add_shell_tools(context, registry);
+        add_mcp_resource_tools(context, registry);
+        let turn_context = context.turn_context;
+        let environment_mode = tool_environment_mode(context.environments);
+        if environment_mode.has_environment()
+            && turn_context.config.features.enabled(Feature::ViewImage)
+        {
+            registry.add(ViewImageHandler::new(ViewImageToolOptions {
+                can_request_original_image_detail: can_request_original_image_detail(
+                    &turn_context.model_info,
+                ),
+                include_environment_id: matches!(environment_mode, ToolEnvironmentMode::Multiple),
+            }));
+        }
+        return;
+    }
+
     add_shell_tools(context, registry);
     add_mcp_resource_tools(context, registry);
     add_core_utility_tools(context, registry);
@@ -953,6 +985,13 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
 
     if turn_context.config.update_plan_enabled {
         registry.add(PlanHandler);
+    }
+
+    if turn_context.config.extended_workflow.enabled
+        && crate::extended_workflow::is_root_workflow_source(&turn_context.session_source)
+    {
+        registry.add_with_exposure(PlanWorkflowReviewersHandler, ToolExposure::DirectModelOnly);
+        registry.add_with_exposure(ValidateWorkflowResultHandler, ToolExposure::DirectModelOnly);
     }
 
     if features.enabled(Feature::DeferredExecutor) {
@@ -1066,7 +1105,8 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                         expose_spawn_agent_model_overrides: turn_context
                             .config
                             .multi_agent_v2
-                            .expose_spawn_agent_model_overrides,
+                            .expose_spawn_agent_model_overrides
+                            || turn_context.config.extended_workflow.enabled,
                         multi_agent_version: turn_context.multi_agent_version,
                         usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
                     }),
@@ -1093,6 +1133,10 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
             }
             registry.register_trusted_with_exposure(
                 multi_agent_v2_handler(InterruptAgentHandler, tool_namespace),
+                exposure,
+            );
+            registry.register_trusted_with_exposure(
+                multi_agent_v2_handler(CloseAgentHandlerV2, tool_namespace),
                 exposure,
             );
             registry.register_trusted_with_exposure(
