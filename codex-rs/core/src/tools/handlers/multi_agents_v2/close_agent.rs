@@ -1,4 +1,6 @@
 use super::*;
+use crate::extended_workflow::WorkflowAgentKind;
+use crate::extended_workflow::WorkflowTurnRuntimeState;
 use crate::tools::handlers::multi_agents_spec::create_close_agent_tool_v2;
 use codex_tools::ToolSpec;
 
@@ -37,6 +39,7 @@ async fn handle_close_agent(
                 .to_string(),
         ));
     }
+    ensure_workflow_agent_can_close(session.as_ref(), turn.as_ref(), agent_id).await?;
     session
         .emit_turn_item_started(
             &turn,
@@ -99,7 +102,72 @@ async fn handle_close_agent(
     })
 }
 
+async fn ensure_workflow_agent_can_close(
+    session: &crate::session::session::Session,
+    turn: &crate::session::turn_context::TurnContext,
+    agent_id: codex_protocol::ThreadId,
+) -> Result<(), FunctionCallError> {
+    let Some(runtime) = turn.extension_data.get::<WorkflowTurnRuntimeState>() else {
+        return Ok(());
+    };
+    let Some(assignment) = runtime.assignment_for_thread(agent_id) else {
+        return Ok(());
+    };
+    let validation_key = format!(
+        "{}:{agent_id}",
+        match assignment.kind {
+            WorkflowAgentKind::Expert => "expert",
+            WorkflowAgentKind::Reviewer => "reviewer",
+        }
+    );
+    let validations = session
+        .services
+        .agent_control
+        .list_workflow_validations(session.thread_id, &turn.sub_id)
+        .await
+        .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+    let validation = validations
+        .iter()
+        .find(|validation| validation.validation_key == validation_key);
+    let terminal_validation = validation.is_some_and(|validation| match assignment.kind {
+        WorkflowAgentKind::Expert => validation.accepted || validation.submissions >= 2,
+        WorkflowAgentKind::Reviewer => {
+            if validation.accepted {
+                validation.reviewer_pass || validation.review_cycles >= 2
+            } else {
+                validation.submissions >= 2
+            }
+        }
+    });
+    if terminal_validation {
+        return Ok(());
+    }
+
+    let status = session.services.agent_control.get_status(agent_id).await;
+    let terminal_without_result =
+        matches!(status, AgentStatus::Errored(_) | AgentStatus::Interrupted)
+            || matches!(status, AgentStatus::Shutdown | AgentStatus::NotFound)
+                && session
+                    .services
+                    .agent_control
+                    .completed_workflow_agent(agent_id)
+                    .await
+                    .is_err();
+    if terminal_without_result {
+        return Ok(());
+    }
+
+    Err(FunctionCallError::RespondToModel(format!(
+        "workflow {} agent `{agent_id}` cannot be closed yet; validate its completed result and finish the permitted correction or review cycle first",
+        assignment.kind.label(),
+    )))
+}
+
 impl CoreToolRuntime for Handler {
+    fn waits_for_runtime_cancellation(&self) -> bool {
+        true
+    }
+
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Function { .. })
     }

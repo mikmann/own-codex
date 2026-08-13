@@ -47,13 +47,20 @@ model capability resolver:
   graph store persist `Open -> Closing -> Closed` only on the target's incoming
   edge; descendant edge states are preserved so an authorized legacy resume can
   still reopen the correct subtree. Full ancestor checks and resume-time
-  reconciliation prevent publication below a closing path. Workflow policy
-  closes an agent only after its result has been accepted or terminally
-  rejected, never while the single correction remains available.
+  reconciliation prevent publication below a closing path. The handler refuses
+  to close a current-turn workflow agent until its result is accepted or
+  terminally rejected. A non-pass reviewer stays open for its one post-fix
+  review cycle; a passing reviewer or an exhausted second cycle can be closed.
+- When no thread limit is explicitly configured, the extended launcher derives
+  the MultiAgentV2 limit from the larger enabled expert/reviewer maximum plus
+  the root thread. With the built-in profiles this means five total threads and
+  four simultaneous child slots. An explicit user limit remains authoritative;
+  `close_agent` releases occupied child slots for subsequent spawns.
 - `codex-rs/protocol/src/protocol.rs` persists the workflow identity and
-  read-only flag in backward-compatible thread-spawn metadata. This keeps UI
-  identity and security constraints available across resume without adding a
-  second persistence system.
+  read-only flag plus an optional profile context ceiling in backward-compatible
+  thread-spawn metadata. This keeps UI identity, security constraints, and the
+  context ceiling available across resume without adding a second persistence
+  system.
 - `codex-rs/tui/src/multi_agents.rs` renders name, type, role, model, reasoning,
   and textual status. Color is supplementary and follows terminal capability
   and `NO_COLOR` through `supports_color`.
@@ -65,6 +72,21 @@ permission escalation, plugin installation, and app instructions are disabled
 in those children. They retain only sandboxed read-only shell access, MCP
 resource list/template/read operations, and local image inspection when the
 existing feature and environment allow it.
+
+The expert process is advisory. Its selected subagents provide independent
+specialist analyses, alternatives, risks, evidence, and recommendations that
+help the main agent create concepts, make decisions, or create tickets. Experts
+do not make the final decision and do not author the final concept or ticket.
+The main agent evaluates and integrates all validated contributions and remains
+accountable for every resulting artifact.
+
+The reviewer process is an independent quality gate after implementation. Its
+selected subagents inspect the actual changes made by the main agent for their
+purpose and necessity, alignment with the root request and accepted ticket, and
+functional and technical correctness. Reviewers verify the repository diff and
+relevant tests instead of trusting the main agent's change summary. They work
+read-only and report findings; only the main agent assesses findings, changes
+the workspace, and reruns affected tests.
 
 ## Classification and selection
 
@@ -81,6 +103,9 @@ and request size produce an inspectable complexity score and reasons.
   maximum according to complexity, affected domains, risk, and decision scope.
 - Reviewer selection happens only after implementation and uses the factual
   change summary. Roles are unique within the round and matched to the changes.
+- Short German/English continuation commands such as `Bitte mach weiter`,
+  `Please continue`, and `Go ahead` remain work orders instead of silently
+  bypassing the workflow in a follow-up turn.
 
 The turn plan, selected profiles, count, estimates, budget decision, and
 classifier reasons are visible to the main model as structured JSON and are
@@ -89,11 +114,19 @@ covered by tests in `codex-rs/core/src/extended_workflow.rs` and
 
 ## Configuration
 
-The smallest repository setup is `.codex/config.toml`. `AGENTS.md` and
-`.codex/agents/` are not required by this architecture and are not created by
-the preparation command. Use those existing Codex conventions only when a
-repository independently needs persistent instructions or reusable agent-role
-files.
+No special repository file is required when the repository is opened through
+the `codex-extended-workflow` launcher; its lowest-priority product default
+enables the workflow. The smallest explicit, repository-persisted setup is
+`<repository>/.codex/config.toml`. The file applies only to that repository.
+`AGENTS.md` and `.codex/agents/` are not required by this architecture and are
+not created by the preparation command. Use those existing Codex conventions
+only when a repository independently needs persistent instructions or reusable
+agent-role files.
+
+No repository-specific thread-limit entry is needed for the built-in maximum of
+four simultaneous experts or reviewers. To choose a different child capacity,
+set `agents.max_concurrent_threads_per_session`; this setting counts child
+threads, while the internal MultiAgentV2 total also includes the root thread.
 
 Example:
 
@@ -148,19 +181,58 @@ name = "reviewer_1"
 role = "Correctness and architecture"
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
+token_budget = 2400
+context_budget = 12000
 
 [[extended_workflow.reviewers.profiles]]
 name = "reviewer_2"
 role = "Security and permissions"
 model = "gpt-5.6-terra"
 reasoning_effort = "xhigh"
+token_budget = 2200
+context_budget = 12000
 ```
 
-These model names are examples, not an allowlist. At spawn time the existing
-model catalog and capability resolver in
-`apply_requested_spawn_agent_model_overrides` validates availability and the
-reasoning level for the selected model. Unsupported combinations fail with the
-same explicit error used by native `spawn_agent`.
+For a one-off invocation, the four dedicated global arguments override the
+repository values without changing the file:
+
+```shell
+codex-extended-workflow --expert-min 2 --expert-max 4 --reviewer-min 2 --reviewer-max 4
+```
+
+Either process, or both processes together, can be disabled for one invocation:
+
+```shell
+codex-extended-workflow --disable-experts
+codex-extended-workflow --disable-reviewers
+codex-extended-workflow --disable-experts --disable-reviewers
+```
+
+For a persistent repository-local choice, set `enabled = false` in the
+corresponding process table:
+
+```toml
+[extended_workflow.experts]
+enabled = false
+
+[extended_workflow.reviewers]
+enabled = false
+```
+
+The same arguments can be supplied to `resume` and other runtime commands.
+Existing dotted `-c` overrides remain supported. The built-in defaults are
+experts `min = 2`, `max = 4` and reviewers `min = 2`, `max = 4`.
+
+Every expert and reviewer profile independently selects its `model` and
+`reasoning_effort`, so profiles in the same round may use different models and
+quality levels. The model names above are examples, not an allowlist. Known
+quality values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`,
+and `ultra`; future non-empty values advertised by a model are also accepted by
+the configuration parser. At spawn time the existing model catalog and
+capability resolver in `apply_requested_spawn_agent_model_overrides` validates
+that the model is available and that it supports the selected quality level.
+Unsupported combinations fail before the child starts, with the same explicit
+error used by native `spawn_agent`.
 
 Defaults for experts and reviewers are independently `enabled = true`,
 `min = 2`, `max = 4`. Each process enforces
@@ -232,25 +304,30 @@ unexplained label. Reviewers provide three dimensions:
 - recoverability: `easy = 0`, `costly = 1`, `irreversible = 3`.
 
 The sum maps to `Low` (0–2), `Medium` (3–4), `High` (5–6), or `Critical`
-(7–9). A mismatch rejects the review result. Low, Medium, and High are rendered
-as yellow warning events. Critical is red because the dimensions identify
-expected, system-wide, or irreversible harm and therefore require a stronger
-blocking signal. Every event also prints the severity text, file, symbol,
-rationale, correction, and missing tests, so color is never the only signal.
+(7–9). A mismatch rejects the review result. Every reviewer finding is rendered
+as a yellow warning event, including `Critical`, while the severity text remains
+explicit. Every event also prints the severity text, file, symbol, rationale,
+correction, and missing tests, so color is never the only signal.
 
 ## Token and context budgets
 
 The provider's model catalog remains authoritative for the maximum context
 window and supported output capabilities. This fork does not claim to impose a
-provider-side hard token cap when the API/runtime cannot do so.
+provider-side hard output-token cap when the API/runtime cannot do so.
 
-- `context_budget` and profile `token_budget` are advisory planning values.
-  Before a selected subagent starts, the runtime compares its configured
-  `context_budget` with a conservative byte-based estimate of the complete,
-  server-bound task. A task that cannot fit is rejected visibly; the estimate is
-  not presented as an exact provider token count.
-- `round_budget_tokens` and `workflow_budget_tokens` are conservative preflight
-  controls. The planner estimates selected subagents and refuses to start a
+- `context_budget` is a per-profile hard local context-window ceiling. The
+  runtime applies the smaller of this value, an existing global override, and
+  the selected model's provider/catalog maximum. The ceiling is persisted with
+  workflow identity and restored after resume or residency reload. Before a
+  selected subagent starts, the runtime also compares the ceiling with a
+  conservative byte-based estimate of the canonical assignment alone. An
+  assignment that cannot fit is rejected visibly; the estimate is not
+  presented as an exact provider token count.
+- Profile `token_budget`, `round_budget_tokens`, and
+  `workflow_budget_tokens` remain conservative advisory planning values because
+  the shared provider runtime does not expose an independent hard per-child
+  output-token stop for this path.
+- The planner estimates selected subagents and refuses to start a
   round when the configured minimum cannot fit; it reports `budget_blocked`
   instead of silently reducing quality.
 - Input tokens, output tokens, and the main-agent share are reported as not

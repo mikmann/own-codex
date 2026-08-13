@@ -59,7 +59,9 @@ pub struct WorkflowAgentProfileToml {
     pub reasoning_effort: Option<ReasoningEffort>,
     /// Advisory per-subagent token budget; exact provider enforcement is not implied.
     pub token_budget: Option<u64>,
-    /// Advisory maximum context allocation for this profile.
+    /// Hard local context-window ceiling for this profile.
+    ///
+    /// The selected model's smaller provider/catalog limit remains authoritative.
     pub context_budget: Option<u64>,
 }
 
@@ -283,6 +285,15 @@ fn validate_profiles(
             .saturating_add(profile.model.as_deref().map_or(0, str::len));
         validate_positive_optional(&format!("{path}.token_budget"), profile.token_budget)?;
         validate_positive_optional(&format!("{path}.context_budget"), profile.context_budget)?;
+        if profile
+            .context_budget
+            .is_some_and(|context_budget| i64::try_from(context_budget).is_err())
+        {
+            return Err(format!(
+                "{path}.context_budget must be at most {} tokens",
+                i64::MAX
+            ));
+        }
     }
     if aggregate_bytes > EXTENDED_WORKFLOW_MAX_PROCESS_PROFILE_BYTES {
         return Err(format!(

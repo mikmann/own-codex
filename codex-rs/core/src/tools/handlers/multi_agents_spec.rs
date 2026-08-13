@@ -126,6 +126,10 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
         if !options.expose_agent_type {
             properties.remove("agent_type");
         }
+        if !options.expose_spawn_agent_model_overrides {
+            properties.remove("model");
+            properties.remove("reasoning_effort");
+        }
         if options.hide_agent_type_model_reasoning {
             properties.remove("service_tier");
         }

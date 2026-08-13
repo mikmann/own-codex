@@ -2781,7 +2781,18 @@ fn resolve_code_mode_config(config_toml: &ConfigToml) -> CodeModeConfig {
     }
 }
 
+#[cfg(test)]
 fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config {
+    resolve_multi_agent_v2_config_with_default(
+        config_toml,
+        DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION,
+    )
+}
+
+fn resolve_multi_agent_v2_config_with_default(
+    config_toml: &ConfigToml,
+    default_max_concurrent_threads_per_session: usize,
+) -> MultiAgentV2Config {
     let base = multi_agent_v2_toml_config(config_toml.features.as_ref());
     let max_concurrent_threads_per_session = base
         .and_then(|config| config.max_concurrent_threads_per_session)
@@ -2792,7 +2803,7 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
                 .and_then(|agents| agents.max_concurrent_threads_per_session)
                 .map(|max_threads| max_threads.saturating_add(1))
         })
-        .unwrap_or(DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION);
+        .unwrap_or(default_max_concurrent_threads_per_session);
     let default =
         MultiAgentV2Config::defaults_for_max_concurrency(max_concurrent_threads_per_session);
     let min_wait_timeout_ms = base
@@ -2881,6 +2892,24 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
         wait_agent_enabled,
         non_code_mode_only,
     }
+}
+
+fn extended_workflow_multi_agent_default(extended_workflow: &ExtendedWorkflowConfig) -> usize {
+    if !extended_workflow.enabled {
+        return DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION;
+    }
+    let expert_slots = if extended_workflow.experts.enabled {
+        extended_workflow.experts.max
+    } else {
+        Default::default()
+    };
+    let reviewer_slots = if extended_workflow.reviewers.enabled {
+        extended_workflow.reviewers.max
+    } else {
+        Default::default()
+    };
+    DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION
+        .max(expert_slots.max(reviewer_slots).saturating_add(1))
 }
 
 fn resolve_token_budget_config(
@@ -3790,12 +3819,15 @@ impl Config {
                 .unwrap_or_default(),
         };
         let code_mode = resolve_code_mode_config(&cfg);
-        let multi_agent_v2 = resolve_multi_agent_v2_config(&cfg);
         let extended_workflow = ExtendedWorkflowConfig::resolve_with_default(
             cfg.extended_workflow.as_ref(),
             extended_workflow_default_enabled,
         )
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
+        let multi_agent_v2 = resolve_multi_agent_v2_config_with_default(
+            &cfg,
+            extended_workflow_multi_agent_default(&extended_workflow),
+        );
         let token_budget = resolve_token_budget_config(&cfg, &features)?;
         let rollout_budget = resolve_rollout_budget_config(&cfg, &features)?;
         let current_time_reminder = resolve_current_time_reminder_config(&cfg, &features)?;

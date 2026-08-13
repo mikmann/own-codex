@@ -73,10 +73,12 @@ impl UpdateAction {
 }
 
 #[cfg(not(debug_assertions))]
-pub fn get_update_action() -> Option<UpdateAction> {
-    // A fork build must never route an update request to the official package,
-    // Homebrew cask, or standalone installer.
-    None
+pub fn get_update_action(official_update_channel_enabled: bool) -> Option<UpdateAction> {
+    if official_update_channel_enabled {
+        UpdateAction::from_install_context(InstallContext::current())
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

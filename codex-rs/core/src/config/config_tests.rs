@@ -6165,6 +6165,14 @@ async fn launcher_workflow_default_is_lowest_priority() -> std::io::Result<()> {
         .build()
         .await?;
     assert!(defaulted.extended_workflow.enabled);
+    assert_eq!(
+        (
+            defaulted.multi_agent_v2.max_concurrent_threads_per_session,
+            defaulted.effective_agent_max_threads(MultiAgentVersion::V2),
+        ),
+        (5, Some(4)),
+        "the extended launcher must admit four simultaneous child reviewers",
+    );
 
     std::fs::write(
         codex_home.path().join(CONFIG_TOML_FILE),
@@ -6177,6 +6185,43 @@ async fn launcher_workflow_default_is_lowest_priority() -> std::io::Result<()> {
         .build()
         .await?;
     assert!(!explicitly_disabled.extended_workflow.enabled);
+    assert_eq!(
+        explicitly_disabled
+            .multi_agent_v2
+            .max_concurrent_threads_per_session,
+        DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION,
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn launcher_workflow_preserves_an_explicit_lower_thread_limit() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        r#"
+[features.multi_agent_v2]
+max_concurrent_threads_per_session = 3
+"#,
+    )?;
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .loader_overrides(LoaderOverrides {
+            extended_workflow_default_enabled: true,
+            ..LoaderOverrides::without_managed_config_for_tests()
+        })
+        .build()
+        .await?;
+
+    assert!(config.extended_workflow.enabled);
+    assert_eq!(
+        (
+            config.multi_agent_v2.max_concurrent_threads_per_session,
+            config.effective_agent_max_threads(MultiAgentVersion::V2),
+        ),
+        (3, Some(2)),
+    );
     Ok(())
 }
 

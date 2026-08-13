@@ -244,6 +244,24 @@ impl AgentControl {
         if let Some(existing) = ledger.get_mut(&key) {
             if existing.accepted
                 && existing.result_kind == "reviewer"
+                && submission.output_revision > existing.output_revision
+            {
+                if existing.review_cycles >= 2 {
+                    return Ok(codex_agent_graph_store::WorkflowValidationDecision::Exhausted(2));
+                }
+                existing.submissions = 1;
+                existing.accepted = false;
+                existing.result_kind = submission.result_kind;
+                existing.agent_thread_id = submission.agent_thread_id;
+                existing.reviewer_role = submission.reviewer_role;
+                existing.output_revision = submission.output_revision;
+                existing.output_sha256 = submission.output_sha256;
+                existing.reviewer_pass = false;
+                existing.has_high_or_critical = false;
+                return Ok(codex_agent_graph_store::WorkflowValidationDecision::Attempt(1));
+            }
+            if existing.accepted
+                && existing.result_kind == "reviewer"
                 && !existing.reviewer_pass
                 && existing.review_cycles >= 2
             {
@@ -419,6 +437,7 @@ impl AgentControl {
                         agent_role: validation.reviewer_role.clone(),
                         submissions: validation.submissions,
                         accepted: validation.accepted,
+                        review_cycles: validation.review_cycles,
                         output_revision: validation.output_revision,
                         output_sha256: validation.output_sha256.clone(),
                         reviewer_pass: validation.reviewer_pass,

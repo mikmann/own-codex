@@ -160,6 +160,22 @@ async fn handle_spawn_agent(
         requested_reasoning_effort,
     )
     .await?;
+    if let Some(context_budget) = workflow_identity
+        .as_ref()
+        .and_then(|identity| identity.profile.context_budget)
+    {
+        let context_budget = i64::try_from(context_budget).map_err(|_| {
+            FunctionCallError::RespondToModel(format!(
+                "workflow profile context_budget must be at most {} tokens",
+                i64::MAX
+            ))
+        })?;
+        config.model_context_window = Some(
+            config
+                .model_context_window
+                .map_or(context_budget, |configured| configured.min(context_budget)),
+        );
+    }
     apply_spawn_agent_service_tier(
         &session,
         &mut config,
@@ -225,6 +241,9 @@ async fn handle_spawn_agent(
             workflow_root_sha256: workflow_identity
                 .as_ref()
                 .map(|identity| identity.root_request_sha256.as_str()),
+            context_budget: workflow_identity
+                .as_ref()
+                .and_then(|identity| identity.profile.context_budget),
         },
     )?;
     let new_agent_path = spawn_source.get_agent_path().ok_or_else(|| {
@@ -383,6 +402,10 @@ async fn handle_spawn_agent(
 }
 
 impl CoreToolRuntime for Handler {
+    fn waits_for_runtime_cancellation(&self) -> bool {
+        true
+    }
+
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Function { .. })
     }

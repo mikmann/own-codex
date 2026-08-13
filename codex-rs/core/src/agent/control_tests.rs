@@ -38,6 +38,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ExtendedThreadSpawnRoleMetadata;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::RolloutItem;
@@ -51,7 +52,7 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
-use codex_protocol::protocol::encode_extended_thread_spawn_role;
+use codex_protocol::protocol::encode_extended_thread_spawn_role_metadata;
 use codex_thread_store::ArchiveThreadParams;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::LocalThreadStore;
@@ -668,6 +669,7 @@ fn ensure_v2_agent_loaded_reloads_registered_read_only_workflow_agent() {
     let mut child_config = harness.config.clone();
     child_config.model = Some("gpt-5.6-luna".to_string());
     child_config.model_reasoning_effort = Some(ReasoningEffort::High);
+    child_config.model_context_window = Some(64_000);
     child_config
         .apply_read_only_subagent_ceiling()
         .expect("read-only workflow child config");
@@ -681,11 +683,18 @@ fn ensure_v2_agent_loaded_reloads_registered_read_only_workflow_agent() {
                 depth: 1,
                 agent_path: Some(agent_path.clone()),
                 agent_nickname: None,
-                agent_role: encode_extended_thread_spawn_role(
-                    None,
-                    /*read_only*/ true,
-                    Some("Expert"),
-                    Some("Architecture"),
+                agent_role: encode_extended_thread_spawn_role_metadata(
+                    ExtendedThreadSpawnRoleMetadata {
+                        config_role: None,
+                        read_only: true,
+                        workflow_type: Some("Expert"),
+                        workflow_role: Some("Architecture"),
+                        workflow_name: Some("architecture"),
+                        workflow_turn_id: Some("turn-context-budget"),
+                        assignment_sha256: Some("assignment"),
+                        workflow_root_sha256: Some("root"),
+                        context_budget: Some(64_000),
+                    },
                 ),
             })),
             SpawnAgentOptions {
@@ -771,6 +780,11 @@ fn ensure_v2_agent_loaded_reloads_registered_read_only_workflow_agent() {
     let reloaded_config = reloaded_child.config().await;
     assert!(!reloaded_config.agents_enabled);
     assert!(!reloaded_config.extended_workflow.enabled);
+    assert_eq!(
+        reloaded_config.model_context_window,
+        Some(64_000),
+        "residency reload must preserve the workflow context ceiling",
+    );
     assert_eq!(
         reloaded_snapshot.model, "gpt-5.6-luna",
         "residency reload must preserve the worker model instead of inheriting its parent model",

@@ -417,7 +417,7 @@ async fn workflow_expert_shell_write_fails_closed_without_creating_a_file() -> R
             ev_response_created("resp-child-finished"),
             ev_assistant_message(
                 "msg-child-finished",
-                r#"{"subject":"read-only enforcement","summary":"write was rejected","findings":["the child remained read-only"],"recommendations":["retain the permission ceiling"],"evidence":[{"file":"codex-rs/core/src/tools/orchestrator.rs","symbol":"ToolOrchestrator::run","explanation":"the runtime rejects unsafe execution"}],"uncertainties":[]}"#,
+                r#"{"subject":"read-only enforcement","summary":"write was rejected","findings":["the child remained read-only"],"recommendations":["retain the permission ceiling"],"evidence":[{"file":"codex-rs/core/src/tools/orchestrator.rs","symbol":"ToolOrchestrator::run","explanation":"the runtime rejects unsafe execution"}],"uncertainties":["none after the observed rejection"]}"#,
             ),
             ev_completed("resp-child-finished"),
         ]),

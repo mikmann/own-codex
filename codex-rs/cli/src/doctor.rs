@@ -309,8 +309,16 @@ pub async fn run_doctor(
     root_config_overrides: CliConfigOverrides,
     interactive: &TuiCli,
     arg0_paths: &Arg0DispatchPaths,
+    official_update_channel_enabled: bool,
 ) -> anyhow::Result<()> {
-    let report = build_report(&command, root_config_overrides, interactive, arg0_paths).await;
+    let report = build_report(
+        &command,
+        root_config_overrides,
+        interactive,
+        arg0_paths,
+        official_update_channel_enabled,
+    )
+    .await;
 
     if command.json {
         println!(
@@ -336,6 +344,7 @@ async fn build_report(
     root_config_overrides: CliConfigOverrides,
     interactive: &TuiCli,
     arg0_paths: &Arg0DispatchPaths,
+    official_update_channel_enabled: bool,
 ) -> DoctorReport {
     let progress = doctor_progress(command.json);
     let mut checks = Vec::new();
@@ -371,7 +380,11 @@ async fn build_report(
             ) = tokio::join!(
                 async { run_sync_check("config", progress.clone(), || config_check(config)) },
                 async { run_sync_check("auth", progress.clone(), || auth_check(config)) },
-                async { run_sync_check("updates", progress.clone(), || updates_check(config)) },
+                async {
+                    run_sync_check("updates", progress.clone(), || {
+                        updates_check(config, official_update_channel_enabled)
+                    })
+                },
                 async { run_sync_check("network", progress.clone(), network_check) },
                 run_async_check(
                     "websocket",

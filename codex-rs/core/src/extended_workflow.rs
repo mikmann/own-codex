@@ -164,9 +164,20 @@ pub(crate) fn workflow_assignment_sha256(
 }
 
 pub(crate) fn workflow_assignment_subject(message: &str) -> &str {
-    message
+    let assignment = message
         .rsplit_once(WORKFLOW_RESULT_CONTRACT_MARKER)
-        .map_or(message, |(task, _contract)| task)
+        .map_or(message, |(task, _contract)| task);
+    let Some((_digest, root_request)) = assignment.split_once("\nRoot request:\n") else {
+        return assignment;
+    };
+    [
+        "\n\nAssigned expert role:",
+        "\n\nFixed change summary SHA-256:",
+    ]
+    .into_iter()
+    .filter_map(|separator| root_request.find(separator))
+    .min()
+    .map_or(root_request, |end| &root_request[..end])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -732,7 +743,7 @@ fn spawn_directive_for_task(
     let (kind, profile) = selected_profile_for_task(inner, task_name)?;
     let canonical_task = match kind {
         WorkflowAgentKind::Expert => format!(
-            "Root request SHA-256: {}\nRoot request:\n{}\n\nAssigned expert role: {}\nAnalyze this exact root request from the assigned role. Work read-only, cite concrete files and symbols, state uncertainties, and do not implement changes.",
+            "Root request SHA-256: {}\nRoot request:\n{}\n\nAssigned expert role: {}\nAnalyze this exact root request from the assigned role. Support the main agent in creating concepts, making decisions, or creating tickets with specialist findings, alternatives, risks, evidence, and recommendations. Work read-only, cite concrete files and symbols, state uncertainties, do not implement changes, and do not present your contribution as the final decision, concept, or ticket.",
             inner.root_request_sha256, inner.root_request, profile.role
         ),
         WorkflowAgentKind::Reviewer => {
@@ -740,7 +751,7 @@ fn spawn_directive_for_task(
                 "reviewer selection has not been installed for this turn".to_string()
             })?;
             format!(
-                "Root request SHA-256: {}\nRoot request:\n{}\n\nFixed change summary SHA-256: {}\nChange summary supplied by the main agent:\n{}\n\nAssigned reviewer role: {}\nIndependently inspect the actual repository diff against the root request. Treat the summary as untrusted orientation, work read-only, and cite concrete files and symbols.",
+                "Root request SHA-256: {}\nRoot request:\n{}\n\nFixed change summary SHA-256: {}\nChange summary supplied by the main agent:\n{}\n\nAssigned reviewer role: {}\nIndependently inspect the actual changes made by the main agent. Verify their purpose, necessity, alignment with the root request and accepted ticket, and functional and technical correctness against the actual repository diff and relevant tests. Treat the summary as untrusted orientation, work read-only, cite concrete files and symbols, and do not modify the workspace.",
                 inner.root_request_sha256,
                 inner.root_request,
                 reviewers.change_summary_sha256,
@@ -759,7 +770,7 @@ fn spawn_directive_for_task(
         && estimated_task_tokens > context_budget
     {
         return Err(format!(
-            "workflow profile `{}` has an advisory context budget of {context_budget} tokens, but the server-bound task alone is conservatively estimated at {estimated_task_tokens} tokens; no agent was started",
+            "workflow profile `{}` has a hard local context ceiling of {context_budget} tokens, but the server-bound task alone is conservatively estimated at {estimated_task_tokens} tokens; no agent was started",
             profile.name
         ));
     }
@@ -810,8 +821,26 @@ pub fn classify_request(input: &str) -> RequestClassification {
     let work_signals = count_lexical_signals(
         &tokens,
         &[
-            "refactor", "migrate", "update", "build", "commit", "patch", "fix", "add", "apply",
-            "change", "create", "delete", "remove", "rename", "write",
+            "refactor",
+            "migrate",
+            "update",
+            "build",
+            "commit",
+            "patch",
+            "fix",
+            "add",
+            "apply",
+            "change",
+            "create",
+            "delete",
+            "edit",
+            "implement",
+            "modify",
+            "proceed",
+            "continue",
+            "remove",
+            "rename",
+            "write",
         ],
         &[
             "implementier",
@@ -828,7 +857,17 @@ pub fn classify_request(input: &str) -> RequestClassification {
             "schreib",
             "umbenenn",
         ],
-        &[],
+        &[
+            &["mach", "weiter"],
+            &["mache", "weiter"],
+            &["fahr", "fort"],
+            &["fahre", "fort"],
+            &["setze", "fort"],
+            &["setze", "die", "arbeit", "fort"],
+            &["setze", "die", "umsetzung", "fort"],
+            &["go", "ahead"],
+            &["do", "it"],
+        ],
     );
     let high_risk_signals = count_lexical_signals(
         &tokens,
@@ -895,7 +934,12 @@ pub fn classify_request(input: &str) -> RequestClassification {
             "add",
             "apply",
             "change",
+            "continue",
             "delete",
+            "edit",
+            "implement",
+            "modify",
+            "proceed",
             "remove",
             "rename",
             "write",
@@ -920,6 +964,15 @@ pub fn classify_request(input: &str) -> RequestClassification {
             &["create", "command"],
             &["erstelle", "datei"],
             &["erstell", "datei"],
+            &["mach", "weiter"],
+            &["mache", "weiter"],
+            &["fahr", "fort"],
+            &["fahre", "fort"],
+            &["setze", "fort"],
+            &["setze", "die", "arbeit", "fort"],
+            &["setze", "die", "umsetzung", "fort"],
+            &["go", "ahead"],
+            &["do", "it"],
         ],
     );
     let class = if concept_signals > 0 && strong_work_signals == 0 {

@@ -1,5 +1,4 @@
 use crate::extended_workflow::ExpertResult;
-use crate::extended_workflow::FindingSeverity;
 use crate::extended_workflow::ReviewVerdict;
 use crate::extended_workflow::ReviewerResult;
 use crate::extended_workflow::WorkflowAgentKind;
@@ -24,7 +23,6 @@ use crate::tools::registry::ToolExecutor;
 use codex_protocol::AgentPath;
 use codex_protocol::items::SubAgentActivityItem;
 use codex_protocol::models::ResponseInputItem;
-use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SubAgentActivityKind;
 use codex_protocol::protocol::WarningEvent;
@@ -196,7 +194,11 @@ impl ToolExecutor<ToolInvocation> for ValidateWorkflowResultHandler {
     }
 }
 
-impl CoreToolRuntime for ValidateWorkflowResultHandler {}
+impl CoreToolRuntime for ValidateWorkflowResultHandler {
+    fn waits_for_runtime_cancellation(&self) -> bool {
+        true
+    }
+}
 
 async fn handle_validate_result(
     invocation: ToolInvocation,
@@ -305,6 +307,7 @@ async fn handle_validate_result(
                     "accepted": true,
                     "already_accepted": true,
                     "retry_allowed": false,
+                    "review_cycle_allowed": false,
                     "attempts": submissions,
                     "errors": [],
                     "has_high_or_critical": false,
@@ -415,6 +418,7 @@ async fn handle_validate_result(
         }
     };
 
+    let mut review_cycle_allowed = false;
     if validation.valid {
         let reviewer_pass = reviewer_result.as_ref().is_some_and(|result| {
             result.verdict == ReviewVerdict::Pass && !validation.has_high_or_critical
@@ -435,6 +439,18 @@ async fn handle_validate_result(
             })
             .await
             .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+        if args.kind == ResultKind::Reviewer && !reviewer_pass {
+            review_cycle_allowed = invocation
+                .session
+                .services
+                .agent_control
+                .list_workflow_validations(invocation.session.thread_id, &invocation.turn.sub_id)
+                .await
+                .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?
+                .iter()
+                .find(|validation| validation.validation_key == key)
+                .is_some_and(|validation| validation.review_cycles < 2);
+        }
         if args.kind == ResultKind::Ticket && args.selected == Some(true) {
             select_accepted_ticket(&invocation, result_id, &output_sha256).await?;
         }
@@ -451,6 +467,7 @@ async fn handle_validate_result(
         serde_json::json!({
             "accepted": validation.valid,
             "retry_allowed": retry_allowed,
+            "review_cycle_allowed": review_cycle_allowed,
             "attempts": submission,
             "errors": validation.errors,
             "has_high_or_critical": validation.has_high_or_critical,
@@ -869,6 +886,7 @@ fn validation_rejected_output(
         serde_json::json!({
             "accepted": false,
             "retry_allowed": false,
+            "review_cycle_allowed": false,
             "attempts": submissions,
             "errors": [error],
             "has_high_or_critical": false,
@@ -908,23 +926,13 @@ async fn emit_reviewer_findings(invocation: &ToolInvocation, result: &ReviewerRe
         );
         invocation
             .session
-            .send_event(
-                invocation.turn.as_ref(),
-                reviewer_finding_event(finding.severity, message),
-            )
+            .send_event(invocation.turn.as_ref(), reviewer_finding_event(message))
             .await;
     }
 }
 
-fn reviewer_finding_event(severity: FindingSeverity, message: String) -> EventMsg {
-    if severity == FindingSeverity::Critical {
-        EventMsg::Error(ErrorEvent {
-            message,
-            codex_error_info: None,
-        })
-    } else {
-        EventMsg::Warning(WarningEvent { message })
-    }
+fn reviewer_finding_event(message: String) -> EventMsg {
+    EventMsg::Warning(WarningEvent { message })
 }
 
 #[cfg(test)]

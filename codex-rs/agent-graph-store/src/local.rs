@@ -286,6 +286,7 @@ impl AgentGraphStore for LocalAgentGraphStore {
                             agent_role: record.agent_role,
                             submissions: record.submissions,
                             accepted: record.accepted,
+                            review_cycles: record.review_cycles,
                             output_revision: record.output_revision,
                             output_sha256: record.output_sha256,
                             reviewer_pass: record.reviewer_pass,
@@ -910,6 +911,82 @@ mod tests {
                 reviewer_pass: true,
                 has_high_or_critical: false,
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn newer_reviewer_output_invalidates_an_accepted_pass() {
+        let fixture = state_runtime().await;
+        let store = LocalAgentGraphStore::new(fixture.state_db);
+        let root = thread_id(/*suffix*/ 920);
+        let first =
+            validation_submission(root, "turn-review", "reviewer:security", 1, &"e".repeat(64));
+        assert_eq!(
+            store
+                .begin_workflow_validation(first.clone())
+                .await
+                .expect("first review should reserve"),
+            WorkflowValidationDecision::Attempt(1)
+        );
+        assert!(
+            store
+                .complete_workflow_validation(WorkflowValidationCompletion {
+                    root_thread_id: root,
+                    turn_id: "turn-review".to_string(),
+                    validation_key: "reviewer:security".to_string(),
+                    submission: 1,
+                    output_revision: 1,
+                    output_sha256: "e".repeat(64),
+                    reviewer_pass: true,
+                    has_high_or_critical: false,
+                })
+                .await
+                .expect("first review completion should persist")
+        );
+        assert_eq!(
+            store
+                .begin_workflow_validation(first)
+                .await
+                .expect("unchanged accepted review should remain accepted"),
+            WorkflowValidationDecision::AlreadyAccepted(1)
+        );
+
+        let second =
+            validation_submission(root, "turn-review", "reviewer:security", 2, &"f".repeat(64));
+        assert_eq!(
+            store
+                .begin_workflow_validation(second)
+                .await
+                .expect("newer reviewer output should require a fresh validation"),
+            WorkflowValidationDecision::Attempt(1)
+        );
+        assert!(
+            store
+                .complete_workflow_validation(WorkflowValidationCompletion {
+                    root_thread_id: root,
+                    turn_id: "turn-review".to_string(),
+                    validation_key: "reviewer:security".to_string(),
+                    submission: 1,
+                    output_revision: 2,
+                    output_sha256: "f".repeat(64),
+                    reviewer_pass: true,
+                    has_high_or_critical: false,
+                })
+                .await
+                .expect("second review completion should persist")
+        );
+        assert_eq!(
+            store
+                .begin_workflow_validation(validation_submission(
+                    root,
+                    "turn-review",
+                    "reviewer:security",
+                    3,
+                    &"0".repeat(64),
+                ))
+                .await
+                .expect("a third review cycle should be rejected"),
+            WorkflowValidationDecision::Exhausted(2)
         );
     }
 }

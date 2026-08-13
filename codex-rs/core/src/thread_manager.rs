@@ -1696,10 +1696,7 @@ impl ThreadManagerState {
         } = options;
         let session_source = session_source.unwrap_or_else(|| self.session_source.clone());
         if matches!(&initial_history, InitialHistory::Resumed(_))
-            && matches!(
-                &session_source,
-                SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
-            )
+            && session_source.is_read_only_subagent()
             && resume_authorization == ResumeAuthorization::Direct
         {
             return Err(CodexErr::UnsupportedOperation(

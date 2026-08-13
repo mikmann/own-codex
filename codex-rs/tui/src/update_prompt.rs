@@ -36,11 +36,16 @@ pub(crate) enum UpdatePromptOutcome {
 pub(crate) async fn run_update_prompt_if_needed(
     tui: &mut Tui,
     config: &Config,
+    official_update_channel_enabled: bool,
 ) -> Result<UpdatePromptOutcome> {
-    let Some(latest_version) = updates::get_upgrade_version_for_popup(config) else {
+    let Some(latest_version) =
+        updates::get_upgrade_version_for_popup(config, official_update_channel_enabled)
+    else {
         return Ok(UpdatePromptOutcome::Continue);
     };
-    let Some(update_action) = crate::update_action::get_update_action() else {
+    let Some(update_action) =
+        crate::update_action::get_update_action(official_update_channel_enabled)
+    else {
         return Ok(UpdatePromptOutcome::Continue);
     };
 

@@ -21,19 +21,21 @@ use serde::Deserialize;
 use std::path::Path;
 
 use crate::version::CODEX_CLI_VERSION;
-use crate::version::OFFICIAL_UPDATE_CHANNEL_ENABLED;
 
 pub(crate) use crate::updates_cache::dismiss_version;
 
-pub fn get_upgrade_version(config: &Config) -> Option<String> {
-    if !OFFICIAL_UPDATE_CHANNEL_ENABLED
+pub fn get_upgrade_version(
+    config: &Config,
+    official_update_channel_enabled: bool,
+) -> Option<String> {
+    if !official_update_channel_enabled
         || !config.check_for_update_on_startup
         || is_source_build_version(CODEX_CLI_VERSION)
     {
         return None;
     }
 
-    let action = update_action::get_update_action();
+    let action = update_action::get_update_action(official_update_channel_enabled);
     let version_file = version_filepath(config);
     let info = read_version_info(&version_file).ok();
 
@@ -151,8 +153,11 @@ async fn fetch_latest_github_release_version(
 
 /// Returns the latest version to show in a popup, if it should be shown.
 /// This respects the user's dismissal choice for the current latest version.
-pub fn get_upgrade_version_for_popup(config: &Config) -> Option<String> {
-    if !OFFICIAL_UPDATE_CHANNEL_ENABLED
+pub fn get_upgrade_version_for_popup(
+    config: &Config,
+    official_update_channel_enabled: bool,
+) -> Option<String> {
+    if !official_update_channel_enabled
         || !config.check_for_update_on_startup
         || is_source_build_version(CODEX_CLI_VERSION)
     {
@@ -160,7 +165,7 @@ pub fn get_upgrade_version_for_popup(config: &Config) -> Option<String> {
     }
 
     let version_file = version_filepath(config);
-    let latest = get_upgrade_version(config)?;
+    let latest = get_upgrade_version(config, official_update_channel_enabled)?;
     // If the user dismissed this exact version previously, do not show the popup.
     if let Ok(info) = read_version_info(&version_file)
         && info.dismissed_version.as_deref() == Some(latest.as_str())

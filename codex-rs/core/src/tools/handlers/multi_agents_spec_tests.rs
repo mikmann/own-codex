@@ -290,6 +290,33 @@ fn spawn_agent_tool_keeps_reserved_schema_when_spawn_metadata_is_hidden() {
 }
 
 #[test]
+fn spawn_agent_tool_hides_unexposed_model_overrides_outside_reserved_schema() {
+    let tool = create_spawn_agent_tool_v2(SpawnAgentToolOptions {
+        available_models: vec![model_preset("visible", /*show_in_picker*/ true)],
+        agent_type_description: "role help".to_string(),
+        expose_agent_type: true,
+        hide_agent_type_model_reasoning: false,
+        expose_spawn_agent_model_overrides: false,
+        reserved_collaboration_schema: false,
+        multi_agent_version: MultiAgentVersion::V2,
+        usage_hint_text: None,
+    });
+
+    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) = tool else {
+        panic!("spawn_agent should be a function tool");
+    };
+    let properties = parameters
+        .properties
+        .as_ref()
+        .expect("spawn_agent should use object params");
+
+    assert!(!properties.contains_key("model"));
+    assert!(!properties.contains_key("reasoning_effort"));
+    assert!(properties.contains_key("agent_type"));
+    assert!(properties.contains_key("service_tier"));
+}
+
+#[test]
 fn spawn_agent_tool_keeps_reserved_schema_without_override_exposure() {
     let tool = create_spawn_agent_tool_v2(SpawnAgentToolOptions {
         available_models: vec![model_preset("visible", /*show_in_picker*/ true)],

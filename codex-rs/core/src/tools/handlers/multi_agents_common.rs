@@ -135,6 +135,7 @@ pub(crate) struct ThreadSpawnMetadata<'a> {
     pub(crate) workflow_turn_id: Option<&'a str>,
     pub(crate) assignment_sha256: Option<&'a str>,
     pub(crate) workflow_root_sha256: Option<&'a str>,
+    pub(crate) context_budget: Option<u64>,
 }
 
 pub(crate) fn thread_spawn_source(
@@ -164,6 +165,7 @@ pub(crate) fn thread_spawn_source(
             workflow_turn_id: metadata.workflow_turn_id,
             assignment_sha256: metadata.assignment_sha256,
             workflow_root_sha256: metadata.workflow_root_sha256,
+            context_budget: metadata.context_budget,
         },
     );
     Ok(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {

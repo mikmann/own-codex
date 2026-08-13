@@ -271,8 +271,8 @@ fn app_server_extended_workflow_combines_launcher_and_remote_control_markers() {
     assert_eq!(
         backend.command_env(),
         vec![
-            ("CODEX_EXTENDED_WORKFLOW_LAUNCHER", "1"),
             (REMOTE_CONTROL_DISABLED_ENV_VAR, "1"),
+            ("CODEX_EXTENDED_WORKFLOW_LAUNCHER", "1"),
         ]
     );
 }

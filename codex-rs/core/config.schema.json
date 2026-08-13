@@ -4924,7 +4924,7 @@
           "type": "string"
         },
         "context_budget": {
-          "description": "Advisory maximum context allocation for this profile.",
+          "description": "Hard local context-window ceiling for this profile.\n\nThe selected model's smaller provider/catalog limit remains authoritative.",
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"

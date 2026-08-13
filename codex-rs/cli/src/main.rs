@@ -67,6 +67,7 @@ use doctor::DoctorCommand;
 use state_db_recovery as local_state_db;
 
 use codex_config::LoaderOverrides;
+use codex_config::extended_workflow::EXTENDED_WORKFLOW_MAX_AGENTS;
 use codex_config::extended_workflow_prepare::PrepareAction;
 use codex_config::extended_workflow_prepare::apply_extended_workflow_preparation;
 use codex_config::extended_workflow_prepare::plan_extended_workflow_preparation;
@@ -116,6 +117,9 @@ struct MultitoolCli {
     pub config_overrides: CliConfigOverrides,
 
     #[clap(flatten)]
+    extended_workflow_process_overrides: ExtendedWorkflowProcessOverrides,
+
+    #[clap(flatten)]
     pub feature_toggles: FeatureToggles,
 
     #[clap(flatten)]
@@ -126,6 +130,102 @@ struct MultitoolCli {
 
     #[clap(subcommand)]
     subcommand: Option<Subcommand>,
+}
+
+#[derive(Debug, Args, Default)]
+struct ExtendedWorkflowProcessOverrides {
+    /// Override the minimum expert count for this invocation (0..=6).
+    #[arg(
+        long = "expert-min",
+        global = true,
+        value_name = "COUNT",
+        value_parser = parse_extended_workflow_agent_count
+    )]
+    expert_min: Option<usize>,
+
+    /// Override the maximum expert count for this invocation (0..=6).
+    #[arg(
+        long = "expert-max",
+        global = true,
+        value_name = "COUNT",
+        value_parser = parse_extended_workflow_agent_count
+    )]
+    expert_max: Option<usize>,
+
+    /// Override the minimum reviewer count for this invocation (0..=6).
+    #[arg(
+        long = "reviewer-min",
+        global = true,
+        value_name = "COUNT",
+        value_parser = parse_extended_workflow_agent_count
+    )]
+    reviewer_min: Option<usize>,
+
+    /// Override the maximum reviewer count for this invocation (0..=6).
+    #[arg(
+        long = "reviewer-max",
+        global = true,
+        value_name = "COUNT",
+        value_parser = parse_extended_workflow_agent_count
+    )]
+    reviewer_max: Option<usize>,
+
+    /// Disable the expert process for this invocation.
+    #[arg(long = "disable-experts", global = true)]
+    disable_experts: bool,
+
+    /// Disable the reviewer process for this invocation.
+    #[arg(long = "disable-reviewers", global = true)]
+    disable_reviewers: bool,
+}
+
+impl ExtendedWorkflowProcessOverrides {
+    fn into_config_overrides(self) -> anyhow::Result<Vec<String>> {
+        validate_extended_workflow_process_range("expert", self.expert_min, self.expert_max)?;
+        validate_extended_workflow_process_range("reviewer", self.reviewer_min, self.reviewer_max)?;
+        let mut overrides = [
+            ("extended_workflow.experts.min", self.expert_min),
+            ("extended_workflow.experts.max", self.expert_max),
+            ("extended_workflow.reviewers.min", self.reviewer_min),
+            ("extended_workflow.reviewers.max", self.reviewer_max),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| value.map(|value| format!("{key}={value}")))
+        .collect::<Vec<_>>();
+        if self.disable_experts {
+            overrides.push("extended_workflow.experts.enabled=false".to_string());
+        }
+        if self.disable_reviewers {
+            overrides.push("extended_workflow.reviewers.enabled=false".to_string());
+        }
+        Ok(overrides)
+    }
+}
+
+fn validate_extended_workflow_process_range(
+    process: &str,
+    min: Option<usize>,
+    max: Option<usize>,
+) -> anyhow::Result<()> {
+    if let (Some(min), Some(max)) = (min, max)
+        && min > max
+    {
+        anyhow::bail!("--{process}-min ({min}) must not exceed --{process}-max ({max})");
+    }
+    Ok(())
+}
+
+fn parse_extended_workflow_agent_count(value: &str) -> Result<usize, String> {
+    let count = value.parse::<usize>().map_err(|_| {
+        format!("agent count must be an integer between 0 and {EXTENDED_WORKFLOW_MAX_AGENTS}")
+    })?;
+    if count > EXTENDED_WORKFLOW_MAX_AGENTS {
+        Err(format!(
+            "agent count must be between 0 and {EXTENDED_WORKFLOW_MAX_AGENTS}; got {count}"
+        ))
+    } else {
+        Ok(count)
+    }
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -770,7 +870,10 @@ fn format_exit_messages(exit_info: AppExitInfo, color_enabled: bool) -> Vec<Stri
 }
 
 /// Handle the app exit and print the results. Optionally run the update action.
-fn handle_app_exit(exit_info: AppExitInfo) -> anyhow::Result<()> {
+fn handle_app_exit(
+    exit_info: AppExitInfo,
+    extended_workflow_default_enabled: bool,
+) -> anyhow::Result<()> {
     let is_fatal = match &exit_info.exit_reason {
         ExitReason::Fatal(message) => {
             eprintln!("ERROR: {message}");
@@ -789,22 +892,83 @@ fn handle_app_exit(exit_info: AppExitInfo) -> anyhow::Result<()> {
         std::process::exit(1);
     }
     if let Some(action) = update_action {
-        run_update_action(action)?;
+        run_update_action(action, extended_workflow_default_enabled)?;
     }
     Ok(())
 }
 
-/// Automatic update actions are never executable in this fork.
-fn run_update_action(_action: UpdateAction) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "automatic updates are disabled for codex-extended-workflow; install a validated release explicitly"
-    )
+/// Run the update action and print the result.
+fn run_update_action(
+    action: UpdateAction,
+    extended_workflow_default_enabled: bool,
+) -> anyhow::Result<()> {
+    if extended_workflow_default_enabled {
+        anyhow::bail!(
+            "automatic updates are disabled for codex-extended-workflow; install a validated release explicitly"
+        );
+    }
+
+    println!();
+    let cmd_str = action.command_str();
+    println!("Updating Codex via `{cmd_str}`...");
+
+    let status = {
+        #[cfg(windows)]
+        {
+            if action == UpdateAction::StandaloneWindows {
+                let (cmd, args) = action.command_args();
+                std::process::Command::new(cmd).args(args).status()?
+            } else {
+                std::process::Command::new("cmd")
+                    .args(["/C", &cmd_str])
+                    .status()?
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let (cmd, args) = action.command_args();
+            let command_path = crate::wsl_paths::normalize_for_wsl(cmd);
+            let normalized_args: Vec<String> = args
+                .iter()
+                .map(crate::wsl_paths::normalize_for_wsl)
+                .collect();
+            std::process::Command::new(&command_path)
+                .args(&normalized_args)
+                .status()?
+        }
+    };
+    if !status.success() {
+        anyhow::bail!("`{cmd_str}` failed with status {status}");
+    }
+    println!("\n🎉 Update ran successfully! Please restart Codex.");
+    Ok(())
 }
 
-fn run_update_command() -> anyhow::Result<()> {
-    anyhow::bail!(
-        "`codex-extended-workflow update` is disabled for this fork; install a validated codex-extended-workflow release explicitly"
-    )
+fn run_update_command(extended_workflow_default_enabled: bool) -> anyhow::Result<()> {
+    if extended_workflow_default_enabled {
+        anyhow::bail!(
+            "`codex-extended-workflow update` is disabled for this fork; install a validated codex-extended-workflow release explicitly"
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        anyhow::bail!(
+            "`codex update` is not available in debug builds. Install a release build of Codex to use this command."
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        let Some(action) =
+            codex_tui::get_update_action(/*official_update_channel_enabled*/ true)
+        else {
+            anyhow::bail!(
+                "Could not detect the Codex installation method. Please update manually: https://developers.openai.com/codex/cli/"
+            );
+        };
+        run_update_action(action, extended_workflow_default_enabled)
+    }
 }
 
 fn run_execpolicycheck(cmd: ExecPolicyCheckCommand) -> anyhow::Result<()> {
@@ -981,6 +1145,7 @@ async fn cli_main(
     let MultitoolCli {
         psp,
         config_overrides: mut root_config_overrides,
+        extended_workflow_process_overrides,
         feature_toggles,
         remote,
         mut interactive,
@@ -991,6 +1156,9 @@ async fn cli_main(
     // Fold --enable/--disable into config overrides so they flow to all subcommands.
     let toggle_overrides = feature_toggles.to_overrides()?;
     root_config_overrides.raw_overrides.extend(toggle_overrides);
+    root_config_overrides
+        .raw_overrides
+        .extend(extended_workflow_process_overrides.into_config_overrides()?);
     let root_remote = remote.remote;
     let root_remote_auth_token_env = remote.remote_auth_token_env;
     let root_strict_config = interactive.strict_config;
@@ -1016,7 +1184,7 @@ async fn cli_main(
                 extended_workflow_default_enabled,
             )
             .await?;
-            handle_app_exit(exit_info)?;
+            handle_app_exit(exit_info, extended_workflow_default_enabled)?;
         }
         Some(Subcommand::Exec(mut exec_cli)) => {
             reject_remote_mode_for_subcommand(
@@ -1343,7 +1511,7 @@ async fn cli_main(
                 extended_workflow_default_enabled,
             )
             .await?;
-            handle_app_exit(exit_info)?;
+            handle_app_exit(exit_info, extended_workflow_default_enabled)?;
         }
         Some(Subcommand::Archive(cmd)) => {
             let output = run_session_archive_cli_command(
@@ -1411,7 +1579,7 @@ async fn cli_main(
                 extended_workflow_default_enabled,
             )
             .await?;
-            handle_app_exit(exit_info)?;
+            handle_app_exit(exit_info, extended_workflow_default_enabled)?;
         }
         Some(Subcommand::Login(mut login_cli)) => {
             reject_remote_mode_for_subcommand(
@@ -1483,7 +1651,7 @@ async fn cli_main(
                 root_remote_auth_token_env.as_deref(),
                 "update",
             )?;
-            run_update_command()?;
+            run_update_command(extended_workflow_default_enabled)?;
         }
         Some(Subcommand::Doctor(doctor_cli)) => {
             reject_remote_mode_for_subcommand(
@@ -1496,6 +1664,7 @@ async fn cli_main(
                 root_config_overrides.clone(),
                 &interactive,
                 &arg0_paths,
+                !extended_workflow_default_enabled,
             )
             .await?;
         }
@@ -2762,6 +2931,89 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn extended_workflow_process_flags_are_global_config_overrides() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex-extended-workflow",
+            "-c",
+            "extended_workflow.experts.min=1",
+            "resume",
+            "--last",
+            "--expert-min",
+            "2",
+            "--expert-max",
+            "6",
+            "--reviewer-min",
+            "3",
+            "--reviewer-max",
+            "3",
+            "--disable-experts",
+            "--disable-reviewers",
+        ])
+        .expect("global workflow process flags should parse after a subcommand");
+        let mut raw_overrides = cli.config_overrides.raw_overrides;
+        raw_overrides.extend(
+            cli.extended_workflow_process_overrides
+                .into_config_overrides()
+                .expect("valid workflow process ranges"),
+        );
+
+        assert_eq!(
+            raw_overrides,
+            vec![
+                "extended_workflow.experts.min=1",
+                "extended_workflow.experts.min=2",
+                "extended_workflow.experts.max=6",
+                "extended_workflow.reviewers.min=3",
+                "extended_workflow.reviewers.max=3",
+                "extended_workflow.experts.enabled=false",
+                "extended_workflow.reviewers.enabled=false",
+            ]
+        );
+    }
+
+    #[test]
+    fn extended_workflow_agent_count_flags_reject_values_outside_zero_to_six() {
+        for flag in [
+            "--expert-min",
+            "--expert-max",
+            "--reviewer-min",
+            "--reviewer-max",
+        ] {
+            for value in ["-1", "7"] {
+                assert!(
+                    MultitoolCli::try_parse_from(["codex-extended-workflow", flag, value]).is_err(),
+                    "{flag} must reject {value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extended_workflow_process_flags_reject_reversed_explicit_ranges() {
+        for (min_flag, max_flag) in [
+            ("--expert-min", "--expert-max"),
+            ("--reviewer-min", "--reviewer-max"),
+        ] {
+            let cli = MultitoolCli::try_parse_from([
+                "codex-extended-workflow",
+                min_flag,
+                "4",
+                max_flag,
+                "2",
+            ])
+            .expect("each count is individually valid");
+            let error = cli
+                .extended_workflow_process_overrides
+                .into_config_overrides()
+                .expect_err("reversed range must be rejected");
+            assert_eq!(
+                error.to_string(),
+                format!("{min_flag} (4) must not exceed {max_flag} (2)")
+            );
+        }
+    }
+
     #[tokio::test]
     async fn updater_http_client_factory_honors_respect_system_proxy() {
         let codex_home = tempfile::tempdir().expect("temporary Codex home");
@@ -2853,6 +3105,7 @@ mod tests {
             psp: _,
             mut interactive,
             config_overrides: mut root_overrides,
+            extended_workflow_process_overrides: _,
             subcommand,
             feature_toggles: _,
             remote: _,
@@ -2891,6 +3144,7 @@ mod tests {
             psp: _,
             mut interactive,
             config_overrides: mut root_overrides,
+            extended_workflow_process_overrides: _,
             subcommand,
             feature_toggles: _,
             remote: _,
@@ -2936,6 +3190,7 @@ mod tests {
             psp: _,
             interactive,
             config_overrides: root_overrides,
+            extended_workflow_process_overrides: _,
             subcommand,
             feature_toggles: _,
             remote: _,

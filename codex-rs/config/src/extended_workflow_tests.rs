@@ -56,23 +56,49 @@ fn enabled_zero_zero_means_active_with_no_automatic_agents() {
 fn validates_all_min_max_boundaries() {
     for (min, max, valid) in [
         (0, 0, true),
+        (2, 2, true),
         (0, 6, true),
         (6, 6, true),
         (4, 2, false),
         (0, 7, false),
     ] {
-        let config = ExtendedWorkflowToml {
-            experts: Some(WorkflowProcessToml {
-                min: Some(min),
-                max: Some(max),
-                ..Default::default()
-            }),
+        let process = WorkflowProcessToml {
+            min: Some(min),
+            max: Some(max),
             ..Default::default()
         };
-        assert_eq!(
-            ExtendedWorkflowConfig::resolve(Some(&config)).is_ok(),
-            valid,
-            "min={min}, max={max}"
+        for (process_name, config) in [
+            (
+                "experts",
+                ExtendedWorkflowToml {
+                    experts: Some(process.clone()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "reviewers",
+                ExtendedWorkflowToml {
+                    reviewers: Some(process.clone()),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            assert_eq!(
+                ExtendedWorkflowConfig::resolve(Some(&config)).is_ok(),
+                valid,
+                "process={process_name}, min={min}, max={max}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rejects_negative_min_and_max_values_during_deserialization() {
+    for field in ["min", "max"] {
+        let input = format!("[experts]\n{field} = -1\n");
+        assert!(
+            toml::from_str::<ExtendedWorkflowToml>(&input).is_err(),
+            "{field} must reject negative values"
         );
     }
 }
@@ -105,27 +131,31 @@ fn rejects_duplicate_reviewer_roles() {
 }
 
 #[test]
-fn expert_and_reviewer_processes_can_both_be_disabled() {
-    let config = ExtendedWorkflowToml {
-        experts: Some(WorkflowProcessToml {
-            enabled: Some(false),
-            profiles: Some(Vec::new()),
+fn expert_and_reviewer_processes_can_be_disabled_independently_or_together() {
+    for (experts_enabled, reviewers_enabled) in [(false, true), (true, false), (false, false)] {
+        let config = ExtendedWorkflowToml {
+            experts: Some(WorkflowProcessToml {
+                enabled: Some(experts_enabled),
+                profiles: (!experts_enabled).then(Vec::new),
+                ..Default::default()
+            }),
+            reviewers: Some(WorkflowProcessToml {
+                enabled: Some(reviewers_enabled),
+                profiles: (!reviewers_enabled).then(Vec::new),
+                ..Default::default()
+            }),
             ..Default::default()
-        }),
-        reviewers: Some(WorkflowProcessToml {
-            enabled: Some(false),
-            profiles: Some(Vec::new()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let resolved = ExtendedWorkflowConfig::resolve(Some(&config)).expect("disabled config");
-    assert!(!resolved.experts.enabled);
-    assert!(!resolved.reviewers.enabled);
+        };
+        let resolved = ExtendedWorkflowConfig::resolve(Some(&config)).expect("disabled config");
+        assert_eq!(
+            (resolved.experts.enabled, resolved.reviewers.enabled),
+            (experts_enabled, reviewers_enabled)
+        );
+    }
 }
 
 #[test]
-fn profile_models_are_not_restricted_by_a_hard_coded_allowlist() {
+fn expert_and_reviewer_profiles_accept_catalog_resolved_models_and_quality() {
     let parsed: ExtendedWorkflowToml = toml::from_str(
         r#"
 [experts]
@@ -135,19 +165,35 @@ max = 1
 [[experts.profiles]]
 name = "specialist"
 role = "Specialist"
-model = "future-model"
+model = "future-expert-model"
 reasoning_effort = "high"
+
+[reviewers]
+min = 1
+max = 1
+
+[[reviewers.profiles]]
+name = "reviewer"
+role = "Independent review"
+model = "future-reviewer-model"
+reasoning_effort = "future-quality"
 "#,
     )
-    .expect("known reasoning enum and arbitrary model name");
-    let resolved = ExtendedWorkflowConfig::resolve(Some(&parsed)).expect("resolved profile");
+    .expect("independent model and quality profiles");
+    let resolved = ExtendedWorkflowConfig::resolve(Some(&parsed)).expect("resolved profiles");
     assert_eq!(
-        resolved.experts.profiles[0].model.as_deref(),
-        Some("future-model")
-    );
-    assert_eq!(
-        resolved.experts.profiles[0].reasoning_effort,
-        Some(ReasoningEffort::High)
+        (
+            resolved.experts.profiles[0].model.as_deref(),
+            &resolved.experts.profiles[0].reasoning_effort,
+            resolved.reviewers.profiles[0].model.as_deref(),
+            &resolved.reviewers.profiles[0].reasoning_effort,
+        ),
+        (
+            Some("future-expert-model"),
+            &Some(ReasoningEffort::High),
+            Some("future-reviewer-model"),
+            &Some(ReasoningEffort::Custom("future-quality".to_string())),
+        )
     );
 }
 
@@ -162,6 +208,28 @@ fn zero_advisory_budgets_are_rejected_with_the_config_path() {
     };
     let error = ExtendedWorkflowConfig::resolve(Some(&config)).expect_err("zero budget");
     assert!(error.contains("extended_workflow.reviewers.round_budget_tokens"));
+}
+
+#[test]
+fn context_budget_must_fit_the_runtime_token_counter() {
+    let config = ExtendedWorkflowToml {
+        experts: Some(WorkflowProcessToml {
+            min: Some(1),
+            max: Some(1),
+            profiles: Some(vec![WorkflowAgentProfileToml {
+                name: "bounded".to_string(),
+                role: "Bounded context".to_string(),
+                context_budget: Some(u64::MAX),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let error = ExtendedWorkflowConfig::resolve(Some(&config)).expect_err("oversized context");
+    assert!(error.contains("extended_workflow.experts.profiles[0].context_budget"));
+    assert!(error.contains(&i64::MAX.to_string()));
 }
 
 #[test]

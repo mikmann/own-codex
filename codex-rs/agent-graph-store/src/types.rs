@@ -66,6 +66,7 @@ pub struct WorkflowValidationRecord {
     pub agent_role: Option<String>,
     pub submissions: u8,
     pub accepted: bool,
+    pub review_cycles: u8,
     pub output_revision: u32,
     pub output_sha256: String,
     pub reviewer_pass: bool,

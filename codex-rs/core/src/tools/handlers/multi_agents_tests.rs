@@ -390,6 +390,7 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
     profile.agent_type = Some(role_name.clone());
     profile.model = Some("gpt-5.4".to_string());
     profile.reasoning_effort = Some(ReasoningEffort::High);
+    profile.context_budget = Some(64_000);
     let root_request = "Implement the architecture and security validation.";
     let workflow_plan = crate::extended_workflow::plan_turn(
         root_request,
@@ -471,11 +472,75 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
     assert!(snapshot.session_source.is_read_only_subagent());
 
     let child_config = child.config().await;
+    assert_eq!(child_config.model_context_window, Some(64_000));
     assert!(!child_config.agents_enabled);
     assert!(!child_config.extended_workflow.enabled);
     assert!(!child_config.features.enabled(Feature::Collab));
     assert!(!child_config.features.enabled(Feature::MultiAgentV2));
     assert!(!child_config.include_apps_instructions);
+
+    let premature_close = CloseAgentHandlerV2
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "close_agent",
+            function_payload(json!({"target": result.task_name.clone()})),
+        ))
+        .await
+        .err()
+        .expect("an unvalidated workflow agent must remain available for correction");
+    assert!(
+        premature_close
+            .to_string()
+            .contains("cannot be closed yet"),
+    );
+
+    let validation_key = format!("expert:{child_thread_id}");
+    let output_sha256 = "a".repeat(64);
+    let decision = session
+        .services
+        .agent_control
+        .begin_workflow_validation(codex_agent_graph_store::WorkflowValidationSubmission {
+            root_thread_id: session.thread_id,
+            turn_id: turn.sub_id.clone(),
+            validation_key: validation_key.clone(),
+            result_kind: "expert".to_string(),
+            agent_thread_id: Some(child_thread_id),
+            reviewer_role: Some("Architecture".to_string()),
+            output_revision: 1,
+            output_sha256: output_sha256.clone(),
+            requires_higher_revision: true,
+        })
+        .await
+        .expect("expert validation should reserve");
+    assert_eq!(
+        decision,
+        codex_agent_graph_store::WorkflowValidationDecision::Attempt(1),
+    );
+    session
+        .services
+        .agent_control
+        .complete_workflow_validation(codex_agent_graph_store::WorkflowValidationCompletion {
+            root_thread_id: session.thread_id,
+            turn_id: turn.sub_id.clone(),
+            validation_key,
+            submission: 1,
+            output_revision: 1,
+            output_sha256,
+            reviewer_pass: false,
+            has_high_or_critical: false,
+        })
+        .await
+        .expect("expert validation should complete");
+    CloseAgentHandlerV2
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "close_agent",
+            function_payload(json!({"target": result.task_name.clone()})),
+        ))
+        .await
+        .expect("an accepted expert result should permit close_agent");
 
     let terminal_result = json!({
         "subject": "architecture workflow review",
@@ -516,6 +581,7 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
                 workflow_turn_id: Some(turn.sub_id.as_str()),
                 assignment_sha256: Some(validation_assignment_sha256.as_str()),
                 workflow_root_sha256: Some(workflow_plan.root_request_sha256.as_str()),
+                context_budget: None,
             },
         ),
     });
@@ -4468,6 +4534,9 @@ async fn multi_agent_v2_close_agent_closes_a_task_subtree_and_is_idempotent_by_i
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     let mut config = (*turn.config).clone();
+    // The per-session limit includes the root thread, so this admits the root,
+    // the worker, and its child before the overflow spawn is rejected.
+    config.multi_agent_v2.max_concurrent_threads_per_session = 3;
     config
         .features
         .enable(Feature::MultiAgentV2)
@@ -4524,6 +4593,25 @@ async fn multi_agent_v2_close_agent_closes_a_task_subtree_and_is_idempotent_by_i
         .await
         .expect("child path should resolve");
 
+    let limit_error = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "this agent must not start while both slots are occupied",
+                "task_name": "overflow"
+            })),
+        ))
+        .await
+        .err()
+        .expect("the third concurrent agent should hit the configured limit");
+    assert!(
+        limit_error
+            .to_string()
+            .contains("agent thread limit reached")
+    );
+
     let self_close_error = CloseAgentHandlerV2
         .handle(invocation(
             worker_session.clone(),
@@ -4570,6 +4658,28 @@ async fn multi_agent_v2_close_agent_closes_a_task_subtree_and_is_idempotent_by_i
         manager.agent_control().get_status(child_id).await,
         AgentStatus::NotFound
     );
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "start after close_agent released the occupied slots",
+                "task_name": "replacement"
+            })),
+        ))
+        .await
+        .expect("spawn_agent should reuse capacity released by close_agent");
+    let replacement_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "replacement")
+        .await
+        .expect("replacement path should resolve");
+    assert_ne!(
+        manager.agent_control().get_status(replacement_id).await,
+        AgentStatus::NotFound
+    );
     let shutdowns_after_first_close = manager
         .captured_ops()
         .into_iter()
@@ -4581,8 +4691,8 @@ async fn multi_agent_v2_close_agent_closes_a_task_subtree_and_is_idempotent_by_i
 
     let repeated_output = CloseAgentHandlerV2
         .handle(invocation(
-            session,
-            turn,
+            session.clone(),
+            turn.clone(),
             "close_agent",
             function_payload(json!({"target": worker_id.to_string()})),
         ))
@@ -4606,6 +4716,16 @@ async fn multi_agent_v2_close_agent_closes_a_task_subtree_and_is_idempotent_by_i
         })
         .count();
     assert_eq!(shutdowns_after_repeated_close, shutdowns_after_first_close);
+
+    CloseAgentHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "close_agent",
+            function_payload(json!({"target": "replacement"})),
+        ))
+        .await
+        .expect("replacement cleanup should succeed");
 }
 
 #[tokio::test]

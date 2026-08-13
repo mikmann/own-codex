@@ -654,6 +654,38 @@ WHERE root_thread_id = ? AND turn_id = ? AND validation_key = ?
             let previous_sha256 = existing.try_get::<String, _>("output_sha256")?;
             if accepted
                 && existing_result_kind == "reviewer"
+                && submission.output_revision > previous_revision
+            {
+                if review_cycles >= 2 {
+                    crate::WorkflowValidationDecision::Exhausted(2)
+                } else {
+                    sqlx::query(
+                        r#"
+UPDATE extended_workflow_validations
+SET submissions = 1, accepted = 0, result_kind = ?, agent_thread_id = ?,
+    reviewer_role = ?, output_revision = ?, output_sha256 = ?, reviewer_pass = 0,
+    has_high_or_critical = 0
+WHERE root_thread_id = ? AND turn_id = ? AND validation_key = ? AND accepted = 1
+                        "#,
+                    )
+                    .bind(&submission.result_kind)
+                    .bind(
+                        submission
+                            .agent_thread_id
+                            .map(|thread_id| thread_id.to_string()),
+                    )
+                    .bind(&submission.reviewer_role)
+                    .bind(i64::from(submission.output_revision))
+                    .bind(&submission.output_sha256)
+                    .bind(submission.root_thread_id.to_string())
+                    .bind(&submission.turn_id)
+                    .bind(&submission.validation_key)
+                    .execute(&mut *transaction)
+                    .await?;
+                    crate::WorkflowValidationDecision::Attempt(1)
+                }
+            } else if accepted
+                && existing_result_kind == "reviewer"
                 && !reviewer_pass
                 && review_cycles >= 2
             {
@@ -856,7 +888,8 @@ ORDER BY reviewer_role, agent_thread_id
         let rows = sqlx::query(
             r#"
 SELECT validation_key, result_kind, agent_thread_id, reviewer_role, submissions,
-       accepted, output_revision, output_sha256, reviewer_pass, has_high_or_critical
+       accepted, review_cycles, output_revision, output_sha256, reviewer_pass,
+       has_high_or_critical
 FROM extended_workflow_validations
 WHERE root_thread_id = ? AND turn_id = ?
 ORDER BY validation_key
@@ -879,6 +912,7 @@ ORDER BY validation_key
                     agent_role: row.try_get("reviewer_role")?,
                     submissions: u8::try_from(row.try_get::<i64, _>("submissions")?)?,
                     accepted: row.try_get::<i64, _>("accepted")? != 0,
+                    review_cycles: u8::try_from(row.try_get::<i64, _>("review_cycles")?)?,
                     output_revision: u32::try_from(row.try_get::<i64, _>("output_revision")?)?,
                     output_sha256: row.try_get("output_sha256")?,
                     reviewer_pass: row.try_get::<i64, _>("reviewer_pass")? != 0,

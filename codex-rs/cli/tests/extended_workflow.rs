@@ -37,7 +37,13 @@ fn help_resume_and_completion_use_the_primary_name() -> Result<()> {
         .success()
         .stdout(predicate::str::contains(
             "codex-extended-workflow [OPTIONS]",
-        ));
+        ))
+        .stdout(predicate::str::contains("--expert-min <COUNT>"))
+        .stdout(predicate::str::contains("--expert-max <COUNT>"))
+        .stdout(predicate::str::contains("--reviewer-min <COUNT>"))
+        .stdout(predicate::str::contains("--reviewer-max <COUNT>"))
+        .stdout(predicate::str::contains("--disable-experts"))
+        .stdout(predicate::str::contains("--disable-reviewers"));
     command("codex-extended-workflow")?
         .args(["exec", "--help"])
         .assert()
@@ -57,6 +63,63 @@ fn help_resume_and_completion_use_the_primary_name() -> Result<()> {
         .assert()
         .success()
         .stdout(predicate::str::contains("codex-extended-workflow"));
+    Ok(())
+}
+
+#[test]
+fn workflow_count_arguments_reject_values_above_six() -> Result<()> {
+    for argument in [
+        "--expert-min",
+        "--expert-max",
+        "--reviewer-min",
+        "--reviewer-max",
+    ] {
+        command("codex-extended-workflow")?
+            .args([argument, "7", "completion", "powershell"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "agent count must be between 0 and 6",
+            ));
+    }
+    Ok(())
+}
+
+#[test]
+fn workflow_count_arguments_reject_reversed_explicit_ranges() -> Result<()> {
+    for (min_argument, max_argument) in [
+        ("--expert-min", "--expert-max"),
+        ("--reviewer-min", "--reviewer-max"),
+    ] {
+        command("codex-extended-workflow")?
+            .args([
+                min_argument,
+                "4",
+                max_argument,
+                "2",
+                "completion",
+                "powershell",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(format!(
+                "{min_argument} (4) must not exceed {max_argument} (2)"
+            )));
+    }
+    Ok(())
+}
+
+#[test]
+fn expert_and_reviewer_processes_can_both_be_disabled_from_the_cli() -> Result<()> {
+    command("codex-extended-workflow")?
+        .args([
+            "--disable-experts",
+            "--disable-reviewers",
+            "completion",
+            "powershell",
+        ])
+        .assert()
+        .success();
     Ok(())
 }
 

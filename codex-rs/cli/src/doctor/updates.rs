@@ -22,7 +22,6 @@ use super::npm_global_root_check;
 use super::run_command;
 
 const VERSION_FILE_NAME: &str = "version.json";
-const OFFICIAL_UPDATE_CHANNEL_ENABLED: bool = false;
 const GITHUB_LATEST_RELEASE_URL: &str = "https://api.github.com/repos/openai/codex/releases/latest";
 const HOMEBREW_CASK_API_URL: &str = "https://formulae.brew.sh/api/cask/codex.json";
 
@@ -31,8 +30,8 @@ const HOMEBREW_CASK_API_URL: &str = "https://formulae.brew.sh/api/cask/codex.jso
 /// Network failures while fetching latest-version metadata degrade the row to a
 /// warning instead of failing doctor outright; update freshness is useful
 /// support context but should not mask more direct install/config failures.
-pub(super) fn updates_check(config: &Config) -> DoctorCheck {
-    if !OFFICIAL_UPDATE_CHANNEL_ENABLED {
+pub(super) fn updates_check(config: &Config, official_update_channel_enabled: bool) -> DoctorCheck {
+    if !official_update_channel_enabled {
         return DoctorCheck::new(
             "updates.status",
             "updates",
@@ -146,9 +145,9 @@ fn push_cached_version_details(details: &mut Vec<String>, version_file: &Path) {
 
 fn update_action_label(context: &InstallContext) -> &'static str {
     match &context.method {
-        InstallMethod::Npm => "npm install -g codex-extended-workflow",
-        InstallMethod::Bun => "bun install -g codex-extended-workflow",
-        InstallMethod::Pnpm => "pnpm add -g codex-extended-workflow",
+        InstallMethod::Npm => "npm install -g @openai/codex",
+        InstallMethod::Bun => "bun install -g @openai/codex",
+        InstallMethod::Pnpm => "pnpm add -g @openai/codex",
         InstallMethod::Brew => "brew upgrade --cask codex",
         InstallMethod::Standalone { .. } => "standalone installer",
         InstallMethod::Other => "manual or unknown",
@@ -238,14 +237,14 @@ mod tests {
                 method: InstallMethod::Npm,
                 package_layout: None,
             }),
-            "npm install -g codex-extended-workflow"
+            "npm install -g @openai/codex"
         );
         assert_eq!(
             update_action_label(&InstallContext {
                 method: InstallMethod::Pnpm,
                 package_layout: None,
             }),
-            "pnpm add -g codex-extended-workflow"
+            "pnpm add -g @openai/codex"
         );
         assert_eq!(
             update_action_label(&InstallContext {

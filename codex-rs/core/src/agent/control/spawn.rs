@@ -22,6 +22,27 @@ enum SpawnInitialInput {
     InterAgentCommunication(InterAgentCommunication, AgentCommunicationContext),
 }
 
+fn apply_persisted_workflow_context_budget(
+    config: &mut Config,
+    session_source: &SessionSource,
+) -> CodexResult<()> {
+    let Some(context_budget) = session_source.get_extended_workflow_context_budget() else {
+        return Ok(());
+    };
+    let context_budget = i64::try_from(context_budget).map_err(|_| {
+        CodexErr::InvalidRequest(format!(
+            "persisted workflow context_budget must be at most {} tokens",
+            i64::MAX
+        ))
+    })?;
+    config.model_context_window = Some(
+        config
+            .model_context_window
+            .map_or(context_budget, |configured| configured.min(context_budget)),
+    );
+    Ok(())
+}
+
 fn default_agent_nickname_list() -> Vec<&'static str> {
     AGENT_NAMES
         .lines()
@@ -335,6 +356,7 @@ impl AgentControl {
                 .apply_read_only_subagent_ceiling()
                 .map_err(CodexErr::InvalidRequest)?;
         }
+        apply_persisted_workflow_context_budget(&mut config, &session_source)?;
         if let Some(model) = stored_model {
             config.model = Some(model);
         }
@@ -1116,6 +1138,7 @@ impl AgentControl {
                     CodexErr::InvalidRequest(format!("permission_profile is invalid: {err}"))
                 })?;
         }
+        apply_persisted_workflow_context_budget(&mut config, &session_source)?;
         if let Some(model) = stored_model {
             config.model = Some(model);
         }

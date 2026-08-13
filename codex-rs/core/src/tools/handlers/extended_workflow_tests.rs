@@ -9,19 +9,9 @@ fn result_kind_names_are_stable() {
 }
 
 #[test]
-fn critical_findings_use_error_events_and_other_severities_use_warnings() {
+fn reviewer_findings_use_warning_events_for_yellow_rendering() {
     assert!(matches!(
-        reviewer_finding_event(FindingSeverity::Critical, "critical".to_string()),
-        EventMsg::Error(_)
+        reviewer_finding_event("[Critical] finding".to_string()),
+        EventMsg::Warning(_)
     ));
-    for severity in [
-        FindingSeverity::Low,
-        FindingSeverity::Medium,
-        FindingSeverity::High,
-    ] {
-        assert!(matches!(
-            reviewer_finding_event(severity, "warning".to_string()),
-            EventMsg::Warning(_)
-        ));
-    }
 }

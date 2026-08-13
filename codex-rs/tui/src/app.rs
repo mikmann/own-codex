@@ -795,6 +795,8 @@ impl App {
     ) -> Result<AppExitInfo> {
         use tokio_stream::StreamExt;
         let startup_started_at = Instant::now();
+        #[cfg(not(debug_assertions))]
+        let official_update_channel_enabled = !loader_overrides.extended_workflow_default_enabled;
         let (app_event_tx, mut app_event_rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(app_event_tx);
         emit_project_config_warnings(&app_event_tx, &config);
@@ -1032,7 +1034,8 @@ See the Codex keymap documentation for supported actions and examples."
             )
         })?;
         #[cfg(not(debug_assertions))]
-        let upgrade_version = crate::updates::get_upgrade_version(&config);
+        let upgrade_version =
+            crate::updates::get_upgrade_version(&config, official_update_channel_enabled);
 
         let mut app = Self {
             model_catalog,
@@ -1177,7 +1180,7 @@ See the Codex keymap documentation for supported actions and examples."
                 &mut app_server,
                 AppEvent::InsertHistoryCell(Box::new(UpdateAvailableHistoryCell::new(
                     latest_version,
-                    crate::update_action::get_update_action(),
+                    crate::update_action::get_update_action(official_update_channel_enabled),
                 ))),
             ))
             .await?;

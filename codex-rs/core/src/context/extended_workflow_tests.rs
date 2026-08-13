@@ -10,17 +10,58 @@ fn policy_states_that_audit_mode_writes_no_files() {
 }
 
 #[test]
+fn policy_keeps_experts_advisory_and_the_main_agent_accountable() {
+    let policy = ExtendedWorkflowPolicy::try_new(&ExtendedWorkflowConfig::default())
+        .expect("default policy should fit");
+    assert!(
+        policy
+            .body()
+            .contains("help the main agent create concepts, make decisions, or create tickets")
+    );
+    assert!(
+        policy
+            .body()
+            .contains("Experts never make the final decision")
+    );
+    assert!(policy.body().contains(
+        "the main agent evaluates and integrates their contributions and remains accountable"
+    ));
+}
+
+#[test]
+fn policy_defines_reviewers_as_an_independent_quality_gate() {
+    let policy = ExtendedWorkflowPolicy::try_new(&ExtendedWorkflowConfig::default())
+        .expect("default policy should fit");
+    assert!(
+        policy
+            .body()
+            .contains("independent post-implementation quality gate")
+    );
+    assert!(policy.body().contains(
+        "purpose, necessity, alignment with the root request and accepted ticket, and functional and technical correctness"
+    ));
+    assert!(
+        policy
+            .body()
+            .contains("Reviewers inspect and report read-only; they never modify the workspace")
+    );
+}
+
+#[test]
 fn policy_closes_only_agents_with_terminal_validation_outcomes() {
     let policy = ExtendedWorkflowPolicy::try_new(&ExtendedWorkflowConfig::default())
         .expect("default policy should fit");
     assert!(policy.body().contains(
-        "After a result is accepted or terminally rejected, call close_agent for that agent"
+        "After an expert result is accepted or terminally rejected, call close_agent for that agent"
     ));
     assert!(
         policy
             .body()
             .contains("Never close an agent while a correction is still allowed")
     );
+    assert!(policy.body().contains(
+        "Close a reviewer only after it passes or its validation/review cycles are terminally exhausted"
+    ));
 }
 
 #[test]

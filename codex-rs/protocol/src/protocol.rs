@@ -2877,6 +2877,8 @@ struct ExtendedThreadSpawnRole {
     assignment_sha256: Option<String>,
     #[serde(default)]
     workflow_root_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_budget: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2899,6 +2901,7 @@ pub struct ExtendedThreadSpawnRoleMetadata<'a> {
     pub workflow_turn_id: Option<&'a str>,
     pub assignment_sha256: Option<&'a str>,
     pub workflow_root_sha256: Option<&'a str>,
+    pub context_budget: Option<u64>,
 }
 
 #[doc(hidden)]
@@ -2917,6 +2920,7 @@ pub fn encode_extended_thread_spawn_role(
         workflow_turn_id: None,
         assignment_sha256: None,
         workflow_root_sha256: None,
+        context_budget: None,
     })
 }
 
@@ -2931,6 +2935,7 @@ pub fn encode_extended_thread_spawn_role_metadata(
         && metadata.workflow_turn_id.is_none()
         && metadata.assignment_sha256.is_none()
         && metadata.workflow_root_sha256.is_none()
+        && metadata.context_budget.is_none()
     {
         return metadata.config_role.map(str::to_string);
     }
@@ -2943,6 +2948,7 @@ pub fn encode_extended_thread_spawn_role_metadata(
         workflow_turn_id: metadata.workflow_turn_id.map(str::to_string),
         assignment_sha256: metadata.assignment_sha256.map(str::to_string),
         workflow_root_sha256: metadata.workflow_root_sha256.map(str::to_string),
+        context_budget: metadata.context_budget,
     };
     serde_json::to_string(&encoded)
         .ok()
@@ -3073,6 +3079,17 @@ impl SessionSource {
             assignment_sha256: metadata.assignment_sha256,
             workflow_root_sha256: metadata.workflow_root_sha256,
         })
+    }
+
+    pub fn get_extended_workflow_context_budget(&self) -> Option<u64> {
+        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            agent_role: Some(agent_role),
+            ..
+        }) = self
+        else {
+            return None;
+        };
+        decode_extended_thread_spawn_role(agent_role)?.context_budget
     }
 
     pub fn get_agent_path(&self) -> Option<AgentPath> {
@@ -6529,12 +6546,17 @@ mod tests {
 
     #[test]
     fn extended_thread_spawn_role_round_trips_without_changing_protocol_shape() {
-        let encoded = encode_extended_thread_spawn_role(
-            Some("configured_role"),
-            /*read_only*/ true,
-            Some("Expert"),
-            Some("Architecture"),
-        )
+        let encoded = encode_extended_thread_spawn_role_metadata(ExtendedThreadSpawnRoleMetadata {
+            config_role: Some("configured_role"),
+            read_only: true,
+            workflow_type: Some("Expert"),
+            workflow_role: Some("Architecture"),
+            workflow_name: Some("architecture"),
+            workflow_turn_id: Some("turn-1"),
+            assignment_sha256: Some("assignment"),
+            workflow_root_sha256: Some("root"),
+            context_budget: Some(64_000),
+        })
         .expect("encoded metadata");
         let source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id: ThreadId::new(),
@@ -6550,6 +6572,7 @@ mod tests {
             Some("Expert | Architecture")
         );
         assert!(source.is_read_only_subagent());
+        assert_eq!(source.get_extended_workflow_context_budget(), Some(64_000));
         assert_eq!(
             serde_json::from_value::<SessionSource>(
                 serde_json::to_value(&source).expect("serialize source")

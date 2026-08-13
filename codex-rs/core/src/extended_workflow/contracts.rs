@@ -173,9 +173,10 @@ pub fn validate_expert_result(result: &ExpertResult, expected_subject: &str) -> 
     let mut errors = Vec::new();
     validate_subject(&mut errors, &result.subject, expected_subject);
     require_text(&mut errors, "summary", &result.summary);
-    require_non_empty(&mut errors, "findings", &result.findings);
-    require_non_empty(&mut errors, "recommendations", &result.recommendations);
+    require_text_items(&mut errors, "findings", &result.findings);
+    require_text_items(&mut errors, "recommendations", &result.recommendations);
     require_evidence(&mut errors, &result.evidence);
+    require_text_items(&mut errors, "uncertainties", &result.uncertainties);
     reject_contradictions(&mut errors, &result.summary, &result.findings);
     ContractValidation {
         valid: errors.is_empty(),
@@ -215,6 +216,11 @@ pub fn validate_reviewer_result(
             &format!("findings[{index}].recommended_fix"),
             &finding.recommended_fix,
         );
+        validate_optional_text_items(
+            &mut errors,
+            &format!("findings[{index}].missing_tests"),
+            &finding.missing_tests,
+        );
         let expected =
             severity_for_dimensions(finding.impact, finding.likelihood, finding.recoverability);
         if finding.severity != expected {
@@ -223,9 +229,8 @@ pub fn validate_reviewer_result(
             ));
         }
     }
-    if !result.findings.is_empty() {
-        require_evidence(&mut errors, &result.evidence);
-    }
+    require_evidence(&mut errors, &result.evidence);
+    validate_optional_text_items(&mut errors, "missing_tests", &result.missing_tests);
     reject_contradictions(
         &mut errors,
         &result.summary,
@@ -257,8 +262,8 @@ pub fn validate_ticket(ticket: &WorkflowTicket, expected_subject: &str) -> Contr
     require_text(&mut errors, "title", &ticket.title);
     require_text(&mut errors, "goal", &ticket.goal);
     require_text(&mut errors, "context", &ticket.context);
-    require_non_empty(&mut errors, "requirements", &ticket.requirements);
-    require_non_empty(
+    require_text_items(&mut errors, "requirements", &ticket.requirements);
+    require_text_items(
         &mut errors,
         "acceptance_criteria",
         &ticket.acceptance_criteria,
@@ -268,13 +273,13 @@ pub fn validate_ticket(ticket: &WorkflowTicket, expected_subject: &str) -> Contr
         &format!("{} {}", ticket.title, ticket.goal),
         expected_subject,
     );
-    require_non_empty(
+    require_text_items(
         &mut errors,
         "test_and_validation",
         &ticket.test_and_validation,
     );
-    require_non_empty(&mut errors, "dependencies", &ticket.dependencies);
-    require_non_empty(
+    require_text_items(&mut errors, "dependencies", &ticket.dependencies);
+    require_text_items(
         &mut errors,
         "risks_or_open_questions",
         &ticket.risks_or_open_questions,
@@ -291,9 +296,9 @@ pub fn validate_concept(concept: &WorkflowConcept, expected_subject: &str) -> Co
     require_text(&mut errors, "title", &concept.title);
     require_text(&mut errors, "objective", &concept.objective);
     require_text(&mut errors, "context", &concept.context);
-    require_non_empty(&mut errors, "decisions", &concept.decisions);
-    require_non_empty(&mut errors, "alternatives", &concept.alternatives);
-    require_non_empty(
+    require_text_items(&mut errors, "decisions", &concept.decisions);
+    require_text_items(&mut errors, "alternatives", &concept.alternatives);
+    require_text_items(
         &mut errors,
         "risks_or_open_questions",
         &concept.risks_or_open_questions,
@@ -359,9 +364,16 @@ fn require_text(errors: &mut Vec<String>, field: &str, value: &str) {
     }
 }
 
-fn require_non_empty<T>(errors: &mut Vec<String>, field: &str, values: &[T]) {
+fn require_text_items(errors: &mut Vec<String>, field: &str, values: &[String]) {
     if values.is_empty() {
         errors.push(format!("{field} must contain at least one item"));
+    }
+    validate_optional_text_items(errors, field, values);
+}
+
+fn validate_optional_text_items(errors: &mut Vec<String>, field: &str, values: &[String]) {
+    for (index, value) in values.iter().enumerate() {
+        require_text(errors, &format!("{field}[{index}]"), value);
     }
 }
 

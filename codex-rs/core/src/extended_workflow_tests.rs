@@ -24,6 +24,18 @@ fn assignment_subject_excludes_only_the_appended_result_contract() {
 }
 
 #[test]
+fn assignment_subject_extracts_the_bound_root_request() {
+    let assignment = format!(
+        "Root request SHA-256: digest\nRoot request:\nImplement the lifecycle gate.\n\nAssigned expert role: Architecture\nAnalyze this exact request.{WORKFLOW_RESULT_CONTRACT_MARKER}Result contract: {{...}}",
+    );
+
+    assert_eq!(
+        workflow_assignment_subject(&assignment),
+        "Implement the lifecycle gate.",
+    );
+}
+
+#[test]
 fn complex_security_answer_can_use_experts() {
     let plan = plan_turn(
         "Erkläre die Security- und Architekturfolgen einer unbekannten Permission.",
@@ -67,9 +79,16 @@ fn english_and_german_change_imperatives_are_work_orders_without_substring_false
         "Remove the flag.",
         "Delete the cache.",
         "Fix the resume path.",
+        "Implement the handler.",
+        "Modify the validation gate.",
+        "Edit the configuration.",
+        "Please continue.",
+        "Go ahead.",
         "Implementiere den Handler.",
         "Ändere die Konfiguration.",
         "Lösche den veralteten Befehl.",
+        "Bitte mach weiter.",
+        "Setze die Umsetzung fort.",
     ] {
         assert_eq!(
             classify_request(input).class,
@@ -103,6 +122,26 @@ fn zero_zero_starts_no_agents() {
     let plan = plan_turn("Implementiere eine Änderung.", TEST_TURN_ID, &config);
     assert!(plan.experts.enabled);
     assert!(plan.experts.selected.is_empty());
+}
+
+#[test]
+fn expert_and_reviewer_processes_can_be_disabled_independently_or_together() {
+    for (experts_enabled, reviewers_enabled) in [(false, true), (true, false), (false, false)] {
+        let mut config = ExtendedWorkflowConfig::default();
+        config.experts.enabled = experts_enabled;
+        config.reviewers.enabled = reviewers_enabled;
+
+        let plan = plan_turn("Implementiere eine Änderung.", TEST_TURN_ID, &config);
+
+        assert_eq!(
+            (
+                plan.experts.enabled,
+                plan.experts.selected.is_empty(),
+                plan.reviewer_policy_enabled,
+            ),
+            (experts_enabled, !experts_enabled, reviewers_enabled)
+        );
+    }
 }
 
 #[test]
@@ -243,6 +282,62 @@ fn incomplete_expert_result_is_rejected() {
     );
     assert!(!validation.valid);
     assert!(validation.errors.len() >= 4);
+}
+
+#[test]
+fn expert_result_rejects_blank_items_and_missing_uncertainty_statement() {
+    let validation = validate_expert_result(
+        &ExpertResult {
+            subject: "lifecycle gate".to_string(),
+            summary: "Reviewed the lifecycle gate.".to_string(),
+            findings: vec![String::new()],
+            recommendations: vec!["Keep the gate.".to_string()],
+            evidence: vec![WorkflowEvidence {
+                file: "src/lib.rs".to_string(),
+                symbol: "gate".to_string(),
+                explanation: "The gate owns completion.".to_string(),
+            }],
+            uncertainties: Vec::new(),
+        },
+        "Implement the lifecycle gate.",
+    );
+
+    assert!(!validation.valid);
+    assert!(
+        validation
+            .errors
+            .iter()
+            .any(|error| error.contains("findings[0]")),
+    );
+    assert!(
+        validation
+            .errors
+            .iter()
+            .any(|error| error.contains("uncertainties")),
+    );
+}
+
+#[test]
+fn passing_reviewer_requires_concrete_evidence() {
+    let validation = validate_reviewer_result(
+        &ReviewerResult {
+            subject: "lifecycle gate".to_string(),
+            verdict: ReviewVerdict::Pass,
+            summary: "The lifecycle gate matches the request.".to_string(),
+            findings: Vec::new(),
+            evidence: Vec::new(),
+            missing_tests: Vec::new(),
+        },
+        "Implement the lifecycle gate.",
+    );
+
+    assert!(!validation.valid);
+    assert!(
+        validation
+            .errors
+            .iter()
+            .any(|error| error.contains("evidence")),
+    );
 }
 
 #[test]
@@ -419,6 +514,33 @@ fn workflow_spawn_task_is_root_bound_and_context_budgeted() {
         "Root request SHA-256: {}",
         plan.root_request_sha256
     )));
+    assert!(directive.canonical_task.contains(
+        "Support the main agent in creating concepts, making decisions, or creating tickets"
+    ));
+    assert!(
+        directive
+            .canonical_task
+            .contains("do not present your contribution as the final decision, concept, or ticket")
+    );
+
+    let change_summary = "Updated the CLI parser and added resume coverage.";
+    let reviewer_plan = plan_reviewers(change_summary, TEST_TURN_ID, &config);
+    runtime
+        .install_reviewers(&reviewer_plan, change_summary)
+        .expect("reviewer round should install");
+    let reviewer = reviewer_plan.selected.first().expect("selected reviewer");
+    let reviewer_directive = runtime
+        .spawn_directive_for_task(&reviewer.task_name)
+        .expect("server-bound reviewer task");
+    assert!(reviewer_directive.canonical_task.contains(
+        "Verify their purpose, necessity, alignment with the root request and accepted ticket, and functional and technical correctness"
+    ));
+    assert!(reviewer_directive.canonical_task.contains("work read-only"));
+    assert!(
+        reviewer_directive
+            .canonical_task
+            .contains("do not modify the workspace")
+    );
 
     for profile in &mut config.experts.profiles {
         profile.context_budget = Some(1);
@@ -487,6 +609,7 @@ fn work_order_reviewer_gate_requires_distinct_passing_agents_and_roles() {
             agent_role: Some(format!("Unselected role {index}")),
             submissions: 1,
             accepted: true,
+            review_cycles: 1,
             output_revision: 1,
             output_sha256: format!("unselected-{index}"),
             reviewer_pass: true,
@@ -509,6 +632,7 @@ fn work_order_reviewer_gate_requires_distinct_passing_agents_and_roles() {
                 agent_role: Some(reviewer.role.clone()),
                 submissions: 1,
                 accepted: true,
+                review_cycles: 1,
                 output_revision: 1,
                 output_sha256: format!("reviewer-{index}"),
                 reviewer_pass: index + 1 < required,
