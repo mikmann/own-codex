@@ -145,6 +145,7 @@ impl ToolExecutor<ToolInvocation> for PlanWorkflowReviewersHandler {
             .map_err(FunctionCallError::RespondToModel)?;
             let plan = plan_reviewers(
                 &args.change_summary,
+                &invocation.turn.sub_id,
                 &invocation.turn.config.extended_workflow,
             );
             let runtime = invocation

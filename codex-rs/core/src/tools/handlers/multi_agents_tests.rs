@@ -353,52 +353,6 @@ async fn spawn_agent_fork_context_rejects_agent_type_override() {
     );
 }
 
-#[tokio::test]
-async fn multi_agent_v2_spawn_fork_turns_all_rejects_agent_type_override() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let role_name = install_role_with_model_override(&mut turn).await;
-    let manager = thread_manager();
-    let root = manager
-        .start_thread(StartThreadOptions::new((*turn.config).clone()))
-        .await
-        .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
-    session.thread_id = root.thread_id;
-    let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::MultiAgentV2)
-        .expect("test config should allow feature update");
-    let turn = TurnContext {
-        config: Arc::new(config),
-        multi_agent_version: codex_protocol::protocol::MultiAgentVersion::V2,
-        ..turn
-    };
-
-    let err = SpawnAgentHandlerV2::default()
-        .handle(invocation(
-            Arc::new(session),
-            Arc::new(turn),
-            "spawn_agent",
-            function_payload(json!({
-                "message": "inspect this repo",
-                "task_name": "fork_context_v2",
-                "agent_type": role_name,
-                "fork_turns": "all"
-            })),
-        ))
-        .await
-        .err()
-        .expect("fork_turns=all should reject agent_type overrides");
-
-    assert_eq!(
-        err,
-        FunctionCallError::RespondToModel(
-            "Full-history forked agents inherit the parent agent type; omit agent_type, or spawn without a full-history fork.".to_string(),
-        )
-    );
-}
-
 #[test]
 fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
     const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
@@ -424,6 +378,7 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
+    config.extended_workflow.enabled = true;
     config.multi_agent_v2.hide_spawn_agent_metadata = false;
     let profile = config
         .extended_workflow
@@ -435,6 +390,22 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
     profile.agent_type = Some(role_name.clone());
     profile.model = Some("gpt-5.4".to_string());
     profile.reasoning_effort = Some(ReasoningEffort::High);
+    let workflow_plan = crate::extended_workflow::plan_turn(
+        "Implement the architecture and security validation.",
+        &turn.sub_id,
+        &config.extended_workflow,
+    );
+    let workflow_task_name = workflow_plan
+        .experts
+        .selected
+        .iter()
+        .find(|profile| profile.name == "architecture")
+        .expect("architecture should be selected")
+        .task_name
+        .clone();
+    turn.extension_data.insert(
+        crate::extended_workflow::WorkflowTurnRuntimeState::new(&workflow_plan),
+    );
 
     let manager = thread_manager();
     let root = manager
@@ -458,15 +429,8 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
             "spawn_agent",
             function_payload(json!({
                 "message": "Inspect the architecture and return the ExpertResult contract.",
-                "task_name": "architecture_review",
-                "agent_type": role_name,
-                "fork_turns": "none",
-                "read_only": true,
-                "workflow_name": "architecture",
-                "workflow_type": "expert",
-                "workflow_role": "Architecture",
-                "model": "gpt-5.4",
-                "reasoning_effort": "high"
+                "task_name": workflow_task_name,
+                "fork_turns": "none"
             })),
         ))
         .await
@@ -696,34 +660,32 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_workflow_spawn_rejects_unverified_identity_or_write_access() {
-    let (session, turn) = make_session_and_context().await;
+async fn multi_agent_v2_workflow_spawn_rejects_stale_identity_fork_and_model_override() {
+    let (session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config.extended_workflow.enabled = true;
+    let workflow_plan = crate::extended_workflow::plan_turn(
+        "Implement CLI security and architecture validation.",
+        &turn.sub_id,
+        &config.extended_workflow,
+    );
+    let selected = workflow_plan
+        .experts
+        .selected
+        .first()
+        .expect("workflow should select an expert");
+    let workflow_task_name = selected.task_name.clone();
+    let conflicting_model = selected
+        .model
+        .as_deref()
+        .map_or_else(|| "gpt-5.4".to_string(), |_| "different-model".to_string());
+    turn.extension_data
+        .insert(crate::extended_workflow::WorkflowTurnRuntimeState::new(
+            &workflow_plan,
+        ));
+    set_turn_config(&mut turn, config);
     let session = Arc::new(session);
     let turn = Arc::new(turn);
-
-    let writable_error = SpawnAgentHandlerV2::default()
-        .handle(invocation(
-            Arc::clone(&session),
-            Arc::clone(&turn),
-            "spawn_agent",
-            function_payload(json!({
-                "message": "inspect",
-                "task_name": "writable_expert",
-                "fork_turns": "none",
-                "workflow_name": "architecture",
-                "workflow_type": "expert",
-                "workflow_role": "Architecture"
-            })),
-        ))
-        .await
-        .err()
-        .expect("workflow agents must be read-only");
-    assert_eq!(
-        writable_error,
-        FunctionCallError::RespondToModel(
-            "workflow experts and reviewers must be spawned with read_only=true".to_string()
-        )
-    );
 
     let inherited_context_error = SpawnAgentHandlerV2::default()
         .handle(invocation(
@@ -732,12 +694,8 @@ async fn multi_agent_v2_workflow_spawn_rejects_unverified_identity_or_write_acce
             "spawn_agent",
             function_payload(json!({
                 "message": "inspect",
-                "task_name": "unbounded_context_expert",
-                "fork_turns": "all",
-                "read_only": true,
-                "workflow_name": "architecture",
-                "workflow_type": "expert",
-                "workflow_role": "Architecture"
+                "task_name": workflow_task_name,
+                "fork_turns": "all"
             })),
         ))
         .await
@@ -751,6 +709,25 @@ async fn multi_agent_v2_workflow_spawn_rejects_unverified_identity_or_write_acce
         )
     );
 
+    let model_error = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect",
+                "task_name": workflow_task_name,
+                "fork_turns": "none",
+                "model": conflicting_model
+            })),
+        ))
+        .await
+        .err()
+        .expect("workflow model is fixed by the selected profile");
+    assert!(
+        matches!(model_error, FunctionCallError::RespondToModel(message) if message.contains("fixes model"))
+    );
+
     let identity_error = SpawnAgentHandlerV2::default()
         .handle(invocation(
             session,
@@ -759,11 +736,7 @@ async fn multi_agent_v2_workflow_spawn_rejects_unverified_identity_or_write_acce
             function_payload(json!({
                 "message": "inspect",
                 "task_name": "unknown_expert",
-                "fork_turns": "none",
-                "read_only": true,
-                "workflow_name": "not_configured",
-                "workflow_type": "expert",
-                "workflow_role": "Architecture"
+                "fork_turns": "none"
             })),
         ))
         .await
@@ -772,7 +745,7 @@ async fn multi_agent_v2_workflow_spawn_rejects_unverified_identity_or_write_acce
     assert_eq!(
         identity_error,
         FunctionCallError::RespondToModel(
-            "unknown configured expert profile `not_configured` with role `Architecture`"
+            "no selected workflow profile is assigned to task `unknown_expert` for this turn"
                 .to_string()
         )
     );
@@ -1204,7 +1177,7 @@ async fn spawn_agent_full_history_fork_accepts_explicit_service_tier() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
+async fn multi_agent_v2_full_history_fork_inherits_supported_service_tier() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         task_name: String,
@@ -1219,6 +1192,7 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
+    config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
     set_turn_config(&mut turn, config);
     let manager = thread_manager();
     let root = manager
@@ -1237,12 +1211,11 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
             "spawn_agent",
             function_payload(json!({
                 "message": "inspect this repo",
-                "task_name": "fork_with_tier",
-                "service_tier": ServiceTier::Fast.request_value()
+                "task_name": "fork_with_tier"
             })),
         ))
         .await
-        .expect("multi-agent v2 full-history fork should accept explicit service tier");
+        .expect("multi-agent v2 full-history fork should inherit the service tier");
     let (content, _) = expect_text_output(output);
     let result: SpawnAgentResult =
         serde_json::from_str(&content).expect("spawn_agent result should be json");
@@ -1270,9 +1243,8 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let role_name = install_role_with_model_override(&mut turn).await;
+async fn multi_agent_v2_spawn_partial_fork_turns_allows_model_override() {
+    let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     let root = manager
         .start_thread(StartThreadOptions::new((*turn.config).clone()))
@@ -1299,12 +1271,13 @@ async fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
             function_payload(json!({
                 "message": "inspect this repo",
                 "task_name": "partial_fork",
-                "agent_type": role_name,
+                "model": "gpt-5.4",
+                "reasoning_effort": "high",
                 "fork_turns": "1"
             })),
         ))
         .await
-        .expect("partial fork should allow agent_type overrides");
+        .expect("partial fork should allow model overrides");
     let (content, _) = expect_text_output(output);
     let result: serde_json::Value =
         serde_json::from_str(&content).expect("spawn_agent result should be json");
@@ -1322,9 +1295,8 @@ async fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
         .config_snapshot()
         .await;
 
-    assert_eq!(snapshot.model, "gpt-5-role-override");
-    assert_eq!(snapshot.model_provider_id, "ollama");
-    assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::Minimal));
+    assert_eq!(snapshot.model, "gpt-5.4");
+    assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::High));
 }
 
 #[tokio::test]
@@ -1541,46 +1513,6 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
                         && !communication.trigger_turn
             )
     }));
-}
-
-#[tokio::test]
-async fn multi_agent_v2_spawn_rejects_legacy_fork_context() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    let root = manager
-        .start_thread(StartThreadOptions::new((*turn.config).clone()))
-        .await
-        .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
-    session.thread_id = root.thread_id;
-    let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::MultiAgentV2)
-        .expect("test config should allow feature update");
-    set_turn_config(&mut turn, config);
-
-    let err = SpawnAgentHandlerV2::default()
-        .handle(invocation(
-            Arc::new(session),
-            Arc::new(turn),
-            "spawn_agent",
-            function_payload(json!({
-                "message": "inspect this repo",
-                "task_name": "worker",
-                "fork_context": true
-            })),
-        ))
-        .await
-        .err()
-        .expect("legacy fork_context should be rejected");
-
-    assert_eq!(
-        err,
-        FunctionCallError::RespondToModel(
-            "fork_context is not supported in MultiAgentV2; use fork_turns instead".to_string()
-        )
-    );
 }
 
 #[tokio::test]

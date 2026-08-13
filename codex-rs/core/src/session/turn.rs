@@ -896,6 +896,7 @@ async fn build_skills_and_plugins(
             .join("\n");
         let plan = crate::extended_workflow::plan_turn(
             &request_text,
+            &turn_context.sub_id,
             &turn_context.config.extended_workflow,
         );
         turn_context.extension_data.insert(

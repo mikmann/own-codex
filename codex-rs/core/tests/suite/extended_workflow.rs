@@ -17,6 +17,10 @@ use serde_json::json;
 use std::time::Duration;
 
 fn request_body_contains(request: &wiremock::Request, text: &str) -> bool {
+    request_body_json(request).is_some_and(|body| body.to_string().contains(text))
+}
+
+fn request_body_json(request: &wiremock::Request) -> Option<Value> {
     let compressed = request
         .headers
         .get("content-encoding")
@@ -31,8 +35,67 @@ fn request_body_contains(request: &wiremock::Request, text: &str) -> bool {
     } else {
         Some(request.body.clone())
     };
-    body.and_then(|body| String::from_utf8(body).ok())
-        .is_some_and(|body| body.contains(text))
+    body.and_then(|body| serde_json::from_slice(&body).ok())
+}
+
+fn selected_workflow_task_name(value: &Value, process: &str) -> Option<String> {
+    match value {
+        Value::String(text) => {
+            let (_, remainder) = text.split_once("<extended_workflow_turn>")?;
+            let (plan, _) = remainder.split_once("</extended_workflow_turn>")?;
+            serde_json::from_str::<Value>(plan.trim())
+                .ok()?
+                .pointer(&format!("/{process}/selected/0/task_name"))?
+                .as_str()
+                .map(str::to_string)
+        }
+        Value::Array(values) => values
+            .iter()
+            .find_map(|value| selected_workflow_task_name(value, process)),
+        Value::Object(values) => values
+            .values()
+            .find_map(|value| selected_workflow_task_name(value, process)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => None,
+    }
+}
+
+#[derive(Debug)]
+struct WorkflowExpertSpawnResponder {
+    child_task: &'static str,
+    call_id: &'static str,
+}
+
+impl wiremock::Respond for WorkflowExpertSpawnResponder {
+    fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+        let body = request_body_json(request).expect("responses request should contain JSON");
+        let task_name = selected_workflow_task_name(&body, "experts")
+            .expect("workflow turn context should select an expert task");
+        let arguments = json!({
+            "message": self.child_task,
+            "task_name": task_name,
+            "fork_turns": "none"
+        })
+        .to_string();
+        core_test_support::responses::sse_response(sse(vec![
+            ev_response_created("resp-root-spawn"),
+            ev_function_call_with_namespace(
+                self.call_id,
+                "collaboration",
+                "spawn_agent",
+                &arguments,
+            ),
+            ev_completed("resp-root-spawn"),
+        ]))
+    }
+}
+
+#[derive(Debug)]
+struct BodyContains(&'static str);
+
+impl wiremock::Match for BodyContains {
+    fn matches(&self, request: &wiremock::Request) -> bool {
+        request_body_contains(request, self.0)
+    }
 }
 
 fn tool_names(body: &Value) -> Vec<&str> {
@@ -97,16 +160,19 @@ async fn workflow_plan_and_validation_tools_are_model_visible() -> Result<()> {
         .and_then(|tool| tool.pointer("/parameters/properties"))
         .and_then(Value::as_object)
         .expect("spawn_agent should be directly or namespace-visible with properties");
-    for field in [
-        "model",
-        "reasoning_effort",
-        "read_only",
-        "workflow_name",
-        "workflow_type",
-        "workflow_role",
-    ] {
-        assert!(spawn_properties.contains_key(field), "missing {field}");
-    }
+    assert_eq!(
+        spawn_properties
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec![
+            "fork_turns",
+            "message",
+            "model",
+            "reasoning_effort",
+            "task_name",
+        ]
+    );
     assert!(!test.cwd_path().join(".codex").exists());
     Ok(())
 }
@@ -245,31 +311,15 @@ async fn workflow_expert_shell_write_fails_closed_without_creating_a_file() -> R
     const WRITE_CALL_ID: &str = "call-write-read-only";
 
     let server = start_mock_server().await;
-    let spawn_args = json!({
-        "message": CHILD_TASK,
-        "task_name": "architecture-inspection",
-        "fork_turns": "none",
-        "read_only": true,
-        "workflow_name": "architecture",
-        "workflow_type": "expert",
-        "workflow_role": "Architecture"
-    })
-    .to_string();
-    mount_sse_once_match(
-        &server,
-        |request: &wiremock::Request| request_body_contains(request, ROOT_PROMPT),
-        sse(vec![
-            ev_response_created("resp-root-spawn"),
-            ev_function_call_with_namespace(
-                SPAWN_CALL_ID,
-                "collaboration",
-                "spawn_agent",
-                &spawn_args,
-            ),
-            ev_completed("resp-root-spawn"),
-        ]),
-    )
-    .await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(BodyContains(ROOT_PROMPT))
+        .respond_with(WorkflowExpertSpawnResponder {
+            child_task: CHILD_TASK,
+            call_id: SPAWN_CALL_ID,
+        })
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
     let write_args = json!({
         "command": "echo forbidden > workflow-read-only-marker.txt",
         "timeout_ms": 1_000

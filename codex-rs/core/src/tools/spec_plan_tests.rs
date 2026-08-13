@@ -2144,19 +2144,17 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         });
     })
     .await;
-    v2.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
+    v2.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE, "close_agent"]);
     v2.assert_visible_lacks(&[
         "spawn_agent",
         "send_message",
         "followup_task",
         "wait_agent",
         "interrupt_agent",
-        "close_agent",
         "list_agents",
         "send_input",
         "resume_agent",
         "assign_task",
-        "close_agent",
     ]);
     for tool_name in [
         "spawn_agent",
@@ -2164,7 +2162,6 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         "followup_task",
         "wait_agent",
         "interrupt_agent",
-        "close_agent",
         "list_agents",
     ] {
         assert!(
@@ -2174,6 +2171,16 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
             "expected {tool_name} in {MULTI_AGENT_V2_NAMESPACE} namespace"
         );
     }
+    assert!(v2.registered_names.iter().any(|name| name == "close_agent"));
+    assert!(
+        !v2.registered_names
+            .iter()
+            .any(|name| name == "collaboration.close_agent")
+    );
+    let ToolSpec::Function(close_agent) = v2.visible_spec("close_agent") else {
+        panic!("expected close_agent to use the non-reserved function namespace");
+    };
+    assert_eq!(close_agent.name, "close_agent");
     let ToolSpec::Namespace(namespace) = v2.visible_spec(MULTI_AGENT_V2_NAMESPACE) else {
         panic!("expected {MULTI_AGENT_V2_NAMESPACE} namespace");
     };
@@ -2218,11 +2225,15 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         });
     })
     .await;
-    direct_model_only.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
+    direct_model_only.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE, "close_agent"]);
     direct_model_only.assert_visible_lacks(&["spawn_agent", "send_message", "wait_agent"]);
     assert_eq!(
         direct_model_only
             .exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
+        ToolExposure::DirectModelOnly
+    );
+    assert_eq!(
+        direct_model_only.exposure("close_agent"),
         ToolExposure::DirectModelOnly
     );
 }
@@ -2306,6 +2317,7 @@ async fn read_only_workflow_subagents_cannot_delegate_even_when_v2_is_active() {
             &ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, tool_name).to_string()
         ]);
     }
+    plan.assert_registered_lacks(&["close_agent"]);
     let allowed_read_only_tools = [
         "exec_command",
         "list_mcp_resource_templates",
@@ -2369,7 +2381,6 @@ async fn multi_agent_v2_can_disable_wait_agent() {
     assert_eq!(
         plan.namespace_function_names(MULTI_AGENT_V2_NAMESPACE),
         &[
-            "close_agent".to_string(),
             "followup_task".to_string(),
             "interrupt_agent".to_string(),
             "list_agents".to_string(),
@@ -2377,6 +2388,7 @@ async fn multi_agent_v2_can_disable_wait_agent() {
             "spawn_agent".to_string(),
         ]
     );
+    plan.assert_visible_contains(&["close_agent"]);
     plan.assert_visible_lacks(&["clock"]);
     plan.assert_registered_lacks(&["collaboration.wait_agent", "clock.sleep"]);
 }
@@ -2741,6 +2753,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
             "request_user_input",
             // Multi-agent v2 tools.
             MULTI_AGENT_V2_NAMESPACE,
+            "close_agent",
             // Hosted Responses tools.
             "web_search",
         ]

@@ -39,6 +39,13 @@ fn help_resume_and_completion_use_the_primary_name() -> Result<()> {
             "codex-extended-workflow [OPTIONS]",
         ));
     command("codex-extended-workflow")?
+        .args(["exec", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Usage: codex-extended-workflow exec",
+        ));
+    command("codex-extended-workflow")?
         .args(["resume", "--help"])
         .assert()
         .success()

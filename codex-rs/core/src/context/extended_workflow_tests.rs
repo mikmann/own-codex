@@ -25,7 +25,11 @@ fn policy_closes_only_agents_with_terminal_validation_outcomes() {
 
 #[test]
 fn turn_context_is_bounded_json() {
-    let plan = plan_turn("Was ist Rust?", &ExtendedWorkflowConfig::default());
+    let plan = plan_turn(
+        "Was ist Rust?",
+        "turn-context-test",
+        &ExtendedWorkflowConfig::default(),
+    );
     let context = ExtendedWorkflowTurnContext::try_new(&plan).expect("turn plan should fit");
     assert!(context.body().contains("simple_answer"));
     assert!(context.body().len() < 8_192);

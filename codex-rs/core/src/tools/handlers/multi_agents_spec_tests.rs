@@ -76,6 +76,16 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         .properties
         .as_ref()
         .expect("spawn_agent should use object params");
+    assert_eq!(
+        properties.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec![
+            "fork_turns",
+            "message",
+            "model",
+            "reasoning_effort",
+            "task_name",
+        ]
+    );
     assert!(description.contains("Spawns an agent to work on the specified task."));
     assert!(description.contains("The spawned agent will have the same tools as you"));
     assert!(!description.contains("max_concurrent_threads_per_session"));
@@ -114,12 +124,6 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
             .get("reasoning_effort")
             .and_then(|schema| schema.description.as_deref()),
         Some("Reasoning effort override for the new agent. Omit to inherit the parent effort.")
-    );
-    assert_eq!(
-        properties
-            .get("service_tier")
-            .and_then(|schema| schema.description.as_deref()),
-        Some(SPAWN_AGENT_SERVICE_TIER_OVERRIDE_DESCRIPTION)
     );
     assert_eq!(
         parameters.required.as_ref(),
@@ -243,7 +247,7 @@ fn spawn_agent_tool_caps_reasoning_effort_value_length() {
 }
 
 #[test]
-fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden() {
+fn spawn_agent_tool_keeps_reserved_schema_when_spawn_metadata_is_hidden() {
     let tool = create_spawn_agent_tool_v2(SpawnAgentToolOptions {
         available_models: vec![model_preset("visible", /*show_in_picker*/ true)],
         agent_type_description: "role help".to_string(),
@@ -267,16 +271,22 @@ fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden() {
         .as_ref()
         .expect("spawn_agent should use object params");
 
-    assert!(!properties.contains_key("agent_type"));
-    assert!(properties.contains_key("model"));
-    assert!(properties.contains_key("reasoning_effort"));
-    assert!(!properties.contains_key("service_tier"));
+    assert_eq!(
+        properties.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec![
+            "fork_turns",
+            "message",
+            "model",
+            "reasoning_effort",
+            "task_name",
+        ]
+    );
     assert!(!description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
     assert!(description.contains("Available model overrides"));
 }
 
 #[test]
-fn spawn_agent_tool_hides_model_controls_without_override_exposure() {
+fn spawn_agent_tool_keeps_reserved_schema_without_override_exposure() {
     let tool = create_spawn_agent_tool_v2(SpawnAgentToolOptions {
         available_models: vec![model_preset("visible", /*show_in_picker*/ true)],
         agent_type_description: "role help".to_string(),
@@ -300,9 +310,16 @@ fn spawn_agent_tool_hides_model_controls_without_override_exposure() {
         .as_ref()
         .expect("spawn_agent should use object params");
 
-    for property in ["agent_type", "model", "reasoning_effort", "service_tier"] {
-        assert!(!properties.contains_key(property));
-    }
+    assert_eq!(
+        properties.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec![
+            "fork_turns",
+            "message",
+            "model",
+            "reasoning_effort",
+            "task_name",
+        ]
+    );
     assert!(!description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
     assert!(!description.contains("Available model overrides"));
 }

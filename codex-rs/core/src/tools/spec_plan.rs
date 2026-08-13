@@ -1,5 +1,6 @@
 use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
+use crate::config::DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::mcp_tool_exposure::append_mcp_tools;
 use crate::session::session::Session;
@@ -1136,7 +1137,14 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 exposure,
             );
             registry.register_trusted_with_exposure(
-                multi_agent_v2_handler(CloseAgentHandlerV2, tool_namespace),
+                multi_agent_v2_handler(
+                    CloseAgentHandlerV2,
+                    // The Responses API reserves `collaboration` for its fixed built-in tool
+                    // allowlist. Keep the new lifecycle tool as a plain function by default,
+                    // while preserving explicitly configured non-reserved namespaces.
+                    tool_namespace
+                        .filter(|namespace| *namespace != DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE),
+                ),
                 exposure,
             );
             registry.register_trusted_with_exposure(

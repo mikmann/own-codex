@@ -106,17 +106,11 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
     let inherited_model_guidance = (options.expose_spawn_agent_model_overrides
         && !options.hide_agent_type_model_reasoning)
         .then_some(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE);
-    let mut properties = spawn_agent_common_properties_v2(&options.agent_type_description);
-    if !options.expose_agent_type {
-        properties.remove("agent_type");
-    }
-    if options.hide_agent_type_model_reasoning {
-        properties.remove("service_tier");
-    }
-    if !options.expose_spawn_agent_model_overrides {
-        properties.remove("model");
-        properties.remove("reasoning_effort");
-    }
+    // `collaboration.spawn_agent` is a Responses API reserved tool. Its input schema must remain
+    // byte-for-byte compatible with the model's fixed contract regardless of local role or UI
+    // metadata configuration. Workflow authorization is therefore derived server-side from the
+    // generated task name instead of adding caller-controlled properties here.
+    let mut properties = spawn_agent_common_properties_v2();
     properties.insert(
         "task_name".to_string(),
         JsonSchema::string(Some(
@@ -654,7 +648,7 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
     ])
 }
 
-fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<String, JsonSchema> {
+fn spawn_agent_common_properties_v2() -> BTreeMap<String, JsonSchema> {
     BTreeMap::from([
         (
             "message".to_string(),
@@ -662,12 +656,6 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
                 "Initial plain-text task for the new agent.".to_string(),
             ))
             .with_encrypted(),
-        ),
-        (
-            "agent_type".to_string(),
-            JsonSchema::string(Some(format!(
-                "Agent type override for the new agent. Omit unless explicitly asked. Set `fork_turns` to `none` or a positive integer when an explicit override is needed.\n{agent_type_description}"
-            ))),
         ),
         (
             "fork_turns".to_string(),
@@ -687,39 +675,6 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
             JsonSchema::string(Some(
                 "Reasoning effort override for the new agent. Omit to inherit the parent effort."
                     .to_string(),
-            )),
-        ),
-        (
-            "service_tier".to_string(),
-            JsonSchema::string(Some(
-                SPAWN_AGENT_SERVICE_TIER_OVERRIDE_DESCRIPTION.to_string(),
-            )),
-        ),
-        (
-            "read_only".to_string(),
-            JsonSchema::boolean(Some(
-                "Restrict the child to a read-only permission profile, approval policy `never`, and no child-agent spawning. Use true for experts and reviewers."
-                    .to_string(),
-            )),
-        ),
-        (
-            "workflow_name".to_string(),
-            JsonSchema::string(Some(
-                "Configured expert or reviewer profile name. Supply together with workflow_type and workflow_role."
-                    .to_string(),
-            )),
-        ),
-        (
-            "workflow_type".to_string(),
-            JsonSchema::string_enum(
-                vec![serde_json::json!("expert"), serde_json::json!("reviewer")],
-                Some("Extended-workflow agent type.".to_string()),
-            ),
-        ),
-        (
-            "workflow_role".to_string(),
-            JsonSchema::string(Some(
-                "Configured domain role for the expert or reviewer.".to_string(),
             )),
         ),
     ])

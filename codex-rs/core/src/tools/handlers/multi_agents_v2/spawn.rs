@@ -6,6 +6,7 @@ use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::extended_workflow::WorkflowAgentKind;
+use crate::extended_workflow::WorkflowAgentPlan;
 use crate::extended_workflow::WorkflowTurnRuntimeState;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
@@ -54,14 +55,45 @@ async fn handle_spawn_agent(
     let turn = &step_context.turn;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
-    let workflow_identity = args.workflow_identity(turn.as_ref(), role_name_from_args(&args))?;
-    let fork_mode = args.fork_mode()?;
-    if workflow_identity.is_some() && fork_mode.is_some() {
-        return Err(FunctionCallError::RespondToModel(
-            "workflow experts and reviewers must use fork_turns=\"none\" so only the compact task contract is transferred"
-                .to_string(),
-        ));
+    let workflow_runtime = if turn.config.extended_workflow.enabled
+        && crate::extended_workflow::is_root_workflow_source(&turn.session_source)
+    {
+        Some(
+            turn.extension_data
+                .get::<WorkflowTurnRuntimeState>()
+                .ok_or_else(|| {
+                    FunctionCallError::RespondToModel(
+                        "the server-side workflow selection ledger is unavailable for this turn"
+                            .to_string(),
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    let workflow_identity = workflow_runtime
+        .as_ref()
+        .map(|runtime| runtime.selected_profile_for_task(&args.task_name))
+        .transpose()
+        .map_err(FunctionCallError::RespondToModel)?
+        .map(|(kind, profile)| WorkflowIdentity { kind, profile });
+    if let Some(identity) = workflow_identity.as_ref() {
+        identity.validate_requested_overrides(&args)?;
     }
+    let fork_mode = if workflow_identity.is_some() {
+        match args.fork_turns.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(value) if value.eq_ignore_ascii_case("none") => None,
+            Some(_) => {
+                return Err(FunctionCallError::RespondToModel(
+                    "workflow experts and reviewers must use fork_turns=\"none\" so only the compact task contract is transferred"
+                        .to_string(),
+                ));
+            }
+        }
+    } else {
+        args.fork_mode()?
+    };
     let message = message_content(args.message.clone())?;
     if workflow_identity.is_some() {
         crate::extended_workflow::require_bounded_workflow_text(
@@ -71,7 +103,17 @@ async fn handle_spawn_agent(
         )
         .map_err(FunctionCallError::RespondToModel)?;
     }
-    let role_name = role_name_from_args(&args);
+    let role_name = workflow_identity
+        .as_ref()
+        .and_then(|identity| identity.profile.agent_type.as_deref());
+    let requested_model = workflow_identity
+        .as_ref()
+        .and_then(|identity| identity.profile.model.as_deref())
+        .or(args.model.as_deref());
+    let requested_reasoning_effort = workflow_identity
+        .as_ref()
+        .and_then(|identity| identity.profile.reasoning_effort.clone())
+        .or_else(|| args.reasoning_effort.clone());
 
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
@@ -80,13 +122,7 @@ async fn handle_spawn_agent(
         turn.as_ref(),
         step_context.environments.primary(),
     )?;
-    if let Some(service_tier) = args.service_tier.as_ref() {
-        config.service_tier = Some(service_tier.clone());
-    }
     let is_full_history_fork = matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory));
-    if is_full_history_fork {
-        reject_full_fork_agent_type_override(role_name)?;
-    }
     if !is_full_history_fork {
         apply_spawn_agent_role(&session, &mut config, role_name).await?;
     }
@@ -94,15 +130,15 @@ async fn handle_spawn_agent(
         &session,
         turn.as_ref(),
         &mut config,
-        args.model.as_deref(),
-        args.reasoning_effort.clone(),
+        requested_model,
+        requested_reasoning_effort,
     )
     .await?;
     apply_spawn_agent_service_tier(
         &session,
         &mut config,
         turn.config.service_tier.as_deref(),
-        args.service_tier.as_deref(),
+        /*requested_service_tier*/ None,
     )
     .await?;
     apply_spawn_agent_runtime_overrides(
@@ -110,7 +146,7 @@ async fn handle_spawn_agent(
         turn.as_ref(),
         step_context.environments.primary(),
     )?;
-    if args.read_only.unwrap_or(false) {
+    if workflow_identity.is_some() {
         apply_read_only_child_ceiling(&mut config)?;
     }
 
@@ -123,8 +159,8 @@ async fn handle_spawn_agent(
         crate::extended_workflow::workflow_assignment_sha256(
             &turn.sub_id,
             identity.kind,
-            &identity.name,
-            &identity.role,
+            &identity.profile.name,
+            &identity.profile.role,
             &message,
         )
     });
@@ -136,19 +172,19 @@ async fn handle_spawn_agent(
         ThreadSpawnMetadata {
             agent_role: role_name,
             task_name: Some(args.task_name.clone()),
-            read_only: args.read_only.unwrap_or(false),
+            read_only: workflow_identity.is_some(),
             preferred_nickname: workflow_identity
                 .as_ref()
-                .map(|identity| identity.name.as_str()),
+                .map(|identity| identity.profile.name.as_str()),
             workflow_type: workflow_identity
                 .as_ref()
                 .map(|identity| identity.kind.label()),
             workflow_role: workflow_identity
                 .as_ref()
-                .map(|identity| identity.role.as_str()),
+                .map(|identity| identity.profile.role.as_str()),
             workflow_name: workflow_identity
                 .as_ref()
-                .map(|identity| identity.name.as_str()),
+                .map(|identity| identity.profile.name.as_str()),
             workflow_turn_id: workflow_identity.as_ref().map(|_| turn.sub_id.as_str()),
             assignment_sha256: assignment_sha256.as_deref(),
         },
@@ -170,36 +206,27 @@ async fn handle_spawn_agent(
         /*trigger_turn*/ true,
     );
     let context = AgentCommunicationContext::new(AgentCommunicationKind::Spawn, session.thread_id);
-    let workflow_runtime = if turn.config.extended_workflow.enabled
-        && crate::extended_workflow::is_root_workflow_source(&turn.session_source)
+    if let (Some(runtime), Some(identity)) = (workflow_runtime.as_ref(), workflow_identity.as_ref())
     {
-        let identity = workflow_identity.as_ref().ok_or_else(|| {
-            FunctionCallError::RespondToModel(
-                "extended workflow root turns may spawn only agents selected by the native workflow plan"
-                    .to_string(),
-            )
-        })?;
-        let runtime = turn
-            .extension_data
-            .get::<WorkflowTurnRuntimeState>()
-            .ok_or_else(|| {
-                FunctionCallError::RespondToModel(
-                    "the server-side workflow selection ledger is unavailable for this turn"
-                        .to_string(),
-                )
-            })?;
-        let selected = runtime
-            .reserve_spawn(identity.kind, &identity.name, &identity.role)
+        let (reserved_kind, selected) = runtime
+            .reserve_spawn_for_task(&args.task_name)
             .map_err(FunctionCallError::RespondToModel)?;
+        if reserved_kind != identity.kind || selected != identity.profile {
+            runtime.release_spawn(&args.task_name);
+            return Err(FunctionCallError::RespondToModel(
+                "the server-side workflow selection changed while the spawn was being prepared"
+                    .to_string(),
+            ));
+        }
         if selected
             .model
             .as_deref()
             .is_some_and(|model| config.model.as_deref() != Some(model))
         {
-            runtime.release_spawn(identity.kind, &identity.name);
+            runtime.release_spawn(&args.task_name);
             return Err(FunctionCallError::RespondToModel(format!(
                 "workflow profile `{}` resolved to model {:?}, not the configured model {:?}",
-                identity.name, config.model, selected.model
+                identity.profile.name, config.model, selected.model
             )));
         }
         if selected
@@ -207,16 +234,13 @@ async fn handle_spawn_agent(
             .as_ref()
             .is_some_and(|effort| config.model_reasoning_effort.as_ref() != Some(effort))
         {
-            runtime.release_spawn(identity.kind, &identity.name);
+            runtime.release_spawn(&args.task_name);
             return Err(FunctionCallError::RespondToModel(format!(
                 "workflow profile `{}` resolved to reasoning effort {:?}, not the configured effort {:?}",
-                identity.name, config.model_reasoning_effort, selected.reasoning_effort
+                identity.profile.name, config.model_reasoning_effort, selected.reasoning_effort
             )));
         }
-        Some(runtime)
-    } else {
-        None
-    };
+    }
     let spawned_agent = Box::pin(
         session
             .services
@@ -239,10 +263,10 @@ async fn handle_spawn_agent(
     let spawned_agent = match spawned_agent {
         Ok(agent) => agent,
         Err(error) => {
-            if let (Some(runtime), Some(identity)) =
+            if let (Some(runtime), Some(_)) =
                 (workflow_runtime.as_ref(), workflow_identity.as_ref())
             {
-                runtime.release_spawn(identity.kind, &identity.name);
+                runtime.release_spawn(&args.task_name);
             }
             return Err(collab_spawn_error(error));
         }
@@ -253,8 +277,8 @@ async fn handle_spawn_agent(
         runtime.commit_spawn(
             new_thread_id,
             identity.kind,
-            &identity.name,
-            &identity.role,
+            &identity.profile.name,
+            &identity.profile.role,
             &message,
         );
     }
@@ -278,9 +302,9 @@ async fn handle_spawn_agent(
             workflow_agent: workflow_identity
                 .as_ref()
                 .map(|identity| WorkflowAgentDisplay {
-                    name: identity.name.clone(),
+                    name: identity.profile.name.clone(),
                     agent_type: identity.kind.label().to_string(),
-                    role: identity.role.clone(),
+                    role: identity.profile.role.clone(),
                     model: agent_snapshot
                         .as_ref()
                         .map(|snapshot| snapshot.model.clone())
@@ -323,22 +347,14 @@ impl CoreToolRuntime for Handler {
 struct SpawnAgentArgs {
     message: String,
     task_name: String,
-    agent_type: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
-    service_tier: Option<String>,
     fork_turns: Option<String>,
-    fork_context: Option<bool>,
-    read_only: Option<bool>,
-    workflow_name: Option<String>,
-    workflow_type: Option<WorkflowAgentKind>,
-    workflow_role: Option<String>,
 }
 
 struct WorkflowIdentity {
-    name: String,
     kind: WorkflowAgentKind,
-    role: String,
+    profile: WorkflowAgentPlan,
 }
 
 fn workflow_contract_message(kind: WorkflowAgentKind, task: &str) -> String {
@@ -356,94 +372,24 @@ fn workflow_contract_message(kind: WorkflowAgentKind, task: &str) -> String {
     )
 }
 
-fn role_name_from_args(args: &SpawnAgentArgs) -> Option<&str> {
-    args.agent_type
-        .as_deref()
-        .map(str::trim)
-        .filter(|role| !role.is_empty())
-}
-
-impl SpawnAgentArgs {
-    fn workflow_identity(
-        &self,
-        turn: &crate::session::turn_context::TurnContext,
-        role_name: Option<&str>,
-    ) -> Result<Option<WorkflowIdentity>, FunctionCallError> {
-        let supplied = [
-            self.workflow_name.is_some(),
-            self.workflow_type.is_some(),
-            self.workflow_role.is_some(),
-        ];
-        if supplied.iter().any(|supplied| *supplied) && !supplied.iter().all(|supplied| *supplied) {
-            return Err(FunctionCallError::RespondToModel(
-                "workflow_name, workflow_type, and workflow_role must be supplied together"
-                    .to_string(),
-            ));
-        }
-        let (Some(name), Some(kind), Some(role)) = (
-            self.workflow_name.as_deref(),
-            self.workflow_type,
-            self.workflow_role.as_deref(),
-        ) else {
-            return Ok(None);
-        };
-        if !self.read_only.unwrap_or(false) {
-            return Err(FunctionCallError::RespondToModel(
-                "workflow experts and reviewers must be spawned with read_only=true".to_string(),
-            ));
-        }
-        let profiles = match kind {
-            WorkflowAgentKind::Expert
-                if turn.config.extended_workflow.experts.enabled
-                    && turn.config.extended_workflow.experts.max > 0 =>
-            {
-                &turn.config.extended_workflow.experts.profiles
-            }
-            WorkflowAgentKind::Reviewer
-                if turn.config.extended_workflow.reviewers.enabled
-                    && turn.config.extended_workflow.reviewers.max > 0 =>
-            {
-                &turn.config.extended_workflow.reviewers.profiles
-            }
-            _ => {
-                return Err(FunctionCallError::RespondToModel(format!(
-                    "the configured {} process is disabled",
-                    kind.label().to_lowercase()
-                )));
-            }
-        };
-        let profile = profiles
-            .iter()
-            .find(|profile| profile.name == name && profile.role == role)
-            .ok_or_else(|| {
-                FunctionCallError::RespondToModel(format!(
-                    "unknown configured {} profile `{name}` with role `{role}`",
-                    kind.label().to_lowercase()
-                ))
-            })?;
-        if profile.agent_type.as_deref() != role_name {
+impl WorkflowIdentity {
+    fn validate_requested_overrides(&self, args: &SpawnAgentArgs) -> Result<(), FunctionCallError> {
+        if args.model.as_deref().is_some() && args.model.as_deref() != self.profile.model.as_deref()
+        {
             return Err(FunctionCallError::RespondToModel(format!(
-                "workflow profile `{name}` requires agent_type {:?}, but the spawn request used {:?}",
-                profile.agent_type, role_name
+                "workflow profile `{}` fixes model to {:?}, but the spawn request used {:?}",
+                self.profile.name, self.profile.model, args.model
             )));
         }
-        if profile.model.as_deref() != self.model.as_deref() {
+        if args.reasoning_effort.is_some()
+            && args.reasoning_effort.as_ref() != self.profile.reasoning_effort.as_ref()
+        {
             return Err(FunctionCallError::RespondToModel(format!(
-                "workflow profile `{name}` requires model {:?}, but the spawn request used {:?}",
-                profile.model, self.model
+                "workflow profile `{}` fixes reasoning effort to {:?}, but the spawn request used {:?}",
+                self.profile.name, self.profile.reasoning_effort, args.reasoning_effort
             )));
         }
-        if profile.reasoning_effort.as_ref() != self.reasoning_effort.as_ref() {
-            return Err(FunctionCallError::RespondToModel(format!(
-                "workflow profile `{name}` requires reasoning effort {:?}, but the spawn request used {:?}",
-                profile.reasoning_effort, self.reasoning_effort
-            )));
-        }
-        Ok(Some(WorkflowIdentity {
-            name: name.to_string(),
-            kind,
-            role: role.to_string(),
-        }))
+        Ok(())
     }
 }
 
@@ -459,12 +405,6 @@ fn apply_read_only_child_ceiling(
 
 impl SpawnAgentArgs {
     fn fork_mode(&self) -> Result<Option<SpawnAgentForkMode>, FunctionCallError> {
-        if self.fork_context.is_some() {
-            return Err(FunctionCallError::RespondToModel(
-                "fork_context is not supported in MultiAgentV2; use fork_turns instead".to_string(),
-            ));
-        }
-
         let fork_turns = self
             .fork_turns
             .as_deref()

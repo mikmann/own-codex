@@ -1,8 +1,14 @@
 use super::*;
 
+const TEST_TURN_ID: &str = "turn-test-1";
+
 #[test]
 fn simple_answer_uses_no_experts_by_default() {
-    let plan = plan_turn("Was bedeutet HTTP?", &ExtendedWorkflowConfig::default());
+    let plan = plan_turn(
+        "Was bedeutet HTTP?",
+        TEST_TURN_ID,
+        &ExtendedWorkflowConfig::default(),
+    );
     assert_eq!(plan.classification.class, RequestClass::SimpleAnswer);
     assert!(plan.experts.selected.is_empty());
 }
@@ -21,6 +27,7 @@ fn assignment_subject_excludes_only_the_appended_result_contract() {
 fn complex_security_answer_can_use_experts() {
     let plan = plan_turn(
         "Erkläre die Security- und Architekturfolgen einer unbekannten Permission.",
+        TEST_TURN_ID,
         &ExtendedWorkflowConfig::default(),
     );
     assert_eq!(plan.classification.class, RequestClass::SimpleAnswer);
@@ -31,6 +38,7 @@ fn complex_security_answer_can_use_experts() {
 fn work_order_uses_configured_range() {
     let plan = plan_turn(
         "Implementiere CLI, Tests und Sicherheitsvalidierung.",
+        TEST_TURN_ID,
         &ExtendedWorkflowConfig::default(),
     );
     assert_eq!(plan.classification.class, RequestClass::WorkOrder);
@@ -56,7 +64,7 @@ fn zero_zero_starts_no_agents() {
     config.experts.min = 0;
     config.experts.max = 0;
     config.experts.profiles.clear();
-    let plan = plan_turn("Implementiere eine Änderung.", &config);
+    let plan = plan_turn("Implementiere eine Änderung.", TEST_TURN_ID, &config);
     assert!(plan.experts.enabled);
     assert!(plan.experts.selected.is_empty());
 }
@@ -65,7 +73,7 @@ fn zero_zero_starts_no_agents() {
 fn insufficient_budget_blocks_before_spawn() {
     let mut config = ExtendedWorkflowConfig::default();
     config.experts.round_budget_tokens = Some(1);
-    let plan = plan_turn("Implementiere eine Änderung.", &config);
+    let plan = plan_turn("Implementiere eine Änderung.", TEST_TURN_ID, &config);
     assert!(plan.experts.budget_blocked);
     assert!(plan.experts.selected.is_empty());
 }
@@ -76,7 +84,7 @@ fn workflow_budget_is_split_across_enabled_subagent_rounds() {
         workflow_budget_tokens: Some(4_800),
         ..Default::default()
     };
-    let plan = plan_turn("Implementiere eine Änderung.", &config);
+    let plan = plan_turn("Implementiere eine Änderung.", TEST_TURN_ID, &config);
     assert_eq!(plan.experts.estimated_tokens, 2_400);
     assert_eq!(plan.advisory_workflow_budget, Some(4_800));
 }
@@ -99,9 +107,47 @@ fn concept_contract_accepts_an_explicit_complete_design() {
 fn reviewer_roles_are_distinct() {
     let plan = plan_reviewers(
         "CLI security concurrency tests changed",
+        TEST_TURN_ID,
         &ExtendedWorkflowConfig::default(),
     );
     assert!(distinct_roles(&plan));
+}
+
+#[test]
+fn workflow_task_names_are_turn_bound_kind_specific_and_agent_path_safe() {
+    let config = ExtendedWorkflowConfig::default();
+    let first = plan_turn("Implementiere CLI und Security.", "turn-one", &config);
+    let second = plan_turn("Implementiere CLI und Security.", "turn-two", &config);
+    let reviewers = plan_reviewers("CLI and security changes", "turn-one", &config);
+    let first_names = first
+        .experts
+        .selected
+        .iter()
+        .map(|profile| profile.task_name.as_str())
+        .collect::<HashSet<_>>();
+    let second_names = second
+        .experts
+        .selected
+        .iter()
+        .map(|profile| profile.task_name.as_str())
+        .collect::<HashSet<_>>();
+    let reviewer_names = reviewers
+        .selected
+        .iter()
+        .map(|profile| profile.task_name.as_str())
+        .collect::<HashSet<_>>();
+
+    assert!(first_names.is_disjoint(&second_names));
+    assert!(first_names.is_disjoint(&reviewer_names));
+    for task_name in first_names
+        .into_iter()
+        .chain(second_names)
+        .chain(reviewer_names)
+    {
+        codex_protocol::AgentPath::root()
+            .join(task_name)
+            .expect("planner-generated task name should be a valid agent path segment");
+    }
 }
 
 #[test]
@@ -253,59 +299,61 @@ fn trivial_subject_is_not_accepted_as_relevant() {
 #[test]
 fn runtime_ledger_rejects_unselected_duplicate_and_premature_reviewer_spawns() {
     let config = ExtendedWorkflowConfig::default();
-    let turn_plan = plan_turn("Implementiere CLI, Security und Tests.", &config);
+    let turn_plan = plan_turn(
+        "Implementiere CLI, Security und Tests.",
+        TEST_TURN_ID,
+        &config,
+    );
     let runtime = WorkflowTurnRuntimeState::new(&turn_plan);
     let selected = turn_plan.experts.selected.first().expect("selected expert");
 
+    assert!(runtime.reserve_spawn_for_task(&selected.task_name).is_ok());
     assert!(
         runtime
-            .reserve_spawn(WorkflowAgentKind::Expert, &selected.name, &selected.role)
-            .is_ok()
-    );
-    assert!(
-        runtime
-            .reserve_spawn(WorkflowAgentKind::Expert, &selected.name, &selected.role)
+            .reserve_spawn_for_task(&selected.task_name)
             .expect_err("duplicate")
             .contains("already consumed")
     );
     assert!(
         runtime
-            .reserve_spawn(WorkflowAgentKind::Expert, "not-selected", "Unknown")
+            .reserve_spawn_for_task("not_selected")
             .expect_err("unselected")
-            .contains("not selected")
+            .contains("no selected workflow profile")
     );
-    assert!(
-        runtime
-            .reserve_spawn(
-                WorkflowAgentKind::Reviewer,
-                "security",
-                "Security and permissions"
-            )
-            .expect_err("reviewer plan missing")
-            .contains("before plan_workflow_reviewers")
-    );
-
-    let reviewer_plan = plan_reviewers("security and CLI changes", &config);
-    runtime
-        .install_reviewers(&reviewer_plan)
-        .expect("install reviewers");
+    let reviewer_plan = plan_reviewers("security and CLI changes", TEST_TURN_ID, &config);
     let reviewer = reviewer_plan.selected.first().expect("selected reviewer");
     assert!(
         runtime
-            .reserve_spawn(WorkflowAgentKind::Reviewer, &reviewer.name, &reviewer.role)
-            .is_ok()
+            .reserve_spawn_for_task(&reviewer.task_name)
+            .expect_err("reviewer plan missing")
+            .contains("no selected workflow profile")
     );
+    runtime
+        .install_reviewers(&reviewer_plan)
+        .expect("install reviewers");
+    let remaining_expert = turn_plan
+        .experts
+        .selected
+        .get(1)
+        .expect("second selected expert");
+    assert_eq!(
+        runtime
+            .selected_profile_for_task(&remaining_expert.task_name)
+            .expect("expert should remain selected after reviewer planning"),
+        (WorkflowAgentKind::Expert, remaining_expert.clone())
+    );
+    assert!(runtime.reserve_spawn_for_task(&reviewer.task_name).is_ok());
 }
 
 #[test]
 fn simple_answer_runtime_ledger_rejects_expert_spawn() {
     let config = ExtendedWorkflowConfig::default();
-    let turn_plan = plan_turn("Was bedeutet HTTP?", &config);
+    let turn_plan = plan_turn("Was bedeutet HTTP?", TEST_TURN_ID, &config);
     let runtime = WorkflowTurnRuntimeState::new(&turn_plan);
     assert!(turn_plan.experts.selected.is_empty());
     assert!(
         runtime
-            .reserve_spawn(WorkflowAgentKind::Expert, "architecture", "Architecture")
+            .reserve_spawn_for_task("workflow_unknown_expert_1")
             .is_err()
     );
 }
@@ -318,17 +366,21 @@ fn token_estimate_saturates_instead_of_overflowing() {
     for profile in &mut config.experts.profiles {
         profile.token_budget = Some(u64::MAX);
     }
-    let plan = plan_turn("Implementiere CLI und Tests.", &config);
+    let plan = plan_turn("Implementiere CLI und Tests.", TEST_TURN_ID, &config);
     assert_eq!(plan.experts.estimated_tokens, u64::MAX);
 }
 
 #[test]
 fn work_order_reviewer_gate_requires_distinct_passing_agents_and_roles() {
     let config = ExtendedWorkflowConfig::default();
-    let turn_plan = plan_turn("Implementiere CLI, Security und Tests.", &config);
+    let turn_plan = plan_turn(
+        "Implementiere CLI, Security und Tests.",
+        TEST_TURN_ID,
+        &config,
+    );
     let runtime = WorkflowTurnRuntimeState::new(&turn_plan);
     assert!(runtime.requires_reviewer_completion());
-    let reviewer_plan = plan_reviewers("security and CLI changes", &config);
+    let reviewer_plan = plan_reviewers("security and CLI changes", TEST_TURN_ID, &config);
     runtime
         .install_reviewers(&reviewer_plan)
         .expect("reviewer plan should install");
@@ -388,7 +440,8 @@ fn work_order_reviewer_gate_requires_distinct_passing_agents_and_roles() {
 #[test]
 fn simple_answer_does_not_require_reviewer_completion() {
     let config = ExtendedWorkflowConfig::default();
-    let runtime = WorkflowTurnRuntimeState::new(&plan_turn("Was bedeutet HTTP?", &config));
+    let runtime =
+        WorkflowTurnRuntimeState::new(&plan_turn("Was bedeutet HTTP?", TEST_TURN_ID, &config));
     assert!(!runtime.requires_reviewer_completion());
     assert_eq!(
         runtime.reviewer_completion_gate(&[]),
