@@ -1180,7 +1180,9 @@ See the Codex keymap documentation for supported actions and examples."
                 &mut app_server,
                 AppEvent::InsertHistoryCell(Box::new(UpdateAvailableHistoryCell::new(
                     latest_version,
-                    crate::update_action::get_update_action(official_update_channel_enabled),
+                    crate::update_action::get_update_action_with_official_update_channel(
+                        official_update_channel_enabled,
+                    ),
                 ))),
             ))
             .await?;

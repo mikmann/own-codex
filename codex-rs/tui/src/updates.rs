@@ -35,7 +35,9 @@ pub fn get_upgrade_version(
         return None;
     }
 
-    let action = update_action::get_update_action(official_update_channel_enabled);
+    let action = update_action::get_update_action_with_official_update_channel(
+        official_update_channel_enabled,
+    );
     let version_file = version_filepath(config);
     let info = read_version_info(&version_file).ok();
 

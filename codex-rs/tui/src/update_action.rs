@@ -72,8 +72,16 @@ impl UpdateAction {
     }
 }
 
-#[cfg(not(debug_assertions))]
-pub fn get_update_action(official_update_channel_enabled: bool) -> Option<UpdateAction> {
+/// Returns the update action for the official Codex update channel.
+#[cfg(any(not(debug_assertions), test))]
+pub fn get_update_action() -> Option<UpdateAction> {
+    get_update_action_with_official_update_channel(true)
+}
+
+#[cfg(any(not(debug_assertions), test))]
+pub(crate) fn get_update_action_with_official_update_channel(
+    official_update_channel_enabled: bool,
+) -> Option<UpdateAction> {
     if official_update_channel_enabled {
         UpdateAction::from_install_context(InstallContext::current())
     } else {
@@ -86,6 +94,16 @@ mod tests {
     use super::*;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn release_public_update_action_api_remains_zero_argument() {
+        let _: fn() -> Option<UpdateAction> = crate::get_update_action;
+    }
+
+    #[test]
+    fn product_aware_update_action_can_disable_the_official_channel() {
+        assert_eq!(get_update_action_with_official_update_channel(false), None);
+    }
 
     #[test]
     fn maps_install_context_to_update_action() {

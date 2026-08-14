@@ -960,9 +960,7 @@ fn run_update_command(extended_workflow_default_enabled: bool) -> anyhow::Result
 
     #[cfg(not(debug_assertions))]
     {
-        let Some(action) =
-            codex_tui::get_update_action(/*official_update_channel_enabled*/ true)
-        else {
+        let Some(action) = codex_tui::get_update_action() else {
             anyhow::bail!(
                 "Could not detect the Codex installation method. Please update manually: https://developers.openai.com/codex/cli/"
             );

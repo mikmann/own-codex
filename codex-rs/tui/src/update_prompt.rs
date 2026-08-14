@@ -43,9 +43,9 @@ pub(crate) async fn run_update_prompt_if_needed(
     else {
         return Ok(UpdatePromptOutcome::Continue);
     };
-    let Some(update_action) =
-        crate::update_action::get_update_action(official_update_channel_enabled)
-    else {
+    let Some(update_action) = crate::update_action::get_update_action_with_official_update_channel(
+        official_update_channel_enabled,
+    ) else {
         return Ok(UpdatePromptOutcome::Continue);
     };
 
