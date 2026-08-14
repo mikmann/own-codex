@@ -51,6 +51,7 @@ use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::user_input::UserInput;
@@ -867,6 +868,17 @@ impl TestCodex {
             .await
     }
 
+    pub async fn submit_turn_and_return_complete(&self, prompt: &str) -> Result<TurnCompleteEvent> {
+        self.submit_turn_with_context_and_return_complete(
+            prompt,
+            AskForApproval::Never,
+            PermissionProfile::Disabled,
+            /*service_tier*/ None,
+            /*environments*/ None,
+        )
+        .await
+    }
+
     /// Submits a text turn without changing the current thread settings.
     pub async fn submit_text_turn(&self, prompt: &str) -> Result<()> {
         self.codex
@@ -1000,6 +1012,25 @@ impl TestCodex {
         service_tier: Option<Option<String>>,
         environments: Option<Vec<TurnEnvironmentSelection>>,
     ) -> Result<()> {
+        self.submit_turn_with_context_and_return_complete(
+            prompt,
+            approval_policy,
+            permission_profile,
+            service_tier,
+            environments,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn submit_turn_with_context_and_return_complete(
+        &self,
+        prompt: &str,
+        approval_policy: AskForApproval,
+        permission_profile: PermissionProfile,
+        service_tier: Option<Option<String>>,
+        environments: Option<Vec<TurnEnvironmentSelection>>,
+    ) -> Result<TurnCompleteEvent> {
         let (sandbox_policy, permission_profile) =
             turn_permission_fields(permission_profile, self.config.cwd.as_path());
         let session_model = self.session_configured.model.clone();
@@ -1039,7 +1070,7 @@ impl TestCodex {
             _ => None,
         })
         .await;
-        wait_for_event_with_timeout(
+        let event = wait_for_event_with_timeout(
             &self.codex,
             |event| match event {
                 EventMsg::TurnComplete(event) => event.turn_id == turn_id,
@@ -1048,7 +1079,10 @@ impl TestCodex {
             SUBMIT_TURN_COMPLETE_TIMEOUT,
         )
         .await;
-        Ok(())
+        let EventMsg::TurnComplete(event) = event else {
+            unreachable!("turn completion matcher returned a different event")
+        };
+        Ok(event)
     }
 }
 

@@ -252,9 +252,6 @@ impl AgentControl {
         }
         let _lifecycle_guard = self.lifecycle_gate.write().await;
         self.set_in_memory_edge_status(target_thread_id, ThreadSpawnEdgeStatus::Closed);
-        for thread_id in thread_ids_deepest_first {
-            self.remove_in_memory_workflow_agent(thread_id);
-        }
         Ok(CloseAgentOutcome { previous_status })
     }
 

@@ -1873,6 +1873,15 @@ ON CONFLICT(id) DO UPDATE SET
 
         let mut tx = self.pool.begin().await?;
         for thread_id_string in &thread_id_strings {
+            sqlx::query(
+                "DELETE FROM extended_workflow_validations WHERE root_thread_id = ? OR agent_thread_id = ?",
+            )
+            .bind(thread_id_string)
+            .bind(thread_id_string)
+            .execute(&mut *tx)
+            .await?;
+        }
+        for thread_id_string in &thread_id_strings {
             sqlx::query("DELETE FROM thread_dynamic_tools WHERE thread_id = ?")
                 .bind(thread_id_string)
                 .execute(&mut *tx)
@@ -2704,6 +2713,25 @@ mod tests {
                 /*token_budget*/ None,
             )
             .await?;
+        for (root_thread_id, agent_thread_id, validation_key, output_sha256) in [
+            (thread_id, child_thread_id, "root-owned", "a".repeat(64)),
+            (child_thread_id, thread_id, "agent-owned", "b".repeat(64)),
+        ] {
+            let decision = runtime
+                .begin_workflow_validation(crate::WorkflowValidationSubmission {
+                    root_thread_id,
+                    turn_id: "cleanup-turn".to_string(),
+                    validation_key: validation_key.to_string(),
+                    result_kind: "reviewer".to_string(),
+                    agent_thread_id: Some(agent_thread_id),
+                    reviewer_role: Some("Cleanup".to_string()),
+                    output_revision: 1,
+                    output_sha256,
+                    requires_higher_revision: false,
+                })
+                .await?;
+            assert_eq!(decision, crate::WorkflowValidationDecision::Attempt(1));
+        }
         sqlx::query("INSERT INTO logs (ts, ts_nanos, level, target, feedback_log_body, thread_id) VALUES (1, 0, 'INFO', 'test', 'feedback log', ?)")
             .bind(thread_id.to_string())
             .execute(runtime.logs_pool.as_ref())
@@ -2723,6 +2751,14 @@ mod tests {
         .fetch_one(runtime.pool.as_ref())
         .await?;
         assert_eq!(spawn_edge_count, 0);
+        let workflow_validation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM extended_workflow_validations WHERE root_thread_id = ? OR agent_thread_id = ?",
+        )
+        .bind(thread_id.to_string())
+        .bind(thread_id.to_string())
+        .fetch_one(runtime.pool.as_ref())
+        .await?;
+        assert_eq!(workflow_validation_count, 0);
         assert_eq!(
             runtime.thread_goals().get_thread_goal(thread_id).await?,
             None

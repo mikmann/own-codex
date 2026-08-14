@@ -81,6 +81,20 @@ impl WorkflowResultCache {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&agent_id);
     }
+
+    fn remove_for_turn(&self, workflow_turn_id: &str) {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, agent| {
+                agent
+                    .source
+                    .get_extended_workflow_agent_identity()
+                    .and_then(|identity| identity.workflow_turn_id)
+                    .as_deref()
+                    != Some(workflow_turn_id)
+            });
+    }
 }
 
 impl AgentControl {
@@ -108,11 +122,15 @@ impl AgentControl {
         self.workflow_results.remove(agent_id);
     }
 
+    pub(crate) fn clear_in_memory_workflow_agents_for_turn(&self, workflow_turn_id: &str) {
+        self.workflow_results.remove_for_turn(workflow_turn_id);
+    }
+
     /// Return the server-owned terminal output for a workflow child.
     ///
     /// Persisted rollouts remain authoritative for resumable sessions. Ephemeral sessions use the
-    /// bounded in-memory record registered before the child receives its first task and removed by
-    /// `close_agent` after validation.
+    /// bounded in-memory record registered before the child receives its first task and retained
+    /// through the root turn's completion gate.
     pub(crate) async fn completed_workflow_agent(
         &self,
         agent_id: ThreadId,

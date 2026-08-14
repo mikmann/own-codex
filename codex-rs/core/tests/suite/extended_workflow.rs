@@ -588,6 +588,15 @@ async fn workflow_expert_shell_reads_but_write_fails_closed_without_creating_a_f
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn maximum_bounded_reviewer_contract_persists_and_validates_child() -> Result<()> {
+    maximum_bounded_reviewer_contract_validates_child(/*ephemeral*/ false).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn maximum_bounded_reviewer_contract_validates_ephemeral_child_after_close() -> Result<()> {
+    maximum_bounded_reviewer_contract_validates_child(/*ephemeral*/ true).await
+}
+
+async fn maximum_bounded_reviewer_contract_validates_child(ephemeral: bool) -> Result<()> {
     skip_if_no_network!(Ok(()));
     const PLAN_CALL_ID: &str = "call-plan-max-reviewer";
     const SPAWN_CALL_ID: &str = "call-spawn-max-reviewer";
@@ -678,7 +687,8 @@ async fn maximum_bounded_reviewer_contract_persists_and_validates_child() -> Res
     )
     .await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = test_codex().with_config(move |config| {
+        config.ephemeral = ephemeral;
         config.extended_workflow.enabled = true;
         config.extended_workflow.experts.enabled = false;
         config.extended_workflow.reviewers.min = 1;
@@ -687,7 +697,11 @@ async fn maximum_bounded_reviewer_contract_persists_and_validates_child() -> Res
         config.multi_agent_v2.default_wait_timeout_ms = 2_000;
     });
     let test = builder.build(&server).await?;
-    test.submit_turn(&root_prompt).await?;
+    let completion = test.submit_turn_and_return_complete(&root_prompt).await?;
+    assert_eq!(
+        completion.last_agent_message.as_deref(),
+        Some("reviewer validated and closed")
+    );
 
     tokio::time::timeout(Duration::from_secs(10), async {
         while child_request.requests().is_empty() {

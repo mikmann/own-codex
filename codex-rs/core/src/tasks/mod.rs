@@ -794,6 +794,9 @@ impl Session {
         };
         self.send_event(turn_context.as_ref(), event).await;
         self.services
+            .agent_control
+            .clear_in_memory_workflow_agents_for_turn(&turn_context.sub_id);
+        self.services
             .guardian_rejection_circuit_breaker
             .lock()
             .await
@@ -850,6 +853,9 @@ impl Session {
     async fn handle_task_abort(self: &Arc<Self>, task: RunningTask, reason: TurnAbortReason) {
         let sub_id = task.turn_context.sub_id.clone();
         if task.cancellation_token.is_cancelled() {
+            self.services
+                .agent_control
+                .clear_in_memory_workflow_agents_for_turn(&sub_id);
             return;
         }
 
@@ -918,6 +924,9 @@ impl Session {
             duration_ms,
         });
         self.send_event(task.turn_context.as_ref(), event).await;
+        self.services
+            .agent_control
+            .clear_in_memory_workflow_agents_for_turn(&task.turn_context.sub_id);
         self.services
             .guardian_rejection_circuit_breaker
             .lock()
