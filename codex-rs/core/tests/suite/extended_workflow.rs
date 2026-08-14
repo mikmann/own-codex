@@ -659,6 +659,18 @@ async fn maximum_bounded_reviewer_contract_reaches_and_validates_ephemeral_child
     })
     .await?;
     let request = child_request.single_request();
+    let agent_messages = request.inputs_of_type("agent_message");
+    assert_eq!(agent_messages.len(), 1);
+    let delivered_content = agent_messages[0]["content"]
+        .as_array()
+        .expect("workflow task should use agent_message content");
+    assert_eq!(delivered_content.len(), 1);
+    assert_eq!(delivered_content[0]["type"], "input_text");
+    let delivered_task = delivered_content[0]["text"]
+        .as_str()
+        .expect("workflow task should be structured plaintext");
+    assert!(delivered_task.contains("Message Type: NEW_TASK"));
+    assert!(delivered_task.contains("<extended_workflow_result_contract>"));
     let child_input = request.message_input_texts("user").join("\n");
     assert!(child_input.contains(&root_prompt));
     assert!(child_input.contains(&change_summary));

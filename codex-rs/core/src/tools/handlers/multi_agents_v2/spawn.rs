@@ -242,11 +242,19 @@ async fn handle_spawn_agent(
         .session_source
         .get_agent_path()
         .unwrap_or_else(AgentPath::root);
+    // Workflow routing replaces the encrypted model argument with the server-owned canonical
+    // task. Deliver that replacement as structured plaintext instead of mislabeling it as
+    // ciphertext for the child request.
+    let communication_source = if workflow_identity.is_some() {
+        crate::tools::context::ToolCallSource::DirectPlaintextMessage
+    } else {
+        source
+    };
     let communication = communication_from_tool_message(
         author,
         new_agent_path.clone(),
         message.clone(),
-        &source,
+        &communication_source,
         /*trigger_turn*/ true,
     );
     let context = AgentCommunicationContext::new(AgentCommunicationKind::Spawn, session.thread_id);
