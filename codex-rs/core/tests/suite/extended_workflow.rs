@@ -737,6 +737,17 @@ async fn maximum_bounded_reviewer_contract_persists_and_validates_child() -> Res
         json!({"message": "Wait completed.", "timed_out": false})
     );
     let final_request = final_request.single_request();
+    let validation_output = final_request
+        .function_call_output_text(VALIDATE_CALL_ID)
+        .expect("persisted reviewer assignment should pass validation");
+    let validation_payload: Value = serde_json::from_str(&validation_output)?;
+    assert_eq!(
+        (
+            validation_payload["accepted"].as_bool(),
+            validation_payload["retry_allowed"].as_bool(),
+        ),
+        (Some(true), Some(false))
+    );
     let close_output = final_request
         .function_call_output_text(CLOSE_CALL_ID)
         .expect("accepted ephemeral reviewer should be closable");

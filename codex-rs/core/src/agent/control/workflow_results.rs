@@ -165,18 +165,28 @@ impl AgentControl {
             for item in &history.items {
                 match item {
                     RolloutItem::InterAgentCommunication(communication)
-                        if task.is_none() && !communication.content.trim().is_empty() =>
+                        if task.is_none()
+                            && workflow_agent_path.as_deref()
+                                == Some(communication.recipient.as_str())
+                            && !communication.content.trim().is_empty() =>
                     {
-                        task = Some(communication.content.clone());
+                        task = Some(workflow_assignment_payload(
+                            communication.author.as_str(),
+                            communication.recipient.as_str(),
+                            &communication.content,
+                        ));
                     }
                     RolloutItem::ResponseItem(ResponseItem::AgentMessage {
+                        author,
                         recipient,
                         content,
                         ..
                     }) if task.is_none()
                         && workflow_agent_path.as_deref() == Some(recipient.as_str()) =>
                     {
-                        task = plaintext_agent_message_content(content);
+                        task = plaintext_agent_message_content(content).map(|content| {
+                            workflow_assignment_payload(author, recipient, &content)
+                        });
                     }
                     RolloutItem::EventMsg(event) => {
                         if let Some(status) = crate::agent::agent_status_from_event(event) {
@@ -217,6 +227,12 @@ impl AgentControl {
             output_revision,
         )
     }
+}
+
+fn workflow_assignment_payload(author: &str, recipient: &str, content: &str) -> String {
+    let prefix =
+        format!("Message Type: NEW_TASK\nTask name: {recipient}\nSender: {author}\nPayload:\n");
+    content.strip_prefix(&prefix).unwrap_or(content).to_string()
 }
 
 fn completed_workflow_agent_from_status(
