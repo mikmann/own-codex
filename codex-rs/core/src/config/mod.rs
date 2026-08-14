@@ -3474,15 +3474,23 @@ impl Config {
         let respect_system_proxy = features.enabled(Feature::RespectSystemProxy);
         let enable_network_proxy = features.enabled(Feature::NetworkProxy);
         let configured_windows_sandbox_mode = resolve_windows_sandbox_mode(&cfg);
+        let launcher_workflow_enabled = cfg
+            .extended_workflow
+            .as_ref()
+            .and_then(|workflow| workflow.enabled)
+            .unwrap_or(extended_workflow_default_enabled);
+        let launcher_windows_sandbox_mode =
+            (cfg!(target_os = "windows") && launcher_workflow_enabled)
+                .then_some(WindowsSandboxModeToml::Unelevated);
         // Keep the configured mode separate so a requirement-constrained mode
         // does not look like it was explicitly selected in config.
-        let selected_windows_sandbox_mode = configured_windows_sandbox_mode.or_else(|| {
-            match WindowsSandboxLevel::from_features(&features) {
+        let selected_windows_sandbox_mode = configured_windows_sandbox_mode
+            .or(launcher_windows_sandbox_mode)
+            .or_else(|| match WindowsSandboxLevel::from_features(&features) {
                 WindowsSandboxLevel::Elevated => Some(WindowsSandboxModeToml::Elevated),
                 WindowsSandboxLevel::RestrictedToken => Some(WindowsSandboxModeToml::Unelevated),
                 WindowsSandboxLevel::Disabled => None,
-            }
-        });
+            });
         apply_requirement_constrained_value(
             "windows.sandbox",
             selected_windows_sandbox_mode,
@@ -3490,7 +3498,9 @@ impl Config {
             &mut startup_warnings,
         )?;
         let effective_windows_sandbox_mode = *constrained_windows_sandbox_mode.get();
-        let windows_sandbox_mode = if constrained_windows_sandbox_mode.source.is_some() {
+        let windows_sandbox_mode = if constrained_windows_sandbox_mode.source.is_some()
+            || launcher_windows_sandbox_mode.is_some()
+        {
             effective_windows_sandbox_mode
         } else {
             configured_windows_sandbox_mode

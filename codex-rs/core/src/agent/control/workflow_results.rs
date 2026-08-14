@@ -4,6 +4,8 @@ use crate::agent::AgentStatus;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
+use codex_protocol::models::ResponseItem;
+use codex_protocol::models::plaintext_agent_message_content;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
@@ -120,6 +122,7 @@ impl AgentControl {
             Ok(thread) => Some(thread.agent_status().await),
             Err(_) => None,
         };
+        let cached = self.workflow_results.get(agent_id);
         let stored = state
             .read_stored_thread(ReadThreadParams {
                 thread_id: agent_id,
@@ -130,10 +133,13 @@ impl AgentControl {
         let stored = match stored {
             Ok(stored) => stored,
             Err(error) => {
-                let Some(cached) = self.workflow_results.get(agent_id) else {
+                let Some(cached) = cached.as_ref() else {
                     return Err(error);
                 };
-                let cached_status = cached.terminal_status.unwrap_or(AgentStatus::NotFound);
+                let cached_status = cached
+                    .terminal_status
+                    .clone()
+                    .unwrap_or(AgentStatus::NotFound);
                 let status = match live_status {
                     Some(AgentStatus::Shutdown) => cached_status,
                     Some(status) => status,
@@ -141,10 +147,10 @@ impl AgentControl {
                 };
                 return completed_workflow_agent_from_status(
                     agent_id,
-                    cached.source,
-                    Some(cached.task),
-                    cached.model,
-                    cached.reasoning_effort,
+                    cached.source.clone(),
+                    Some(cached.task.clone()),
+                    cached.model.clone(),
+                    cached.reasoning_effort.clone(),
                     status,
                     cached.output_revision,
                 );
@@ -152,6 +158,7 @@ impl AgentControl {
         };
 
         let mut task = None;
+        let workflow_agent_path = stored.source.get_agent_path().map(String::from);
         let mut persisted_status = AgentStatus::PendingInit;
         let mut output_revision = 0_u32;
         if let Some(history) = stored.history.as_ref() {
@@ -161,6 +168,15 @@ impl AgentControl {
                         if task.is_none() && !communication.content.trim().is_empty() =>
                     {
                         task = Some(communication.content.clone());
+                    }
+                    RolloutItem::ResponseItem(ResponseItem::AgentMessage {
+                        recipient,
+                        content,
+                        ..
+                    }) if task.is_none()
+                        && workflow_agent_path.as_deref() == Some(recipient.as_str()) =>
+                    {
+                        task = plaintext_agent_message_content(content);
                     }
                     RolloutItem::EventMsg(event) => {
                         if let Some(status) = crate::agent::agent_status_from_event(event) {
@@ -180,6 +196,11 @@ impl AgentControl {
                     _ => {}
                 }
             }
+        }
+        if task.is_none()
+            && let Some(cached) = cached.as_ref()
+        {
+            task = Some(cached.task.clone());
         }
         let status = match live_status {
             Some(AgentStatus::Shutdown) => persisted_status,

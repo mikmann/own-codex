@@ -470,13 +470,16 @@ async fn accepted_ticket_selection_is_idempotent_across_tool_retry() -> Result<(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn workflow_expert_shell_write_fails_closed_without_creating_a_file() -> Result<()> {
+async fn workflow_expert_shell_reads_but_write_fails_closed_without_creating_a_file() -> Result<()>
+{
     skip_if_no_network!(Ok(()));
     const ROOT_PROMPT: &str =
         "Explain the security and architecture implications of an unknown permission.";
     const CHILD_TASK: &str = "Inspect read-only enforcement for the assigned workflow.";
     const SPAWN_CALL_ID: &str = "call-spawn-read-only";
+    const READ_CALL_ID: &str = "call-read-read-only";
     const WRITE_CALL_ID: &str = "call-write-read-only";
+    const READ_SENTINEL: &str = "workflow read access confirmed";
 
     let server = start_mock_server().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
@@ -488,8 +491,13 @@ async fn workflow_expert_shell_write_fails_closed_without_creating_a_file() -> R
         .up_to_n_times(1)
         .mount(&server)
         .await;
-    let write_args = json!({
-        "command": "echo forbidden > workflow-read-only-marker.txt",
+    let read_command = if cfg!(target_os = "windows") {
+        "Get-Content -LiteralPath workflow-read-only-source.txt"
+    } else {
+        "cat workflow-read-only-source.txt"
+    };
+    let read_args = json!({
+        "command": read_command,
         "timeout_ms": 1_000
     })
     .to_string();
@@ -497,13 +505,28 @@ async fn workflow_expert_shell_write_fails_closed_without_creating_a_file() -> R
         &server,
         |request: &wiremock::Request| request_body_contains(request, CHILD_TASK),
         sse(vec![
-            ev_response_created("resp-child-write"),
-            ev_function_call(WRITE_CALL_ID, "shell_command", &write_args),
-            ev_completed("resp-child-write"),
+            ev_response_created("resp-child-read"),
+            ev_function_call(READ_CALL_ID, "shell_command", &read_args),
+            ev_completed("resp-child-read"),
         ]),
     )
     .await;
-    let child_followup = mount_sse_once_match(
+    let write_args = json!({
+        "command": "echo forbidden > workflow-read-only-marker.txt",
+        "timeout_ms": 1_000
+    })
+    .to_string();
+    let child_write = mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| request_body_contains(request, READ_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-child-write-attempt"),
+            ev_function_call(WRITE_CALL_ID, "shell_command", &write_args),
+            ev_completed("resp-child-write-attempt"),
+        ]),
+    )
+    .await;
+    let child_finished = mount_sse_once_match(
         &server,
         |request: &wiremock::Request| request_body_contains(request, WRITE_CALL_ID),
         sse(vec![
@@ -529,27 +552,42 @@ async fn workflow_expert_shell_write_fails_closed_without_creating_a_file() -> R
 
     let mut builder = test_codex().with_config(|config| {
         config.extended_workflow.enabled = true;
+        config.set_windows_sandbox_enabled(/*value*/ true);
     });
     let test = builder.build(&server).await?;
+    std::fs::write(
+        test.cwd_path().join("workflow-read-only-source.txt"),
+        READ_SENTINEL,
+    )?;
     let marker = test.cwd_path().join("workflow-read-only-marker.txt");
     test.submit_turn(ROOT_PROMPT).await?;
 
-    let tool_output = tokio::time::timeout(Duration::from_secs(10), async {
+    let read_output = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Some(output) = child_followup.function_call_output_text(WRITE_CALL_ID) {
+            if let Some(output) = child_write.function_call_output_text(READ_CALL_ID) {
                 break output;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await?;
-    assert!(!tool_output.trim().is_empty());
+    assert!(read_output.contains(READ_SENTINEL), "{read_output}");
+    let write_output = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(output) = child_finished.function_call_output_text(WRITE_CALL_ID) {
+                break output;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    assert!(!write_output.trim().is_empty());
     assert!(!marker.exists(), "read-only expert created {marker:?}");
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn maximum_bounded_reviewer_contract_reaches_and_validates_ephemeral_child() -> Result<()> {
+async fn maximum_bounded_reviewer_contract_persists_and_validates_child() -> Result<()> {
     skip_if_no_network!(Ok(()));
     const PLAN_CALL_ID: &str = "call-plan-max-reviewer";
     const SPAWN_CALL_ID: &str = "call-spawn-max-reviewer";
@@ -641,7 +679,6 @@ async fn maximum_bounded_reviewer_contract_reaches_and_validates_ephemeral_child
     .await;
 
     let mut builder = test_codex().with_config(|config| {
-        config.ephemeral = true;
         config.extended_workflow.enabled = true;
         config.extended_workflow.experts.enabled = false;
         config.extended_workflow.reviewers.min = 1;

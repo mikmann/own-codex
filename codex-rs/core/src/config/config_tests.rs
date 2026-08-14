@@ -6166,6 +6166,11 @@ async fn launcher_workflow_default_is_lowest_priority() -> std::io::Result<()> {
         .await?;
     assert!(defaulted.extended_workflow.enabled);
     assert_eq!(
+        defaulted.permissions.windows_sandbox_mode,
+        cfg!(target_os = "windows").then_some(WindowsSandboxModeToml::Unelevated),
+        "the Windows launcher must provide a filesystem sandbox for read-only workflow children",
+    );
+    assert_eq!(
         (
             defaulted.multi_agent_v2.max_concurrent_threads_per_session,
             defaulted.effective_agent_max_threads(MultiAgentVersion::V2),
@@ -6185,6 +6190,7 @@ async fn launcher_workflow_default_is_lowest_priority() -> std::io::Result<()> {
         .build()
         .await?;
     assert!(!explicitly_disabled.extended_workflow.enabled);
+    assert_eq!(explicitly_disabled.permissions.windows_sandbox_mode, None);
     assert_eq!(
         explicitly_disabled
             .multi_agent_v2
