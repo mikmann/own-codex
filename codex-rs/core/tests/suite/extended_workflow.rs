@@ -137,6 +137,52 @@ impl wiremock::Respond for WorkflowReviewerSpawnResponder {
 }
 
 #[derive(Debug)]
+enum WorkflowReviewerFollowupResponder {
+    Validate {
+        call_id: &'static str,
+        result: &'static str,
+    },
+    Close {
+        call_id: &'static str,
+    },
+}
+
+impl wiremock::Respond for WorkflowReviewerFollowupResponder {
+    fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+        let body = request_body_json(request).expect("responses request should contain JSON");
+        let task_name = selected_reviewer_task_name(&body)
+            .expect("reviewer follow-up should retain the selected task");
+        let (response_id, call_id, tool_name, arguments) = match self {
+            Self::Validate { call_id, result } => (
+                "resp-root-reviewer-validate",
+                *call_id,
+                "validate_workflow_result",
+                json!({
+                    "kind": "reviewer",
+                    "result_id": "ephemeral-reviewer-result",
+                    "expected_subject": "ignored server-side",
+                    "agent_task": task_name,
+                    "result": serde_json::from_str::<Value>(result)
+                        .expect("reviewer result fixture should be valid JSON")
+                })
+                .to_string(),
+            ),
+            Self::Close { call_id } => (
+                "resp-root-reviewer-close",
+                *call_id,
+                "close_agent",
+                json!({"target": task_name}).to_string(),
+            ),
+        };
+        core_test_support::responses::sse_response(sse(vec![
+            ev_response_created(response_id),
+            ev_function_call(call_id, tool_name, &arguments),
+            ev_completed(response_id),
+        ]))
+    }
+}
+
+#[derive(Debug)]
 struct BodyContains(&'static str);
 
 impl wiremock::Match for BodyContains {
@@ -503,10 +549,14 @@ async fn workflow_expert_shell_write_fails_closed_without_creating_a_file() -> R
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn maximum_bounded_reviewer_contract_reaches_the_child() -> Result<()> {
+async fn maximum_bounded_reviewer_contract_reaches_and_validates_ephemeral_child() -> Result<()> {
     skip_if_no_network!(Ok(()));
     const PLAN_CALL_ID: &str = "call-plan-max-reviewer";
     const SPAWN_CALL_ID: &str = "call-spawn-max-reviewer";
+    const WAIT_CALL_ID: &str = "call-wait-max-reviewer";
+    const VALIDATE_CALL_ID: &str = "call-validate-max-reviewer";
+    const CLOSE_CALL_ID: &str = "call-close-max-reviewer";
+    const REVIEW_RESULT: &str = r#"{"subject":"HTTP reviewer task","verdict":"pass","summary":"the complete task reached the ephemeral reviewer validation gate","findings":[],"evidence":[{"file":"codex-rs/core/src/extended_workflow.rs","symbol":"spawn_directive_for_task","explanation":"the task includes its bounded result contract"}],"missing_tests":[]}"#;
     let root_prefix = "What is HTTP? ";
     let root_prompt = format!("{root_prefix}{}", "r".repeat(3_000 - root_prefix.len()));
     let summary_prefix = "CLI security and tests. ";
@@ -543,10 +593,7 @@ async fn maximum_bounded_reviewer_contract_reaches_the_child() -> Result<()> {
         },
         sse(vec![
             ev_response_created("resp-max-reviewer-child"),
-            ev_assistant_message(
-                "msg-max-reviewer-child",
-                r#"{"subject":"maximum bounded reviewer task","verdict":"pass","summary":"the complete task reached the reviewer","findings":[],"evidence":[{"file":"codex-rs/core/src/extended_workflow.rs","symbol":"spawn_directive_for_task","explanation":"the task includes its bounded result contract"}],"missing_tests":[]}"#,
-            ),
+            ev_assistant_message("msg-max-reviewer-child", REVIEW_RESULT),
             ev_completed("resp-max-reviewer-child"),
         ]),
     )
@@ -555,15 +602,52 @@ async fn maximum_bounded_reviewer_contract_reaches_the_child() -> Result<()> {
         &server,
         |request: &wiremock::Request| request_body_contains(request, SPAWN_CALL_ID),
         sse(vec![
+            ev_response_created("resp-max-reviewer-wait"),
+            ev_function_call(
+                WAIT_CALL_ID,
+                "wait_agent",
+                &json!({"timeout_ms": 2_000}).to_string(),
+            ),
+            ev_completed("resp-max-reviewer-wait"),
+        ]),
+    )
+    .await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(BodyContains(WAIT_CALL_ID))
+        .respond_with(WorkflowReviewerFollowupResponder::Validate {
+            call_id: VALIDATE_CALL_ID,
+            result: REVIEW_RESULT,
+        })
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(BodyContains(VALIDATE_CALL_ID))
+        .respond_with(WorkflowReviewerFollowupResponder::Close {
+            call_id: CLOSE_CALL_ID,
+        })
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    let final_request = mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| request_body_contains(request, CLOSE_CALL_ID),
+        sse(vec![
             ev_response_created("resp-max-reviewer-finished"),
-            ev_assistant_message("msg-max-reviewer-finished", "reviewer started"),
+            ev_assistant_message("msg-max-reviewer-finished", "reviewer validated and closed"),
             ev_completed("resp-max-reviewer-finished"),
         ]),
     )
     .await;
 
     let mut builder = test_codex().with_config(|config| {
+        config.ephemeral = true;
         config.extended_workflow.enabled = true;
+        config.extended_workflow.experts.enabled = false;
+        config.extended_workflow.reviewers.min = 1;
+        config.extended_workflow.reviewers.max = 1;
+        config.multi_agent_v2.min_wait_timeout_ms = 10;
+        config.multi_agent_v2.default_wait_timeout_ms = 2_000;
     });
     let test = builder.build(&server).await?;
     test.submit_turn(&root_prompt).await?;
@@ -579,5 +663,11 @@ async fn maximum_bounded_reviewer_contract_reaches_the_child() -> Result<()> {
     assert!(child_input.contains(&root_prompt));
     assert!(child_input.contains(&change_summary));
     assert!(child_input.contains("<extended_workflow_result_contract>"));
+    let final_request = final_request.single_request();
+    let close_output = final_request
+        .function_call_output_text(CLOSE_CALL_ID)
+        .expect("accepted ephemeral reviewer should be closable");
+    let close_payload: Value = serde_json::from_str(&close_output)?;
+    assert!(close_payload.get("previous_status").is_some());
     Ok(())
 }

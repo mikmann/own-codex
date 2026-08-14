@@ -3,6 +3,7 @@ use super::*;
 use crate::agent::role::apply_role_to_config_for_multi_agent_v2;
 use crate::config::PermissionProfileSnapshot;
 use codex_extension_api::ExtensionDataInit;
+use codex_thread_store::ReadThreadParams;
 
 const AGENT_NAMES: &str = include_str!("../agent_names.txt");
 
@@ -498,6 +499,15 @@ impl AgentControl {
             other => (other, AgentMetadata::default()),
         };
         let notification_source = session_source.clone();
+        let workflow_assignment = match (&notification_source, &initial_input) {
+            (Some(source), SpawnInitialInput::InterAgentCommunication(communication, _))
+                if source.is_read_only_subagent()
+                    && source.get_extended_workflow_agent_identity().is_some() =>
+            {
+                Some((source.clone(), communication.content.clone()))
+            }
+            _ => None,
+        };
 
         // The same `AgentControl` is sent to spawn the thread.
         let new_thread = match (session_source, options.fork_mode.as_ref(), inheritance) {
@@ -583,6 +593,17 @@ impl AgentControl {
             return Err(error);
         }
 
+        if let Some((source, task)) = workflow_assignment.as_ref() {
+            let snapshot = new_thread.thread.config_snapshot().await;
+            self.register_in_memory_workflow_agent(
+                new_thread.thread_id,
+                source.clone(),
+                task.clone(),
+                Some(snapshot.model),
+                snapshot.reasoning_effort,
+            );
+        }
+
         let initial_input_result = match initial_input {
             SpawnInitialInput::UserInput(input) => {
                 self.send_input_after_capacity_check(
@@ -605,6 +626,7 @@ impl AgentControl {
             }
         };
         if let Err(error) = initial_input_result {
+            self.remove_in_memory_workflow_agent(new_thread.thread_id);
             drop(lifecycle_guard);
             let cleanup_result = if let Some(parent_thread_id) = notification_source
                 .as_ref()

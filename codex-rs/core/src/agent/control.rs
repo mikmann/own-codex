@@ -42,7 +42,6 @@ use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::user_input::UserInput;
 use codex_thread_store::LoadThreadHistoryParams;
-use codex_thread_store::ReadThreadParams;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -57,12 +56,14 @@ use tracing::warn;
 pub(crate) use self::execution::AgentExecutionGuard;
 use self::execution::AgentExecutionLimiter;
 use self::residency::V2Residency;
+use self::workflow_results::WorkflowResultCache;
 
 mod execution;
 mod legacy;
 mod lifecycle;
 mod residency;
 mod spawn;
+mod workflow_results;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SpawnAgentForkMode {
@@ -79,7 +80,7 @@ pub(crate) struct SpawnAgentOptions {
     pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CompletedWorkflowAgent {
     pub(crate) source: SessionSource,
     pub(crate) task: Option<String>,
@@ -160,6 +161,9 @@ pub(crate) struct AgentControl {
     /// Ephemeral fallback for tests and non-persistent thread stores. Local resumable sessions use
     /// the SQLite ledger exposed through `AgentGraphStore` instead.
     workflow_validations: Arc<std::sync::Mutex<InMemoryWorkflowValidations>>,
+    /// Bounded to currently open workflow agents and used only when an ephemeral child has no
+    /// persisted rollout from which its server-owned terminal result can be recovered.
+    workflow_results: Arc<WorkflowResultCache>,
 }
 
 impl AgentControl {
@@ -648,118 +652,6 @@ impl AgentControl {
             return AgentStatus::NotFound;
         };
         thread.agent_status().await
-    }
-
-    /// Return the terminal output that was actually persisted for a workflow child.
-    ///
-    /// This deliberately reads the child rollout rather than trusting a result object supplied by
-    /// the parent model. It also works after V2 residency eviction and process resume.
-    pub(crate) async fn completed_workflow_agent(
-        &self,
-        agent_id: ThreadId,
-    ) -> CodexResult<CompletedWorkflowAgent> {
-        let state = self.upgrade()?;
-        let live_status = match state.get_thread(agent_id).await {
-            Ok(thread) => Some(thread.agent_status().await),
-            Err(_) => None,
-        };
-        let stored = state
-            .read_stored_thread(ReadThreadParams {
-                thread_id: agent_id,
-                include_archived: true,
-                include_history: true,
-            })
-            .await?;
-        if !stored.source.is_read_only_subagent()
-            || stored
-                .source
-                .get_extended_workflow_agent_identity()
-                .is_none()
-        {
-            return Err(CodexErr::InvalidRequest(format!(
-                "agent `{agent_id}` is not a read-only extended-workflow agent"
-            )));
-        }
-
-        let mut task = None;
-        let mut persisted_status = AgentStatus::PendingInit;
-        let mut output_revision = 0_u32;
-        if let Some(history) = stored.history.as_ref() {
-            for item in &history.items {
-                match item {
-                    RolloutItem::InterAgentCommunication(communication)
-                        if task.is_none() && !communication.content.trim().is_empty() =>
-                    {
-                        task = Some(communication.content.clone());
-                    }
-                    RolloutItem::EventMsg(event) => {
-                        if let Some(status) = crate::agent::agent_status_from_event(event) {
-                            if matches!(status, AgentStatus::Completed(_)) {
-                                output_revision = output_revision.saturating_add(1);
-                            }
-                            // A V2 residency/completion watcher may shut a child down immediately
-                            // after its terminal turn. Preserve the completed result (or terminal
-                            // failure) across that technical shutdown so validation and its one
-                            // correction attempt can still inspect the actual persisted answer.
-                            if status != AgentStatus::Shutdown
-                                || matches!(
-                                    persisted_status,
-                                    AgentStatus::PendingInit | AgentStatus::Running
-                                )
-                            {
-                                persisted_status = status;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        let status = match live_status {
-            Some(AgentStatus::Shutdown) => persisted_status,
-            Some(status) => status,
-            None => persisted_status,
-        };
-        let output = match status {
-            AgentStatus::Completed(Some(output)) if !output.trim().is_empty() => output,
-            AgentStatus::Completed(None) => {
-                return Err(CodexErr::InvalidRequest(format!(
-                    "workflow agent `{agent_id}` completed without a terminal response"
-                )));
-            }
-            AgentStatus::PendingInit | AgentStatus::Running => {
-                return Err(CodexErr::InvalidRequest(format!(
-                    "workflow agent `{agent_id}` has not completed"
-                )));
-            }
-            AgentStatus::Errored(error) => {
-                return Err(CodexErr::InvalidRequest(format!(
-                    "workflow agent `{agent_id}` failed: {error}"
-                )));
-            }
-            AgentStatus::Interrupted | AgentStatus::Shutdown | AgentStatus::NotFound => {
-                return Err(CodexErr::InvalidRequest(format!(
-                    "workflow agent `{agent_id}` has no valid completed result (status: {status:?})"
-                )));
-            }
-            AgentStatus::Completed(Some(_)) => {
-                return Err(CodexErr::InvalidRequest(format!(
-                    "workflow agent `{agent_id}` completed with an empty terminal response"
-                )));
-            }
-        };
-        let output_revision = output_revision.max(1);
-        let output_sha256 = crate::extended_workflow::sha256_bytes(output.as_bytes());
-
-        Ok(CompletedWorkflowAgent {
-            source: stored.source,
-            task,
-            output,
-            model: stored.model,
-            reasoning_effort: stored.reasoning_effort,
-            output_revision,
-            output_sha256,
-        })
     }
 
     pub(crate) fn register_session_root(

@@ -586,6 +586,7 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
         ),
     });
     let mut validation_config = (*turn.config).clone();
+    validation_config.ephemeral = true;
     validation_config.model = Some("gpt-5.4".to_string());
     validation_config.model_reasoning_effort = Some(ReasoningEffort::High);
     validation_config
@@ -620,12 +621,8 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
         .get_thread(validation_agent.thread_id)
         .await
         .expect("validation fixture agent should exist");
-    validation_child
-        .append_rollout_items(&[RolloutItem::InterAgentCommunication(
-            validation_communication,
-        )])
-        .await
-        .expect("validation task should be persisted as server-owned evidence");
+    let validation_snapshot = validation_child.config_snapshot().await;
+    assert!(validation_snapshot.ephemeral);
     let child_turn = validation_child.session.new_default_turn().await;
     validation_child
         .session
@@ -642,10 +639,26 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
             }),
         )
         .await;
-    validation_child
-        .flush_rollout()
+    let completed = session
+        .services
+        .agent_control
+        .completed_workflow_agent(validation_agent.thread_id)
         .await
-        .expect("terminal workflow result should be persisted before validation");
+        .expect("ephemeral terminal workflow result should remain server-owned");
+    assert_eq!(
+        completed,
+        crate::agent::control::CompletedWorkflowAgent {
+            source: validation_snapshot.session_source,
+            task: Some(validation_communication.content),
+            output: terminal_result.to_string(),
+            model: Some(validation_snapshot.model),
+            reasoning_effort: validation_snapshot.reasoning_effort,
+            output_revision: 1,
+            output_sha256: crate::extended_workflow::sha256_bytes(
+                terminal_result.to_string().as_bytes()
+            ),
+        }
+    );
     let validation_target = validation_agent.thread_id.to_string();
 
     let mut substituted_result = terminal_result.clone();
@@ -690,10 +703,6 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
             }),
         )
         .await;
-    validation_child
-        .flush_rollout()
-        .await
-        .expect("targeted correction revision should be persisted before retry");
 
     let accepted = ValidateWorkflowResultHandler
         .handle(invocation(

@@ -1896,28 +1896,24 @@ impl Session {
         }
     }
 
-    /// Forwards terminal turn events from spawned MultiAgentV2 children to their direct parent.
+    /// Captures terminal workflow results and notifies a spawned MultiAgentV2 child's parent.
     async fn maybe_notify_parent_of_terminal_turn(
         &self,
         turn_context: &TurnContext,
         msg: &EventMsg,
     ) {
-        if turn_context.multi_agent_version != MultiAgentVersion::V2 {
+        let captures_workflow_result = turn_context.session_source.is_read_only_subagent()
+            && turn_context
+                .session_source
+                .get_extended_workflow_agent_identity()
+                .is_some();
+        if turn_context.multi_agent_version != MultiAgentVersion::V2 && !captures_workflow_result {
             return;
         }
 
         if !matches!(msg, EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_)) {
             return;
         }
-
-        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id,
-            agent_path: Some(child_agent_path),
-            ..
-        }) = &turn_context.session_source
-        else {
-            return;
-        };
 
         let status = match turn_context.terminal_error.lock().await.take() {
             Some(error) => {
@@ -1935,6 +1931,22 @@ impl Session {
         if !is_final(&status) {
             return;
         }
+
+        self.services
+            .agent_control
+            .record_in_memory_workflow_agent_terminal(self.thread_id, &status);
+
+        if turn_context.multi_agent_version != MultiAgentVersion::V2 {
+            return;
+        }
+        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            agent_path: Some(child_agent_path),
+            ..
+        }) = &turn_context.session_source
+        else {
+            return;
+        };
 
         self.forward_child_completion_to_parent(
             turn_context,
