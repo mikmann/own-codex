@@ -712,6 +712,30 @@ async fn maximum_bounded_reviewer_contract_persists_and_validates_child() -> Res
     assert!(child_input.contains(&root_prompt));
     assert!(child_input.contains(&change_summary));
     assert!(child_input.contains("<extended_workflow_result_contract>"));
+    let wait_followup = server
+        .received_requests()
+        .await
+        .expect("responses requests should be recorded")
+        .into_iter()
+        .find(|request| {
+            request_body_contains(request, WAIT_CALL_ID)
+                && request_body_contains(request, "function_call_output")
+        })
+        .expect("root should continue after the reviewer completion notification");
+    let wait_body = request_body_json(&wait_followup).expect("wait follow-up should contain JSON");
+    let wait_output = wait_body
+        .get("input")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|item| item.get("call_id").and_then(Value::as_str) == Some(WAIT_CALL_ID))
+        .and_then(|item| item.get("output"))
+        .and_then(Value::as_str)
+        .expect("wait follow-up should contain the wait_agent output");
+    assert_eq!(
+        serde_json::from_str::<Value>(wait_output)?,
+        json!({"message": "Wait completed.", "timed_out": false})
+    );
     let final_request = final_request.single_request();
     let close_output = final_request
         .function_call_output_text(CLOSE_CALL_ID)

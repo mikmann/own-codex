@@ -1907,7 +1907,12 @@ impl Session {
                 .session_source
                 .get_extended_workflow_agent_identity()
                 .is_some();
-        if turn_context.multi_agent_version != MultiAgentVersion::V2 && !captures_workflow_result {
+        // Workflow children disable their own agent tools, so their turn-level version can be
+        // `Disabled` even though the session retains its V2 lineage. Completion routing follows
+        // that lineage; otherwise `wait_agent` sleeps until its full timeout after a child exits.
+        let uses_multi_agent_v2 = turn_context.multi_agent_version == MultiAgentVersion::V2
+            || self.multi_agent_version() == Some(MultiAgentVersion::V2);
+        if !uses_multi_agent_v2 && !captures_workflow_result {
             return;
         }
 
@@ -1936,7 +1941,7 @@ impl Session {
             .agent_control
             .record_in_memory_workflow_agent_terminal(self.thread_id, &status);
 
-        if turn_context.multi_agent_version != MultiAgentVersion::V2 {
+        if !uses_multi_agent_v2 {
             return;
         }
         let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
