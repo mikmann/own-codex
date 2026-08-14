@@ -43,6 +43,8 @@ async fn sandbox_fetches_and_enforces_cloud_managed_permission_profile() -> Resu
     }]);
 
     let codex_home = TempDir::new()?;
+    let sandbox_temp = codex_home.path().join("sandbox-tmp");
+    std::fs::create_dir(&sandbox_temp)?;
     std::fs::write(
         codex_home.path().join("config.toml"),
         format!(
@@ -103,6 +105,8 @@ async fn sandbox_fetches_and_enforces_cloud_managed_permission_profile() -> Resu
     let output = Command::new(&codex)
         .current_dir(codex_home.path())
         .env("CODEX_HOME", codex_home.path())
+        .env("TEMP", &sandbox_temp)
+        .env("TMP", &sandbox_temp)
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
         .env_remove("CODEX_ACCESS_TOKEN")
