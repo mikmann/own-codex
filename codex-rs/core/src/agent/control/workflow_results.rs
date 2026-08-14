@@ -229,7 +229,7 @@ impl AgentControl {
     }
 }
 
-fn workflow_assignment_payload(author: &str, recipient: &str, content: &str) -> String {
+pub(super) fn workflow_assignment_payload(author: &str, recipient: &str, content: &str) -> String {
     let prefix =
         format!("Message Type: NEW_TASK\nTask name: {recipient}\nSender: {author}\nPayload:\n");
     content.strip_prefix(&prefix).unwrap_or(content).to_string()
@@ -291,3 +291,7 @@ fn completed_workflow_agent_from_status(
         output_sha256,
     })
 }
+
+#[cfg(test)]
+#[path = "workflow_results_tests.rs"]
+mod tests;

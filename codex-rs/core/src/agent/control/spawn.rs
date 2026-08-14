@@ -504,7 +504,14 @@ impl AgentControl {
                 if source.is_read_only_subagent()
                     && source.get_extended_workflow_agent_identity().is_some() =>
             {
-                Some((source.clone(), communication.content.clone()))
+                Some((
+                    source.clone(),
+                    super::workflow_results::workflow_assignment_payload(
+                        communication.author.as_str(),
+                        communication.recipient.as_str(),
+                        &communication.content,
+                    ),
+                ))
             }
             _ => None,
         };

@@ -7,6 +7,9 @@ use crate::agent_communication::AgentCommunicationKind;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::config::PermissionProfileSnapshot;
+use crate::context::ContextualUserFragment;
+use crate::context::InterAgentMessage;
+use crate::context::InterAgentMessageType;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
@@ -592,11 +595,19 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
     validation_config
         .apply_read_only_subagent_ceiling()
         .expect("validation child should be read-only");
+    let validation_author = AgentPath::root();
+    let validation_message = InterAgentMessage::new(
+        InterAgentMessageType::NewTask,
+        validation_path.clone(),
+        validation_author.clone(),
+        validation_task,
+    )
+    .render();
     let validation_communication = InterAgentCommunication::new(
-        AgentPath::root(),
+        validation_author,
         validation_path,
         Vec::new(),
-        validation_task.to_string(),
+        validation_message,
         /*trigger_turn*/ false,
     );
     let validation_agent = session
@@ -649,7 +660,7 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
         completed,
         crate::agent::control::CompletedWorkflowAgent {
             source: validation_snapshot.session_source,
-            task: Some(validation_communication.content),
+            task: Some(validation_task.to_string()),
             output: terminal_result.to_string(),
             model: Some(validation_snapshot.model),
             reasoning_effort: validation_snapshot.reasoning_effort,
