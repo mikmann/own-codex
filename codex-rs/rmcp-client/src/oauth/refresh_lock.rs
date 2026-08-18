@@ -7,14 +7,16 @@
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use codex_utils_home_dir::find_codex_home;
+use codex_utils_home_dir::find_codex_auth_home;
 use sha2::Digest;
 use sha2::Sha256;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::time::sleep;
 use tokio::time::timeout;
 
@@ -32,9 +34,16 @@ pub(super) struct RefreshCredentialLock {
 impl RefreshCredentialLock {
     pub(super) async fn acquire_for_server(server_name: &str, url: &str) -> Result<Self> {
         let store_key = super::compute_store_key(server_name, url)?;
-        let codex_home = find_codex_home()?;
+        let codex_home = find_codex_auth_home()?;
         Self::acquire_in(&codex_home, &store_key, REFRESH_LOCK_ACQUIRE_TIMEOUT)
             .await
+            .with_context(|| format!("failed to acquire OAuth credential lock for {server_name}"))
+    }
+
+    pub(super) fn acquire_for_server_blocking(server_name: &str, url: &str) -> Result<Self> {
+        let store_key = super::compute_store_key(server_name, url)?;
+        let codex_home = find_codex_auth_home()?;
+        Self::acquire_in_blocking(&codex_home, &store_key, REFRESH_LOCK_ACQUIRE_TIMEOUT)
             .with_context(|| format!("failed to acquire OAuth credential lock for {server_name}"))
     }
 
@@ -43,25 +52,7 @@ impl RefreshCredentialLock {
         store_key: &str,
         acquire_timeout: Duration,
     ) -> Result<Self> {
-        // Scope coordination to CODEX_HOME alongside File and Secrets state. Direct keyring
-        // coordination across homes needs a separate cross-platform rendezvous.
-        // TODO(stevenlee): define that rendezvous before expanding this lock's scope.
-        let mut hasher = Sha256::new();
-        hasher.update(store_key.as_bytes());
-        let path = codex_home
-            .join(REFRESH_LOCK_DIR)
-            .join(format!("{:x}.lock", hasher.finalize()));
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .with_context(|| format!("failed to open OAuth refresh lock {}", path.display()))?;
+        let (file, path) = open_lock_file(codex_home, store_key)?;
 
         // Bound every contender, but keep the acquired lock for the full provider request and
         // persistence transaction. Releasing it while awaiting the provider would allow concurrent
@@ -97,6 +88,64 @@ impl RefreshCredentialLock {
 
         Ok(Self { _file: file })
     }
+
+    fn acquire_in_blocking(
+        codex_home: &Path,
+        store_key: &str,
+        acquire_timeout: Duration,
+    ) -> Result<Self> {
+        let (file, path) = open_lock_file(codex_home, store_key)?;
+        let deadline = Instant::now() + acquire_timeout;
+        let mut reported_contention = false;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    if !reported_contention {
+                        tracing::debug!(
+                            target: LOCK_CONTENTION_EVENT_TARGET,
+                            lock_path = %path.display(),
+                            "waiting for another process to finish refreshing MCP OAuth credentials"
+                        );
+                        reported_contention = true;
+                    }
+                    std::thread::sleep(REFRESH_LOCK_RETRY_SLEEP);
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err(anyhow!(
+                        "timed out after {acquire_timeout:?} waiting for OAuth refresh lock {}",
+                        path.display()
+                    ));
+                }
+                Err(error) => {
+                    return Err(std::io::Error::from(error)).with_context(|| {
+                        format!("failed to lock OAuth refresh lock {}", path.display())
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn open_lock_file(codex_home: &Path, store_key: &str) -> Result<(File, PathBuf)> {
+    // Scope coordination to the credential home alongside File, Secrets, and the Direct keyring
+    // account namespace.
+    let mut hasher = Sha256::new();
+    hasher.update(store_key.as_bytes());
+    let path = codex_home
+        .join(REFRESH_LOCK_DIR)
+        .join(format!("{:x}.lock", hasher.finalize()));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("failed to open OAuth refresh lock {}", path.display()))?;
+    Ok((file, path))
 }
 
 #[cfg(test)]

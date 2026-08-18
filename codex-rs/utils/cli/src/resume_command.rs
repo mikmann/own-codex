@@ -2,6 +2,25 @@
 
 use codex_protocol::ThreadId;
 use codex_shell_command::parse_command::shlex_join;
+use std::ffi::OsStr;
+
+const STATE_SCOPE_ENV: &str = "CODEX_EXTENDED_WORKFLOW_STATE_SCOPE";
+const SHARED_STATE_SCOPE: &str = "shared";
+const COMPATIBILITY_STATE_SCOPE: &str = "compatibility";
+
+fn resume_command_prefix() -> &'static str {
+    resume_command_prefix_for_scope(std::env::var_os(STATE_SCOPE_ENV).as_deref())
+}
+
+fn resume_command_prefix_for_scope(state_scope: Option<&OsStr>) -> &'static str {
+    match state_scope {
+        Some(scope) if scope == OsStr::new(SHARED_STATE_SCOPE) => {
+            "codex-extended-workflow --shared-state resume"
+        }
+        Some(scope) if scope == OsStr::new(COMPATIBILITY_STATE_SCOPE) => "codex resume",
+        _ => "codex-extended-workflow resume",
+    }
+}
 
 pub fn resume_command(thread_name: Option<&str>, thread_id: Option<ThreadId>) -> Option<String> {
     let resume_target = thread_name
@@ -9,12 +28,13 @@ pub fn resume_command(thread_name: Option<&str>, thread_id: Option<ThreadId>) ->
         .map(str::to_string)
         .or_else(|| thread_id.map(|thread_id| thread_id.to_string()));
     resume_target.map(|target| {
+        let prefix = resume_command_prefix();
         let needs_double_dash = target.starts_with('-');
         let escaped = shlex_join(&[target]);
         if needs_double_dash {
-            format!("codex-extended-workflow resume -- {escaped}")
+            format!("{prefix} -- {escaped}")
         } else {
-            format!("codex-extended-workflow resume {escaped}")
+            format!("{prefix} {escaped}")
         }
     })
 }
@@ -23,7 +43,8 @@ pub fn resume_hint(thread_name: Option<&str>, thread_id: Option<ThreadId>) -> Op
     let thread_id = thread_id?;
     match thread_name.filter(|name| !name.is_empty()) {
         Some(thread_name) => Some(format!(
-            "codex-extended-workflow resume, then select {thread_name} ({thread_id})"
+            "{}, then select {thread_name} ({thread_id})",
+            resume_command_prefix()
         )),
         None => resume_command(/*thread_name*/ None, Some(thread_id)),
     }
@@ -58,6 +79,22 @@ mod tests {
     fn returns_none_without_a_resume_target() {
         let command = resume_command(/*thread_name*/ None, /*thread_id*/ None);
         assert_eq!(command, None);
+    }
+
+    #[test]
+    fn shared_state_scope_is_preserved_in_resume_commands() {
+        assert_eq!(
+            resume_command_prefix_for_scope(Some(OsStr::new("shared"))),
+            "codex-extended-workflow --shared-state resume"
+        );
+        assert_eq!(
+            resume_command_prefix_for_scope(Some(OsStr::new("isolated"))),
+            "codex-extended-workflow resume"
+        );
+        assert_eq!(
+            resume_command_prefix_for_scope(Some(OsStr::new("compatibility"))),
+            "codex resume"
+        );
     }
 
     #[test]

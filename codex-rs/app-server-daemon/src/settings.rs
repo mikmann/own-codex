@@ -12,6 +12,8 @@ pub(crate) struct DaemonSettings {
     pub(crate) remote_control_enabled: bool,
     #[serde(default)]
     pub(crate) extended_workflow_default_enabled: bool,
+    #[serde(default)]
+    pub(crate) extended_workflow_shared_state_enabled: bool,
 }
 
 impl DaemonSettings {
@@ -51,6 +53,8 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::DaemonSettings;
+    use crate::DaemonModeDefaults;
+    use crate::product_modes_match;
 
     #[test]
     fn daemon_settings_use_camel_case_json() {
@@ -58,9 +62,10 @@ mod tests {
             serde_json::to_string(&DaemonSettings {
                 remote_control_enabled: true,
                 extended_workflow_default_enabled: true,
+                extended_workflow_shared_state_enabled: true,
             })
             .expect("serialize"),
-            r#"{"remoteControlEnabled":true,"extendedWorkflowDefaultEnabled":true}"#
+            r#"{"remoteControlEnabled":true,"extendedWorkflowDefaultEnabled":true,"extendedWorkflowSharedStateEnabled":true}"#
         );
     }
 
@@ -72,7 +77,33 @@ mod tests {
             DaemonSettings {
                 remote_control_enabled: true,
                 extended_workflow_default_enabled: false,
+                extended_workflow_shared_state_enabled: false,
             }
         );
+    }
+
+    #[test]
+    fn product_mode_distinguishes_shared_and_non_shared_extended_daemons() {
+        let explicit_or_isolated = DaemonSettings {
+            remote_control_enabled: true,
+            extended_workflow_default_enabled: true,
+            extended_workflow_shared_state_enabled: false,
+        };
+        let shared = DaemonModeDefaults {
+            extended_workflow_default_enabled: true,
+            extended_workflow_shared_state_enabled: true,
+        };
+
+        assert!(!product_modes_match(&explicit_or_isolated, shared));
+        assert!(!product_modes_match(
+            &DaemonSettings {
+                extended_workflow_shared_state_enabled: true,
+                ..explicit_or_isolated
+            },
+            DaemonModeDefaults {
+                extended_workflow_default_enabled: true,
+                extended_workflow_shared_state_enabled: false,
+            }
+        ));
     }
 }

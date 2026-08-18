@@ -20,15 +20,18 @@ pub(crate) struct BackendPaths {
     pub(crate) update_pid_file: PathBuf,
     pub(crate) remote_control_enabled: bool,
     pub(crate) extended_workflow_default_enabled: bool,
+    pub(crate) extended_workflow_shared_state_enabled: bool,
 }
 
 pub(crate) fn pid_backend(paths: BackendPaths) -> PidBackend {
+    let shared_state_enabled = paths.extended_workflow_shared_state_enabled;
     PidBackend::new(
         paths.codex_bin,
         paths.pid_file,
         paths.remote_control_enabled,
         paths.extended_workflow_default_enabled,
     )
+    .shared_state_enabled(shared_state_enabled)
 }
 
 pub(crate) fn pid_update_loop_backend(paths: BackendPaths) -> PidBackend {

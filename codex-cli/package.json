@@ -1,6 +1,6 @@
 {
   "name": "codex-extended-workflow",
-  "version": "0.147.1-alpha-2",
+  "version": "0.147.1-alpha-3",
   "description": "A local Codex CLI fork with a configurable expert and reviewer workflow.",
   "license": "Apache-2.0",
   "bin": {

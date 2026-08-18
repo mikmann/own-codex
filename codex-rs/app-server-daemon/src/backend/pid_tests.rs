@@ -260,6 +260,48 @@ fn app_server_extended_workflow_uses_one_shot_launcher_marker() {
 }
 
 #[test]
+fn app_server_extended_workflow_uses_persisted_shared_state_mode() {
+    let extended = PidBackend::new(
+        "codex".into(),
+        "app-server.pid".into(),
+        /*remote_control_enabled*/ true,
+        /*extended_workflow_default_enabled*/ true,
+    )
+    .shared_state_enabled(true);
+    let isolated = PidBackend::new(
+        "codex".into(),
+        "app-server.pid".into(),
+        /*remote_control_enabled*/ true,
+        /*extended_workflow_default_enabled*/ true,
+    );
+    let compatibility = PidBackend::new(
+        "codex".into(),
+        "app-server.pid".into(),
+        /*remote_control_enabled*/ true,
+        /*extended_workflow_default_enabled*/ false,
+    );
+
+    assert_eq!(
+        extended.command_args(),
+        vec![
+            "--shared-state",
+            "app-server",
+            "--remote-control",
+            "--listen",
+            "unix://",
+        ]
+    );
+    assert_eq!(
+        isolated.command_args(),
+        vec!["app-server", "--remote-control", "--listen", "unix://"]
+    );
+    assert_eq!(
+        compatibility.command_args(),
+        vec!["app-server", "--remote-control", "--listen", "unix://"]
+    );
+}
+
+#[test]
 fn app_server_extended_workflow_combines_launcher_and_remote_control_markers() {
     let backend = PidBackend::new(
         "codex".into(),

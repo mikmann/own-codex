@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 
-use codex_utils_home_dir::find_codex_home;
+use codex_utils_home_dir::find_codex_auth_home;
 
 const OAUTH_LOCK_DIR: &str = "mcp-oauth-locks";
 const STORE_LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -52,12 +52,9 @@ pub(super) struct OAuthStoreLock {
 
 impl OAuthStoreLock {
     pub(super) fn acquire(store: OAuthStore) -> Result<Self, OAuthStoreLockFailure> {
-        // This lock intentionally follows the existing local File/Secrets credential-store
-        // authority. Those stores are CODEX_HOME-backed today: if CODEX_HOME is unset they use
-        // the default home (`~/.codex`), and if an embedder has no local home/filesystem authority
-        // those stores already cannot operate. A future provider-backed credential store should
-        // provide its own matching lock authority instead of using this local path.
-        let codex_home = find_codex_home()
+        // This lock follows the File/Secrets credential authority, including the isolated
+        // extended-workflow auth home used with shared state.
+        let codex_home = find_codex_auth_home()
             .map_err(|source| OAuthStoreLockFailure::CodexHome { store, source })?;
         Self::acquire_in(&codex_home, store, STORE_LOCK_ACQUIRE_TIMEOUT)
     }

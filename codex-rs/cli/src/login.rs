@@ -167,22 +167,20 @@ pub async fn run_login_with_chatgpt(cli_config_overrides: CliConfigOverrides) ->
     let config = load_config_or_exit(cli_config_overrides).await;
     let _login_log_guard = init_login_file_logging(&config);
     tracing::info!("starting browser login flow");
+    let auth_config = config.auth_config();
 
-    if !config
-        .auth_config()
-        .is_login_method_allowed(ForcedLoginMethod::Chatgpt)
-    {
+    if !auth_config.is_login_method_allowed(ForcedLoginMethod::Chatgpt) {
         eprintln!("{CHATGPT_LOGIN_DISABLED_MESSAGE}");
         std::process::exit(1);
     }
 
-    let effective_chatgpt_workspaces = config.auth_config().effective_chatgpt_workspaces();
+    let effective_chatgpt_workspaces = auth_config.effective_chatgpt_workspaces();
     match login_with_chatgpt(
-        config.codex_home.to_path_buf(),
+        auth_config.codex_home,
         effective_chatgpt_workspaces,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-        config.auth_route_config(),
+        auth_config.auth_credentials_store_mode,
+        auth_config.keyring_backend_kind,
+        auth_config.auth_route_config,
     )
     .await
     {
@@ -204,20 +202,18 @@ pub async fn run_login_with_api_key(
     let config = load_config_or_exit(cli_config_overrides).await;
     let _login_log_guard = init_login_file_logging(&config);
     tracing::info!("starting api key login flow");
+    let auth_config = config.auth_config();
 
-    if !config
-        .auth_config()
-        .is_login_method_allowed(ForcedLoginMethod::Api)
-    {
+    if !auth_config.is_login_method_allowed(ForcedLoginMethod::Api) {
         eprintln!("{API_KEY_LOGIN_DISABLED_MESSAGE}");
         std::process::exit(1);
     }
 
     match login_with_api_key(
-        &config.codex_home,
+        &auth_config.codex_home,
         &api_key,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
+        auth_config.auth_credentials_store_mode,
+        auth_config.keyring_backend_kind,
     ) {
         Ok(_) => {
             eprintln!("{LOGIN_SUCCESS_MESSAGE}");
@@ -237,25 +233,22 @@ pub async fn run_login_with_access_token(
     let config = load_config_or_exit(cli_config_overrides).await;
     let _login_log_guard = init_login_file_logging(&config);
     tracing::info!("starting access token login flow");
+    let auth_config = config.auth_config();
 
-    if !config
-        .auth_config()
-        .is_login_method_allowed(ForcedLoginMethod::Chatgpt)
-    {
+    if !auth_config.is_login_method_allowed(ForcedLoginMethod::Chatgpt) {
         eprintln!("{ACCESS_TOKEN_LOGIN_DISABLED_MESSAGE}");
         std::process::exit(1);
     }
 
-    let auth_route_config = config.auth_route_config();
-    let effective_chatgpt_workspaces = config.auth_config().effective_chatgpt_workspaces();
+    let effective_chatgpt_workspaces = auth_config.effective_chatgpt_workspaces();
     match login_with_access_token(
-        &config.codex_home,
+        &auth_config.codex_home,
         &access_token,
-        config.cli_auth_credentials_store_mode,
+        auth_config.auth_credentials_store_mode,
         effective_chatgpt_workspaces.as_deref(),
-        Some(&config.chatgpt_base_url),
-        config.auth_keyring_backend_kind(),
-        &auth_route_config,
+        auth_config.chatgpt_base_url.as_deref(),
+        auth_config.keyring_backend_kind,
+        &auth_config.auth_route_config,
     )
     .await
     {
@@ -320,29 +313,26 @@ pub async fn run_login_with_device_code(
     let config = load_config_or_exit(cli_config_overrides).await;
     let _login_log_guard = init_login_file_logging(&config);
     tracing::info!("starting device code login flow");
-    if !config
-        .auth_config()
-        .is_login_method_allowed(ForcedLoginMethod::Chatgpt)
-    {
+    let auth_config = config.auth_config();
+    if !auth_config.is_login_method_allowed(ForcedLoginMethod::Chatgpt) {
         eprintln!("{CHATGPT_LOGIN_DISABLED_MESSAGE}");
         std::process::exit(1);
     }
-    let auth_route_config = config.auth_route_config();
     clear_existing_auth_before_login(
-        &config.codex_home,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-        &auth_route_config,
+        &auth_config.codex_home,
+        auth_config.auth_credentials_store_mode,
+        auth_config.keyring_backend_kind,
+        &auth_config.auth_route_config,
     )
     .await;
-    let effective_chatgpt_workspaces = config.auth_config().effective_chatgpt_workspaces();
+    let effective_chatgpt_workspaces = auth_config.effective_chatgpt_workspaces();
     let mut opts = ServerOptions::new(
-        config.codex_home.to_path_buf(),
+        auth_config.codex_home,
         client_id.unwrap_or(CLIENT_ID.to_string()),
         effective_chatgpt_workspaces,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-        auth_route_config,
+        auth_config.auth_credentials_store_mode,
+        auth_config.keyring_backend_kind,
+        auth_config.auth_route_config,
     );
     if let Some(iss) = issuer_base_url {
         opts.issuer = iss;
@@ -371,30 +361,27 @@ pub async fn run_login_with_device_code_fallback_to_browser(
     let config = load_config_or_exit(cli_config_overrides).await;
     let _login_log_guard = init_login_file_logging(&config);
     tracing::info!("starting login flow with device code fallback");
-    if !config
-        .auth_config()
-        .is_login_method_allowed(ForcedLoginMethod::Chatgpt)
-    {
+    let auth_config = config.auth_config();
+    if !auth_config.is_login_method_allowed(ForcedLoginMethod::Chatgpt) {
         eprintln!("{CHATGPT_LOGIN_DISABLED_MESSAGE}");
         std::process::exit(1);
     }
-    let auth_route_config = config.auth_route_config();
     clear_existing_auth_before_login(
-        &config.codex_home,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-        &auth_route_config,
+        &auth_config.codex_home,
+        auth_config.auth_credentials_store_mode,
+        auth_config.keyring_backend_kind,
+        &auth_config.auth_route_config,
     )
     .await;
 
-    let effective_chatgpt_workspaces = config.auth_config().effective_chatgpt_workspaces();
+    let effective_chatgpt_workspaces = auth_config.effective_chatgpt_workspaces();
     let mut opts = ServerOptions::new(
-        config.codex_home.to_path_buf(),
+        auth_config.codex_home,
         client_id.unwrap_or(CLIENT_ID.to_string()),
         effective_chatgpt_workspaces,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-        auth_route_config,
+        auth_config.auth_credentials_store_mode,
+        auth_config.keyring_backend_kind,
+        auth_config.auth_route_config,
     );
     if let Some(iss) = issuer_base_url {
         opts.issuer = iss;
@@ -488,13 +475,13 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
 
 pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
-    let auth_route_config = config.auth_route_config();
+    let auth_config = config.auth_config();
 
     match logout_with_revoke(
-        &config.codex_home,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-        &auth_route_config,
+        &auth_config.codex_home,
+        auth_config.auth_credentials_store_mode,
+        auth_config.keyring_backend_kind,
+        &auth_config.auth_route_config,
     )
     .await
     {

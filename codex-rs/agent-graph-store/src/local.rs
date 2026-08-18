@@ -915,6 +915,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_workflow_validation_completion_is_accepted_exactly_once() {
+        let fixture = state_runtime().await;
+        let store = LocalAgentGraphStore::new(fixture.state_db);
+        let root = thread_id(/*suffix*/ 915);
+        let child = thread_id(/*suffix*/ 902);
+        let output_sha256 = "7".repeat(64);
+        assert_eq!(
+            store
+                .begin_workflow_validation(validation_submission(
+                    root,
+                    "turn-concurrent",
+                    "reviewer:security",
+                    1,
+                    &output_sha256,
+                ))
+                .await
+                .expect("review should reserve"),
+            WorkflowValidationDecision::Attempt(1)
+        );
+
+        let completion = WorkflowValidationCompletion {
+            root_thread_id: root,
+            turn_id: "turn-concurrent".to_string(),
+            validation_key: "reviewer:security".to_string(),
+            submission: 1,
+            output_revision: 1,
+            output_sha256: output_sha256.clone(),
+            reviewer_pass: true,
+            has_high_or_critical: false,
+        };
+        let (first, second) = tokio::join!(
+            store.complete_workflow_validation(completion.clone()),
+            store.complete_workflow_validation(completion),
+        );
+        let mut accepted = [
+            first.expect("first concurrent completion should finish"),
+            second.expect("second concurrent completion should finish"),
+        ];
+        accepted.sort_unstable();
+        assert_eq!(accepted, [false, true]);
+        assert_eq!(
+            store
+                .list_workflow_reviewer_validations(root, "turn-concurrent")
+                .await
+                .expect("accepted reviewer evidence should load"),
+            vec![WorkflowReviewerValidation {
+                agent_thread_id: child,
+                role: "Security".to_string(),
+                output_revision: 1,
+                output_sha256,
+                reviewer_pass: true,
+                has_high_or_critical: false,
+            }]
+        );
+    }
+
+    #[tokio::test]
     async fn newer_reviewer_output_invalidates_an_accepted_pass() {
         let fixture = state_runtime().await;
         let store = LocalAgentGraphStore::new(fixture.state_db);

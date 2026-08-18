@@ -80,10 +80,27 @@ pub struct DaemonProductDefaults {
     pub extended_workflow_default_enabled: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DaemonModeDefaults {
+    extended_workflow_default_enabled: bool,
+    extended_workflow_shared_state_enabled: bool,
+}
+
+impl From<DaemonProductDefaults> for DaemonModeDefaults {
+    fn from(defaults: DaemonProductDefaults) -> Self {
+        Self {
+            extended_workflow_default_enabled: defaults.extended_workflow_default_enabled,
+            extended_workflow_shared_state_enabled: defaults.extended_workflow_default_enabled
+                && std::env::var_os("CODEX_EXTENDED_WORKFLOW_STATE_SCOPE").as_deref()
+                    == Some(std::ffi::OsStr::new("shared")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProductModeRequirement {
     Persisted,
-    Match(DaemonProductDefaults),
+    Match(DaemonModeDefaults),
 }
 
 /// Passively probes an existing app-server socket and returns its reported
@@ -212,7 +229,10 @@ pub async fn run_with_product_defaults(
 ) -> Result<LifecycleOutput> {
     ensure_supported_platform()?;
     Daemon::from_environment()?
-        .run(command, ProductModeRequirement::Match(product_defaults))
+        .run(
+            command,
+            ProductModeRequirement::Match(product_defaults.into()),
+        )
         .await
 }
 
@@ -226,7 +246,7 @@ pub async fn bootstrap_with_product_defaults(
 ) -> Result<BootstrapOutput> {
     ensure_supported_platform()?;
     Daemon::from_environment()?
-        .bootstrap(options, product_defaults)
+        .bootstrap(options, product_defaults.into())
         .await
 }
 
@@ -239,7 +259,7 @@ pub async fn ensure_remote_control_ready_with_product_defaults(
 ) -> Result<RemoteControlReadyOutput> {
     ensure_supported_platform()?;
     Daemon::from_environment()?
-        .ensure_remote_control_ready(product_defaults)
+        .ensure_remote_control_ready(product_defaults.into())
         .await
 }
 
@@ -270,7 +290,7 @@ pub async fn start_remote_control_pairing_with_product_defaults(
 ) -> Result<RemoteControlPairingStartResponse> {
     ensure_supported_platform()?;
     Daemon::from_environment()?
-        .start_remote_control_pairing(ProductModeRequirement::Match(product_defaults))
+        .start_remote_control_pairing(ProductModeRequirement::Match(product_defaults.into()))
         .await
 }
 
@@ -287,7 +307,7 @@ pub async fn set_remote_control_with_product_defaults(
 ) -> Result<RemoteControlOutput> {
     ensure_supported_platform()?;
     Daemon::from_environment()?
-        .set_remote_control(mode, ProductModeRequirement::Match(product_defaults))
+        .set_remote_control(mode, ProductModeRequirement::Match(product_defaults.into()))
         .await
 }
 
@@ -555,7 +575,7 @@ impl Daemon {
     async fn bootstrap(
         &self,
         options: BootstrapOptions,
-        product_defaults: DaemonProductDefaults,
+        product_defaults: DaemonModeDefaults,
     ) -> Result<BootstrapOutput> {
         let _operation_lock = self.acquire_operation_lock().await?;
         self.bootstrap_locked(options, product_defaults).await
@@ -563,13 +583,12 @@ impl Daemon {
 
     async fn ensure_remote_control_started(
         &self,
-        product_defaults: DaemonProductDefaults,
+        product_defaults: DaemonModeDefaults,
     ) -> Result<RemoteControlStartOutput> {
         let _operation_lock = self.acquire_operation_lock().await?;
         let settings = self.load_settings().await?;
         if self.is_bootstrapped(&settings).await?
-            && settings.extended_workflow_default_enabled
-                == product_defaults.extended_workflow_default_enabled
+            && product_modes_match(&settings, product_defaults)
         {
             if settings.extended_workflow_default_enabled {
                 let updater = backend::pid_update_loop_backend(self.backend_paths(&settings));
@@ -597,7 +616,7 @@ impl Daemon {
 
     async fn ensure_remote_control_ready(
         &self,
-        product_defaults: DaemonProductDefaults,
+        product_defaults: DaemonModeDefaults,
     ) -> Result<RemoteControlReadyOutput> {
         let daemon = self.ensure_remote_control_started(product_defaults).await?;
         let remote_control =
@@ -635,13 +654,14 @@ impl Daemon {
             return Ok(());
         };
         let settings = self.load_settings().await?;
-        if settings.extended_workflow_default_enabled
-            != product_defaults.extended_workflow_default_enabled
-        {
-            let expected_mode = if product_defaults.extended_workflow_default_enabled {
-                "codex-extended-workflow"
-            } else {
-                "codex compatibility"
+        if !product_modes_match(&settings, product_defaults) {
+            let expected_mode = match (
+                product_defaults.extended_workflow_default_enabled,
+                product_defaults.extended_workflow_shared_state_enabled,
+            ) {
+                (false, _) => "codex compatibility",
+                (true, false) => "isolated or explicit codex-extended-workflow",
+                (true, true) => "codex-extended-workflow --shared-state",
             };
             return Err(anyhow!(
                 "app-server daemon is configured for a different product mode; run `app-server daemon bootstrap` with {expected_mode} before starting or reconfiguring it"
@@ -712,11 +732,13 @@ impl Daemon {
     async fn bootstrap_locked(
         &self,
         options: BootstrapOptions,
-        product_defaults: DaemonProductDefaults,
+        product_defaults: DaemonModeDefaults,
     ) -> Result<BootstrapOutput> {
         let settings = DaemonSettings {
             remote_control_enabled: options.remote_control_enabled,
             extended_workflow_default_enabled: product_defaults.extended_workflow_default_enabled,
+            extended_workflow_shared_state_enabled: product_defaults
+                .extended_workflow_shared_state_enabled,
         };
         self.ensure_managed_codex_bin(&settings).await?;
         if client::probe(&self.socket_path).await.is_ok()
@@ -855,6 +877,7 @@ impl Daemon {
             update_pid_file: self.update_pid_file.clone(),
             remote_control_enabled: settings.remote_control_enabled,
             extended_workflow_default_enabled: settings.extended_workflow_default_enabled,
+            extended_workflow_shared_state_enabled: settings.extended_workflow_shared_state_enabled,
         }
     }
 
@@ -936,6 +959,12 @@ impl Daemon {
             app_server_version,
         }
     }
+}
+
+fn product_modes_match(settings: &DaemonSettings, product_defaults: DaemonModeDefaults) -> bool {
+    settings.extended_workflow_default_enabled == product_defaults.extended_workflow_default_enabled
+        && settings.extended_workflow_shared_state_enabled
+            == product_defaults.extended_workflow_shared_state_enabled
 }
 
 fn remote_control_status(mode: RemoteControlMode) -> RemoteControlStatus {

@@ -5,7 +5,7 @@ second agent runtime or a repository-specific ticket format. The fork is based
 on the official `rust-v0.147.0` tag at
 `be6e8eac029b183056b7e4402879f15d2c85f61b`. The requested upstream spelling
 `v0.147.0` was absent and the use of `rust-v0.147.0` was explicitly approved.
-The distribution and local release tag use `v0.147.1-alpha-2`.
+The distribution and local release tag use `v0.147.1-alpha-3`.
 
 ## Architecture
 
@@ -352,6 +352,39 @@ The upstream code does not generate dedicated workflow receipt files.
 events as JSONL under the Codex home so sessions can be listed and resumed.
 Those files are required session history and are left untouched.
 
+The `codex-extended-workflow` launcher defaults to its own Codex home:
+`~/.codex-extended-workflow`. This separates local credentials, user
+configuration, sessions, logs, and the SQLite database from the compatibility
+`codex` launcher's normal `~/.codex` home. There is no automatic migration,
+copy, or fallback from Alpha-2 or normal Codex data. Consequently, an Alpha-2
+session is not visible to an isolated Alpha-3 invocation.
+
+Use `codex-extended-workflow --shared-state ...` to opt into the normal Codex
+state, configuration, sessions, logs, and SQLite database for one invocation.
+Credentials and MCP OAuth tokens remain in `~/.codex-extended-workflow`, so a
+shared-state invocation may require a separate extended-workflow login. This
+avoids concurrent normal/extended processes rotating or truncating the same
+credential files. For example:
+
+```shell
+codex-extended-workflow --shared-state resume <session-id>
+```
+
+Alternatively, `CODEX_HOME` selects an explicit home. Combining `CODEX_HOME`
+with `--shared-state` is rejected as ambiguous. Resume an explicit-home session
+with the same `CODEX_HOME` value. Explicit `CODEX_SQLITE_HOME`,
+`sqlite_home`, and `log_dir` overrides retain their upstream meaning and may
+place those individual stores outside the selected Codex home. Repository
+`.codex/config.toml` files and remote account/cloud data are not copied; they
+remain shared when the same repository or account is used.
+
+The separate default home is an accidental-sharing boundary, not a security
+boundary against another process running as the same local user. Alpha-3 does
+not attempt to prevent symlink, junction, reparse-point, or active TOCTOU path
+manipulation. Complete hardening would require OS-specific handle-relative I/O
+throughout each store; post-write canonicalization alone would not close that
+race and is outside this Alpha-3 change.
+
 Prompt source/template files under `codex-rs/prompts/` and embedded Markdown in
 `codex-rs/core/src/` are tracked build inputs, not generated repository
 artifacts. `codex-rs/core/src/prompt_debug.rs::build_prompt_input` assembles a
@@ -361,8 +394,9 @@ model-visible prompt in memory; `run_debug_prompt_input_command` in
 The extended workflow adds its policy and plan in memory and writes no separate
 prompt or receipt files. `audit_mode = true` marks the normal model-visible
 plan/session diagnostics as audit-enabled; it never creates a file. Compact
-validation metadata is persisted in the existing state database, not in a new
-repository artifact. Existing rollouts and prompt files are never deleted.
+validation metadata is persisted in the state database belonging to the
+selected Codex home, not in a new repository artifact. Existing rollouts and
+prompt files are never deleted.
 
 ## Safe repository preparation
 
@@ -411,7 +445,7 @@ the extended defaults while `bin/codex.js` remains the disabled-by-default
 compatibility entry point. Rust crate names and other public interfaces remain
 stable. App-server, foreground remote control, MCP tool sessions, and the
 TypeScript SDK propagate the same one-shot product default; an explicit
-configuration value still wins. Both launchers report `v0.147.1-alpha-2`.
+configuration value still wins. Both launchers report `v0.147.1-alpha-3`.
 
 The official app-server updater and update prompt are hard-disabled when the
 extended product mode is active, preventing a managed daemon from replacing

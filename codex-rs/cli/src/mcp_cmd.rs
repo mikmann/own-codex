@@ -33,7 +33,7 @@ use codex_mcp::should_retry_without_scopes;
 use codex_protocol::protocol::McpAuthStatus;
 use codex_rmcp_client::OAuthDiscoveryTimeout;
 use codex_rmcp_client::StreamableHttpRedirectMode;
-use codex_rmcp_client::delete_oauth_tokens;
+use codex_rmcp_client::delete_oauth_tokens_async;
 use codex_rmcp_client::perform_oauth_login;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_cli::format_env_display;
@@ -560,12 +560,14 @@ async fn run_logout(config: &Config, logout_args: LogoutArgs) -> Result<()> {
     };
     let credential_name = server.oauth_credential_name(&name);
 
-    match delete_oauth_tokens(
+    match delete_oauth_tokens_async(
         credential_name.as_ref(),
         &url,
         config.mcp_oauth_credentials_store_mode,
         config.auth_keyring_backend_kind(),
-    ) {
+    )
+    .await
+    {
         Ok(true) => println!("Removed OAuth credentials for '{name}'."),
         Ok(false) => println!("No OAuth credentials stored for '{name}'."),
         Err(err) => return Err(anyhow!("failed to delete OAuth credentials: {err}")),

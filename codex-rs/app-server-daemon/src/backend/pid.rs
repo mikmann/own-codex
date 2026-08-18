@@ -73,6 +73,7 @@ enum PidCommandKind {
     AppServer {
         remote_control_enabled: bool,
         extended_workflow_default_enabled: bool,
+        extended_workflow_shared_state_enabled: bool,
     },
     UpdateLoop,
 }
@@ -92,8 +93,20 @@ impl PidBackend {
             command_kind: PidCommandKind::AppServer {
                 remote_control_enabled,
                 extended_workflow_default_enabled,
+                extended_workflow_shared_state_enabled: false,
             },
         }
+    }
+
+    pub(crate) fn shared_state_enabled(mut self, shared_state_enabled: bool) -> Self {
+        if let PidCommandKind::AppServer {
+            extended_workflow_shared_state_enabled,
+            ..
+        } = &mut self.command_kind
+        {
+            *extended_workflow_shared_state_enabled = shared_state_enabled;
+        }
+        self
     }
 
     pub(crate) fn new_update_loop(codex_bin: PathBuf, pid_file: PathBuf) -> Self {
@@ -420,7 +433,7 @@ impl PidBackend {
 
     #[cfg(unix)]
     fn command_args(&self) -> Vec<&'static str> {
-        match self.command_kind {
+        let mut args = match self.command_kind {
             PidCommandKind::AppServer {
                 remote_control_enabled: true,
                 ..
@@ -430,7 +443,18 @@ impl PidBackend {
                 ..
             } => vec!["app-server", "--listen", "unix://"],
             PidCommandKind::UpdateLoop => vec!["app-server", "daemon", "pid-update-loop"],
+        };
+        if matches!(
+            self.command_kind,
+            PidCommandKind::AppServer {
+                extended_workflow_default_enabled: true,
+                extended_workflow_shared_state_enabled: true,
+                ..
+            }
+        ) {
+            args.insert(0, "--shared-state");
         }
+        args
     }
 
     #[cfg(unix)]
@@ -439,6 +463,7 @@ impl PidBackend {
             PidCommandKind::AppServer {
                 remote_control_enabled: false,
                 extended_workflow_default_enabled,
+                ..
             } => {
                 let mut env = vec![(REMOTE_CONTROL_DISABLED_ENV_VAR, "1")];
                 if extended_workflow_default_enabled {
@@ -449,10 +474,12 @@ impl PidBackend {
             PidCommandKind::AppServer {
                 remote_control_enabled: true,
                 extended_workflow_default_enabled: true,
+                ..
             } => vec![("CODEX_EXTENDED_WORKFLOW_LAUNCHER", "1")],
             PidCommandKind::AppServer {
                 remote_control_enabled: true,
                 extended_workflow_default_enabled: false,
+                ..
             }
             | PidCommandKind::UpdateLoop => Vec::new(),
         }

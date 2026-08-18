@@ -23,9 +23,23 @@ retained as a compatibility entry point. The primary launcher enables the
 extended workflow only when no CLI, repository, or global setting explicitly
 sets `extended_workflow.enabled`; the compatibility launcher preserves the
 upstream disabled default. The visible distribution version is
-`v0.147.1-alpha-2`. Automatic app-server updates are disabled in the extended
+`v0.147.1-alpha-3`. Automatic app-server updates are disabled in the extended
 product mode so this fork cannot silently replace itself with an official Codex
 package; the compatibility `codex` launcher retains upstream behavior.
+
+By default, the primary launcher keeps local credentials, configuration,
+sessions, logs, and SQLite state under `~/.codex-extended-workflow`, separate
+from the normal Codex home `~/.codex`. It never imports or falls back to Alpha-2
+or normal Codex data automatically. Use `--shared-state` when sharing normal
+Codex state and sessions is intentional; credentials and MCP OAuth tokens remain
+under `~/.codex-extended-workflow`. Alternatively, set `CODEX_HOME` to an
+explicit directory; that explicit home contains both state and credentials.
+These two overrides are mutually exclusive.
+
+This separation prevents accidental state reuse; it is not a security boundary
+against processes running as the same local user. Alpha-3 does not defend
+against symlink, junction, reparse-point, or active path-race manipulation by
+such a process.
 
 Prepare a repository safely with a preview first:
 
@@ -39,6 +53,7 @@ Inside the TUI, use `/prepare-extend-workflow` for the preview and
 
 ```shell
 codex-extended-workflow resume <session-id>
+codex-extended-workflow --shared-state resume <session-id>
 ```
 
 MultiAgentV2 also exposes `close_agent`: the main agent uses it after a

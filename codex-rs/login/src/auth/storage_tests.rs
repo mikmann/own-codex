@@ -476,6 +476,21 @@ fn keyring_auth_storage_compute_store_key_for_home_directory() -> anyhow::Result
 }
 
 #[test]
+fn extended_direct_keyring_auth_key_is_stable_when_home_is_created() -> anyhow::Result<()> {
+    let parent = tempdir()?;
+    let codex_home = parent.path().join("missing-auth-home");
+    let before = compute_store_key_for_scope(&codex_home, Some(OsStr::new("shared")))?;
+
+    std::fs::create_dir(&codex_home)?;
+
+    assert_eq!(
+        compute_store_key_for_scope(&codex_home, Some(OsStr::new("shared")))?,
+        before
+    );
+    Ok(())
+}
+
+#[test]
 fn direct_keyring_auth_storage_saves_legacy_keyring_entry() -> anyhow::Result<()> {
     let codex_home = tempdir()?;
     let mock_keyring = MockKeyringStore::default();

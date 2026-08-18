@@ -5,6 +5,7 @@ use serde::Serialize;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -229,13 +230,43 @@ static CODEX_AUTH_SECRET_NAME: Lazy<SecretName> =
         Err(err) => unreachable!("CODEX_AUTH should be a valid secret name: {err}"),
     });
 const KEYRING_SERVICE: &str = "Codex Auth";
+const STATE_SCOPE_ENV: &str = "CODEX_EXTENDED_WORKFLOW_STATE_SCOPE";
 
 // turns codex_home path into a stable, short key string
 fn compute_store_key(codex_home: &Path) -> std::io::Result<String> {
-    let canonical = codex_home
-        .canonicalize()
-        .unwrap_or_else(|_| codex_home.to_path_buf());
-    let path_str = canonical.to_string_lossy();
+    let state_scope = std::env::var_os(STATE_SCOPE_ENV);
+    compute_store_key_for_scope(codex_home, state_scope.as_deref())
+}
+
+fn compute_store_key_for_scope(
+    codex_home: &Path,
+    state_scope: Option<&OsStr>,
+) -> std::io::Result<String> {
+    let use_stable_path = match state_scope {
+        Some(scope)
+            if ["isolated", "shared", "explicit"]
+                .into_iter()
+                .any(|value| scope == OsStr::new(value)) =>
+        {
+            true
+        }
+        None => false,
+        Some(scope) if scope == OsStr::new("compatibility") => false,
+        Some(scope) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("unsupported extended-workflow state scope {scope:?}"),
+            ));
+        }
+    };
+    let key_path = if use_stable_path {
+        codex_home.to_path_buf()
+    } else {
+        codex_home
+            .canonicalize()
+            .unwrap_or_else(|_| codex_home.to_path_buf())
+    };
+    let path_str = key_path.to_string_lossy();
     let mut hasher = Sha256::new();
     hasher.update(path_str.as_bytes());
     let digest = hasher.finalize();

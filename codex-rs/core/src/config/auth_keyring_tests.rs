@@ -8,9 +8,57 @@ use codex_config::Sourced;
 use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::ForcedChatgptWorkspaceIds;
 use codex_features::FeaturesToml;
+use codex_login::AuthManagerConfig;
 use codex_protocol::config_types::ForcedLoginMethod;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
+use std::process::Command;
+use tempfile::TempDir;
+
+const AUTH_MANAGER_CONFIG_CHILD_ENV: &str = "CODEX_TEST_AUTH_MANAGER_CONFIG_CHILD";
+const STATE_SCOPE_ENV: &str = "CODEX_EXTENDED_WORKFLOW_STATE_SCOPE";
+
+#[test]
+fn shared_state_runtime_auth_uses_the_extended_auth_home() -> anyhow::Result<()> {
+    let output = Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "config::auth_keyring::tests::shared_state_runtime_auth_uses_the_extended_auth_home_child",
+            "--ignored",
+        ])
+        .env(AUTH_MANAGER_CONFIG_CHILD_ENV, "1")
+        .env(STATE_SCOPE_ENV, "shared")
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "auth config child failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "runs in an isolated child process"]
+async fn shared_state_runtime_auth_uses_the_extended_auth_home_child() -> anyhow::Result<()> {
+    assert_eq!(
+        std::env::var(AUTH_MANAGER_CONFIG_CHILD_ENV).as_deref(),
+        Ok("1")
+    );
+    let user_home = TempDir::new()?;
+    let state_home = user_home.path().join(".codex");
+    std::fs::create_dir(&state_home)?;
+    let config = crate::config::ConfigBuilder::default()
+        .codex_home(state_home)
+        .build()
+        .await?;
+
+    assert_eq!(
+        AuthManagerConfig::codex_home(&config),
+        user_home.path().join(".codex-extended-workflow")
+    );
+    Ok(())
+}
 
 #[test]
 fn resolve_bootstrap_auth_keyring_backend_kind_uses_secret_auth_storage_feature()

@@ -8,6 +8,7 @@ use codex_features::FeatureConfigSource;
 use codex_features::FeatureOverrides;
 use codex_features::Features;
 use codex_login::AuthConfig;
+use codex_utils_home_dir::auth_home_for_state_home;
 use std::path::Path;
 
 impl Config {
@@ -19,7 +20,7 @@ impl Config {
 
     pub fn auth_config(&self) -> AuthConfig {
         AuthConfig {
-            codex_home: self.codex_home.to_path_buf(),
+            codex_home: auth_home_for_state_home(&self.codex_home),
             auth_credentials_store_mode: self.cli_auth_credentials_store_mode,
             keyring_backend_kind: self.auth_keyring_backend_kind(),
             forced_login_method: self.forced_login_method,
@@ -55,7 +56,7 @@ pub fn bootstrap_auth_config(
         })
         .filter(|workspaces| !workspaces.is_empty());
     let auth_config = AuthConfig {
-        codex_home: codex_home.to_path_buf(),
+        codex_home: auth_home_for_state_home(codex_home),
         auth_credentials_store_mode: config.cli_auth_credentials_store.unwrap_or_default(),
         keyring_backend_kind: resolve_bootstrap_auth_keyring_backend_kind(bootstrap_config)?,
         forced_login_method: config.forced_login_method,

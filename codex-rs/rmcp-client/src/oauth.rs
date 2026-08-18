@@ -16,6 +16,7 @@
 //!
 //! If the keyring is not available or fails, we fall back to CODEX_HOME/.credentials.json which is consistent with other coding CLI agents.
 
+mod keyring_namespace;
 mod refresh_lock;
 mod refresh_transaction;
 mod resolved_store;
@@ -40,6 +41,8 @@ use oauth2::RefreshToken;
 use oauth2::Scope;
 use oauth2::TokenResponse;
 use oauth2::basic::BasicTokenType;
+use refresh_lock::RefreshCredentialLock;
+use rmcp::transport::auth::InMemoryCredentialStore;
 use rmcp::transport::auth::OAuthTokenResponse;
 use rmcp::transport::auth::VendorExtraTokenFields;
 use serde::Deserialize;
@@ -58,6 +61,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use tracing::warn;
 
+use self::keyring_namespace::direct_keyring_account;
 use self::store_lock::OAuthStore;
 use self::store_lock::OAuthStoreLock;
 use self::store_lock::OAuthStoreLockFailure;
@@ -67,7 +71,7 @@ use codex_keyring_store::KeyringStore;
 use rmcp::transport::auth::AuthorizationManager;
 use tokio::sync::Mutex;
 
-use codex_utils_home_dir::find_codex_home;
+use codex_utils_home_dir::find_codex_auth_home;
 
 pub(crate) use self::resolved_store::ResolvedOAuthCredentialStore;
 pub(crate) use self::resolved_store::ResolvedOAuthTokens;
@@ -214,7 +218,7 @@ fn load_oauth_tokens_from_direct_keyring<K: KeyringStore>(
     server_name: &str,
     url: &str,
 ) -> Result<Option<StoredOAuthTokens>> {
-    let key = compute_store_key(server_name, url)?;
+    let key = direct_keyring_account(server_name, url)?;
     match keyring_store.load(KEYRING_SERVICE, &key) {
         Ok(Some(serialized)) => {
             let mut tokens: StoredOAuthTokens = serde_json::from_str(&serialized)
@@ -233,7 +237,7 @@ fn load_oauth_tokens_from_secrets_keyring<K: KeyringStore + Clone + 'static>(
     url: &str,
 ) -> std::result::Result<Option<StoredOAuthTokens>, OAuthKeyringLoadError> {
     let _store_lock = OAuthStoreLock::acquire(OAuthStore::Secrets)?;
-    let codex_home = find_codex_home().map_err(anyhow::Error::from)?;
+    let codex_home = find_codex_auth_home().map_err(anyhow::Error::from)?;
     let manager = SecretsManager::new_with_keyring_store_and_namespace(
         codex_home.to_path_buf(),
         SecretsBackendKind::Local,
@@ -267,6 +271,28 @@ enum OAuthKeyringLoadError {
 }
 
 pub fn save_oauth_tokens(
+    server_name: &str,
+    tokens: &StoredOAuthTokens,
+    store_mode: OAuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
+) -> Result<()> {
+    let _credential_lock =
+        RefreshCredentialLock::acquire_for_server_blocking(server_name, &tokens.url)?;
+    save_oauth_tokens_with_lock_held(server_name, tokens, store_mode, keyring_backend_kind)
+}
+
+pub async fn save_oauth_tokens_async(
+    server_name: &str,
+    tokens: &StoredOAuthTokens,
+    store_mode: OAuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
+) -> Result<()> {
+    let _credential_lock =
+        RefreshCredentialLock::acquire_for_server(server_name, &tokens.url).await?;
+    save_oauth_tokens_with_lock_held(server_name, tokens, store_mode, keyring_backend_kind)
+}
+
+fn save_oauth_tokens_with_lock_held(
     server_name: &str,
     tokens: &StoredOAuthTokens,
     store_mode: OAuthCredentialsStoreMode,
@@ -315,7 +341,7 @@ fn save_oauth_tokens_to_direct_keyring<K: KeyringStore>(
 ) -> Result<()> {
     let serialized = serde_json::to_string(tokens).context("failed to serialize OAuth tokens")?;
 
-    let key = compute_store_key(server_name, &tokens.url)?;
+    let key = direct_keyring_account(server_name, &tokens.url)?;
     match keyring_store.save(KEYRING_SERVICE, &key, &serialized) {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -352,7 +378,7 @@ fn save_oauth_tokens_to_secrets_keyring_with_lock_held<K: KeyringStore + Clone +
     tokens: &StoredOAuthTokens,
     serialized: &str,
 ) -> Result<()> {
-    let codex_home = find_codex_home()?;
+    let codex_home = find_codex_auth_home()?;
     let manager = SecretsManager::new_with_keyring_store_and_namespace(
         codex_home.to_path_buf(),
         SecretsBackendKind::Local,
@@ -412,6 +438,26 @@ fn save_oauth_tokens_with_keyring_with_fallback_to_file<K: KeyringStore + Clone 
 }
 
 pub fn delete_oauth_tokens(
+    server_name: &str,
+    url: &str,
+    store_mode: OAuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
+) -> Result<bool> {
+    let _credential_lock = RefreshCredentialLock::acquire_for_server_blocking(server_name, url)?;
+    delete_oauth_tokens_with_lock_held(server_name, url, store_mode, keyring_backend_kind)
+}
+
+pub async fn delete_oauth_tokens_async(
+    server_name: &str,
+    url: &str,
+    store_mode: OAuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
+) -> Result<bool> {
+    let _credential_lock = RefreshCredentialLock::acquire_for_server(server_name, url).await?;
+    delete_oauth_tokens_with_lock_held(server_name, url, store_mode, keyring_backend_kind)
+}
+
+fn delete_oauth_tokens_with_lock_held(
     server_name: &str,
     url: &str,
     store_mode: OAuthCredentialsStoreMode,
@@ -480,7 +526,7 @@ fn delete_oauth_tokens_from_direct_keyring<K: KeyringStore>(
     server_name: &str,
     url: &str,
 ) -> Result<bool> {
-    let key = compute_store_key(server_name, url)?;
+    let key = direct_keyring_account(server_name, url)?;
     keyring_store
         .delete(KEYRING_SERVICE, &key)
         .map_err(|error| Error::new(error.into_error()))
@@ -492,7 +538,7 @@ fn delete_oauth_tokens_from_secrets_keyring<K: KeyringStore + Clone + 'static>(
     url: &str,
 ) -> Result<bool> {
     let _store_lock = OAuthStoreLock::acquire(OAuthStore::Secrets)?;
-    let codex_home = find_codex_home()?;
+    let codex_home = find_codex_auth_home()?;
     let manager = SecretsManager::new_with_keyring_store_and_namespace(
         codex_home.to_path_buf(),
         SecretsBackendKind::Local,
@@ -549,6 +595,30 @@ impl OAuthPersistor {
         reason = "AuthorizationManager async access must be serialized through its mutex"
     )]
     pub(crate) async fn persist_if_needed(&self) -> Result<()> {
+        let _credential_lock =
+            RefreshCredentialLock::acquire_for_server(&self.inner.server_name, &self.inner.url)
+                .await?;
+        let authoritative = self.inner.credential_store.load(
+            &DefaultKeyringStore,
+            &self.inner.server_name,
+            &self.inner.url,
+        )?;
+        let previous = self.inner.last_credentials.lock().await.clone();
+        if normalized_oauth_credentials(authoritative.as_ref())
+            != normalized_oauth_credentials(previous.as_ref())
+        {
+            let manager = self.inner.authorization_manager.clone();
+            let mut guard = manager.lock().await;
+            match authoritative.as_ref() {
+                Some(tokens) => {
+                    refresh_transaction::install_tokens_in_manager_guard(&mut guard, tokens)
+                        .await?;
+                }
+                None => guard.set_credential_store(InMemoryCredentialStore::new()),
+            }
+            *self.inner.last_credentials.lock().await = authoritative;
+        }
+
         let (client_id, maybe_credentials) = {
             let manager = self.inner.authorization_manager.clone();
             let guard = manager.lock().await;
@@ -823,7 +893,9 @@ fn compute_secret_name(server_name: &str, server_url: &str) -> Result<SecretName
 }
 
 fn fallback_file_path() -> Result<PathBuf> {
-    Ok(find_codex_home()?.join(FALLBACK_FILENAME).to_path_buf())
+    Ok(find_codex_auth_home()?
+        .join(FALLBACK_FILENAME)
+        .to_path_buf())
 }
 
 fn read_fallback_file_unlocked() -> Result<Option<FallbackFile>> {

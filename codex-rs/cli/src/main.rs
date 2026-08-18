@@ -52,6 +52,7 @@ mod exec_server_telemetry;
 mod marketplace_cmd;
 mod mcp_cmd;
 mod plugin_cmd;
+mod product_state;
 mod remote_control_cmd;
 #[cfg(target_os = "windows")]
 mod sandbox_setup;
@@ -99,7 +100,7 @@ use codex_terminal_detection::TerminalName;
 #[clap(
     name = "codex-extended-workflow",
     author,
-    version = "v0.147.1-alpha-2",
+    version = "v0.147.1-alpha-3",
     // If a sub‑command is given, ignore requirements of the default args.
     subcommand_negates_reqs = true,
     // The executable is sometimes invoked via a platform‑specific name like
@@ -112,6 +113,10 @@ struct MultitoolCli {
     /// Enable process-only PSP routing for first-party ChatGPT requests.
     #[arg(long, global = true, hide = true)]
     psp: bool,
+
+    /// Extended launcher only: use normal Codex state and sessions; credentials stay isolated.
+    #[arg(long, global = true)]
+    shared_state: bool,
 
     #[clap(flatten)]
     pub config_overrides: CliConfigOverrides,
@@ -1110,6 +1115,12 @@ fn stage_str(stage: Stage) -> &'static str {
 fn main() -> anyhow::Result<()> {
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
     let extended_workflow_default_enabled = take_extended_workflow_launcher();
+    let product_flavor = if extended_workflow_default_enabled {
+        product_state::ProductFlavor::Extended
+    } else {
+        product_state::ProductFlavor::Compatibility
+    };
+    let _state_root_mode = product_state::configure_product_state(product_flavor)?;
     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
         cli_main(
             arg0_paths,
@@ -1135,6 +1146,14 @@ fn extended_workflow_launcher_for(bin_name: &str, npm_marker: Option<&std::ffi::
         || npm_marker.is_some_and(|value| value == std::ffi::OsStr::new("1"))
 }
 
+pub(crate) fn daemon_product_defaults(
+    extended_workflow_default_enabled: bool,
+) -> codex_app_server_daemon::DaemonProductDefaults {
+    codex_app_server_daemon::DaemonProductDefaults {
+        extended_workflow_default_enabled,
+    }
+}
+
 async fn cli_main(
     arg0_paths: Arg0DispatchPaths,
     remote_control_disabled: bool,
@@ -1142,6 +1161,7 @@ async fn cli_main(
 ) -> anyhow::Result<()> {
     let MultitoolCli {
         psp,
+        shared_state: _,
         config_overrides: mut root_config_overrides,
         extended_workflow_process_overrides,
         feature_toggles,
@@ -1364,9 +1384,7 @@ async fn cli_main(
                             AppServerBootstrapOptions {
                                 remote_control_enabled: bootstrap_cli.remote_control,
                             },
-                            codex_app_server_daemon::DaemonProductDefaults {
-                                extended_workflow_default_enabled,
-                            },
+                            daemon_product_defaults(extended_workflow_default_enabled),
                         )
                         .await?;
                         println!("{}", serde_json::to_string(&output)?);
@@ -2576,9 +2594,7 @@ async fn print_app_server_daemon_output(
         Some(extended_workflow_default_enabled) => {
             codex_app_server_daemon::run_with_product_defaults(
                 command,
-                codex_app_server_daemon::DaemonProductDefaults {
-                    extended_workflow_default_enabled,
-                },
+                daemon_product_defaults(extended_workflow_default_enabled),
             )
             .await?
         }
@@ -2608,9 +2624,7 @@ async fn print_app_server_remote_control_output(
 ) -> anyhow::Result<()> {
     let output = codex_app_server_daemon::set_remote_control_with_product_defaults(
         mode,
-        codex_app_server_daemon::DaemonProductDefaults {
-            extended_workflow_default_enabled,
-        },
+        daemon_product_defaults(extended_workflow_default_enabled),
     )
     .await?;
     println!("{}", serde_json::to_string(&output)?);
@@ -3101,6 +3115,7 @@ mod tests {
         let cli = MultitoolCli::try_parse_from(args).expect("parse");
         let MultitoolCli {
             psp: _,
+            shared_state: _,
             mut interactive,
             config_overrides: mut root_overrides,
             extended_workflow_process_overrides: _,
@@ -3140,6 +3155,7 @@ mod tests {
         let cli = MultitoolCli::try_parse_from(args).expect("parse");
         let MultitoolCli {
             psp: _,
+            shared_state: _,
             mut interactive,
             config_overrides: mut root_overrides,
             extended_workflow_process_overrides: _,
@@ -3186,6 +3202,7 @@ mod tests {
         let cli = MultitoolCli::try_parse_from(args).expect("parse");
         let MultitoolCli {
             psp: _,
+            shared_state: _,
             interactive,
             config_overrides: root_overrides,
             extended_workflow_process_overrides: _,

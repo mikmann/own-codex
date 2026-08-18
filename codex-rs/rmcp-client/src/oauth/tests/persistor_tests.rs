@@ -41,8 +41,11 @@ use crate::oauth::ResolvedOAuthCredentialStore;
 use crate::oauth::StoredOAuthTokens;
 use crate::oauth::WrappedOAuthTokenResponse;
 use crate::oauth::compute_store_key;
+use crate::oauth::delete_oauth_tokens_async;
+use crate::oauth::delete_oauth_tokens_from_file;
 use crate::oauth::load_oauth_tokens_from_file;
 use crate::oauth::refresh_lock::RefreshCredentialLock;
+use crate::oauth::save_oauth_tokens_async;
 use crate::oauth::save_oauth_tokens_to_file;
 use crate::oauth::stored_oauth_credentials;
 use crate::oauth_http_client::OAuthHttpClientAdapter;
@@ -91,6 +94,111 @@ impl Subscriber for LockContentionSubscriber {
     fn enter(&self, _span: &Id) {}
 
     fn exit(&self, _span: &Id) {}
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn login_and_logout_wait_for_the_credential_transaction_lock() -> Result<()> {
+    let (_env, _server, tokens) = test_context().await?;
+    let held_lock =
+        RefreshCredentialLock::acquire_for_server(&tokens.server_name, &tokens.url).await?;
+    let (contended_tx, contended_rx) = mpsc::channel();
+    let subscriber_guard =
+        tracing::subscriber::set_default(LockContentionSubscriber { contended_tx });
+    let save_task = tokio::spawn({
+        let tokens = tokens.clone();
+        async move {
+            save_oauth_tokens_async(
+                &tokens.server_name,
+                &tokens,
+                OAuthCredentialsStoreMode::File,
+                AuthKeyringBackendKind::Direct,
+            )
+            .await
+        }
+    });
+
+    wait_for_lock_contention(contended_rx, /*expected_count*/ 1).await?;
+    assert_eq!(
+        load_oauth_tokens_from_file(&tokens.server_name, &tokens.url)?,
+        None
+    );
+    drop(held_lock);
+    save_task.await??;
+    drop(subscriber_guard);
+
+    let held_lock =
+        RefreshCredentialLock::acquire_for_server(&tokens.server_name, &tokens.url).await?;
+    let (contended_tx, contended_rx) = mpsc::channel();
+    let _subscriber_guard =
+        tracing::subscriber::set_default(LockContentionSubscriber { contended_tx });
+    let delete_task = tokio::spawn({
+        let server_name = tokens.server_name.clone();
+        let url = tokens.url.clone();
+        async move {
+            delete_oauth_tokens_async(
+                &server_name,
+                &url,
+                OAuthCredentialsStoreMode::File,
+                AuthKeyringBackendKind::Direct,
+            )
+            .await
+        }
+    });
+
+    wait_for_lock_contention(contended_rx, /*expected_count*/ 1).await?;
+    assert!(load_oauth_tokens_from_file(&tokens.server_name, &tokens.url)?.is_some());
+    drop(held_lock);
+    assert!(delete_task.await??);
+    assert_eq!(
+        load_oauth_tokens_from_file(&tokens.server_name, &tokens.url)?,
+        None
+    );
+    Ok(())
+}
+
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "AuthorizationManager async access must be serialized through its Tokio mutex"
+)]
+#[tokio::test(flavor = "current_thread")]
+async fn rmcp_persistence_does_not_restore_credentials_deleted_by_logout() -> Result<()> {
+    let (_env, _server, initial) = test_context().await?;
+    save_oauth_tokens_to_file(&initial)?;
+    let persistor = persistor_for(&initial).await?;
+    let mut refreshed = initial.clone();
+    refreshed
+        .token_response
+        .0
+        .set_access_token(AccessToken::new("rmcp-refreshed-access-token".to_string()));
+    {
+        let manager = persistor.inner.authorization_manager.clone();
+        let mut guard = manager.lock().await;
+        crate::oauth::refresh_transaction::install_tokens_in_manager_guard(&mut guard, &refreshed)
+            .await?;
+    }
+
+    let held_lock =
+        RefreshCredentialLock::acquire_for_server(&initial.server_name, &initial.url).await?;
+    let key = compute_store_key(&initial.server_name, &initial.url)?;
+    assert!(delete_oauth_tokens_from_file(&key)?);
+    let (contended_tx, contended_rx) = mpsc::channel();
+    let _subscriber_guard =
+        tracing::subscriber::set_default(LockContentionSubscriber { contended_tx });
+    let persist_task = tokio::spawn({
+        let persistor = persistor.clone();
+        async move { persistor.persist_if_needed().await }
+    });
+
+    wait_for_lock_contention(contended_rx, /*expected_count*/ 1).await?;
+    drop(held_lock);
+    persist_task.await??;
+
+    assert_eq!(
+        load_oauth_tokens_from_file(&initial.server_name, &initial.url)?,
+        None
+    );
+    assert_eq!(persistor.stored_credentials().await, None);
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]

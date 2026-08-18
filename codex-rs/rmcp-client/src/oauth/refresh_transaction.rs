@@ -253,7 +253,7 @@ impl OAuthPersistor {
     }
 }
 
-async fn install_tokens_in_manager_guard(
+pub(super) async fn install_tokens_in_manager_guard(
     authorization_manager: &mut AuthorizationManager,
     tokens: &StoredOAuthTokens,
 ) -> Result<()> {

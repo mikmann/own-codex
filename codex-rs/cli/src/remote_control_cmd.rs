@@ -90,10 +90,9 @@ pub(crate) async fn run(
             )?;
             let output =
                 codex_app_server_daemon::ensure_remote_control_ready_with_product_defaults(
-                    codex_app_server_daemon::DaemonProductDefaults {
-                        extended_workflow_default_enabled: loader_overrides
-                            .extended_workflow_default_enabled,
-                    },
+                    crate::daemon_product_defaults(
+                        loader_overrides.extended_workflow_default_enabled,
+                    ),
                 )
                 .await?;
             print_remote_control_start_output(&output, command.json)?;
@@ -106,10 +105,9 @@ pub(crate) async fn run(
         Some(RemoteControlSubcommand::Pair) => {
             let output =
                 codex_app_server_daemon::start_remote_control_pairing_with_product_defaults(
-                    codex_app_server_daemon::DaemonProductDefaults {
-                        extended_workflow_default_enabled: loader_overrides
-                            .extended_workflow_default_enabled,
-                    },
+                    crate::daemon_product_defaults(
+                        loader_overrides.extended_workflow_default_enabled,
+                    ),
                 )
                 .await?;
             print_remote_control_pairing_output(&output, command.json)?;

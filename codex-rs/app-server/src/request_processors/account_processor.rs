@@ -364,11 +364,12 @@ impl AccountRequestProcessor {
             }
         }
 
+        let auth_config = self.config.auth_config();
         match login_with_api_key(
-            &self.config.codex_home,
+            &auth_config.codex_home,
             &params.api_key,
-            self.config.cli_auth_credentials_store_mode,
-            self.config.auth_keyring_backend_kind(),
+            auth_config.auth_credentials_store_mode,
+            auth_config.keyring_backend_kind,
         ) {
             Ok(()) => {
                 self.auth_manager.reload().await;
@@ -430,12 +431,13 @@ impl AccountRequestProcessor {
             }
 
             set_user_model_provider_to_bedrock(&self.config_manager).await?;
+            let auth_config = self.config.auth_config();
             login_with_bedrock_api_key(
-                &self.config.codex_home,
+                &auth_config.codex_home,
                 api_key,
                 region,
-                self.config.cli_auth_credentials_store_mode,
-                self.config.auth_keyring_backend_kind(),
+                auth_config.auth_credentials_store_mode,
+                auth_config.keyring_backend_kind,
             )
             .map_err(|err| internal_error(format!("failed to save Amazon Bedrock auth: {err}")))?;
             self.auth_manager.reload().await;
@@ -477,7 +479,7 @@ impl AccountRequestProcessor {
             codex_streamlined_login,
             login_success_page,
             ..LoginServerOptions::new(
-                config.codex_home.to_path_buf(),
+                config.auth_config().codex_home,
                 oauth_client_id(),
                 self.auth_manager.effective_chatgpt_workspaces(),
                 config.cli_auth_credentials_store_mode,

@@ -23,7 +23,7 @@ fn primary_and_compatibility_launchers_report_the_distribution_version() -> Resu
             .assert()
             .success()
             .stdout(predicate::str::contains(
-                "codex-extended-workflow v0.147.1-alpha-2",
+                "codex-extended-workflow v0.147.1-alpha-3",
             ));
     }
     Ok(())
@@ -43,7 +43,8 @@ fn help_resume_and_completion_use_the_primary_name() -> Result<()> {
         .stdout(predicate::str::contains("--reviewer-min <COUNT>"))
         .stdout(predicate::str::contains("--reviewer-max <COUNT>"))
         .stdout(predicate::str::contains("--disable-experts"))
-        .stdout(predicate::str::contains("--disable-reviewers"));
+        .stdout(predicate::str::contains("--disable-reviewers"))
+        .stdout(predicate::str::contains("--shared-state"));
     command("codex-extended-workflow")?
         .args(["exec", "--help"])
         .assert()
@@ -63,6 +64,27 @@ fn help_resume_and_completion_use_the_primary_name() -> Result<()> {
         .assert()
         .success()
         .stdout(predicate::str::contains("codex-extended-workflow"));
+    Ok(())
+}
+
+#[test]
+fn shared_state_is_explicit_and_rejects_ambiguous_or_compatibility_use() -> Result<()> {
+    let explicit_home = tempfile::tempdir()?;
+    command("codex-extended-workflow")?
+        .env("CODEX_HOME", explicit_home.path())
+        .args(["--shared-state", "completion", "powershell"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--shared-state cannot be combined with CODEX_HOME",
+        ));
+    command("codex")?
+        .args(["--shared-state", "completion", "powershell"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--shared-state is only supported by codex-extended-workflow",
+        ));
     Ok(())
 }
 
