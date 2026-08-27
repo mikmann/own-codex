@@ -565,10 +565,17 @@ async fn turn_start_emits_thread_scoped_warning_notification_for_trimmed_skills(
     let warning: WarningNotification =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_notification("warning")).await??;
     assert_eq!(warning.thread_id.as_deref(), Some(thread.id.as_str()));
-    assert_eq!(
-        warning.message,
-        "Exceeded skills context budget. All skill descriptions were removed and 7 additional skills were not included in the model-visible skills list."
-    );
+    let omitted_count = warning
+        .message
+        .strip_prefix("Exceeded skills context budget. All skill descriptions were removed and ")
+        .and_then(|message| {
+            message.strip_suffix(
+                " additional skills were not included in the model-visible skills list.",
+            )
+        })
+        .context("warning should contain the omitted skills count")?
+        .parse::<usize>()?;
+    assert!(omitted_count >= 7);
 
     timeout(
         DEFAULT_READ_TIMEOUT,

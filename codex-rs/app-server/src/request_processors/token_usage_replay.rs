@@ -42,10 +42,15 @@ pub(super) async fn send_thread_token_usage_update_to_connection(
     let Some(info) = conversation.token_usage_info().await else {
         return;
     };
+    let mut token_usage = ThreadTokenUsage::from(info);
+    token_usage.workflow_budget = conversation
+        .workflow_token_budget_status()
+        .await
+        .map(Into::into);
     let notification = ThreadTokenUsageUpdatedNotification {
         thread_id: thread_id.to_string(),
         turn_id: token_usage_turn_id,
-        token_usage: ThreadTokenUsage::from(info),
+        token_usage,
     };
     outgoing
         .send_server_notification_to_connections(
@@ -181,6 +186,7 @@ mod tests {
             RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
                 info: None,
                 rate_limits: None,
+                workflow_budget: None,
             })),
             RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
                 client_id: None,

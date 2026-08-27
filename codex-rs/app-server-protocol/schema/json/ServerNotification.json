@@ -5266,6 +5266,16 @@
         },
         "total": {
           "$ref": "#/definitions/TokenUsageBreakdown"
+        },
+        "workflowBudget": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WorkflowTokenBudgetStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -5987,6 +5997,37 @@
         "rejected"
       ],
       "type": "string"
+    },
+    "WorkflowTokenBudgetStatus": {
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "baseLimitTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "effectiveLimitTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "sessionTokensUsed": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "workflowTokensUsed": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "active",
+        "baseLimitTokens",
+        "effectiveLimitTokens",
+        "sessionTokensUsed",
+        "workflowTokensUsed"
+      ],
+      "type": "object"
     }
   },
   "description": "Notification sent from the server to the client.",

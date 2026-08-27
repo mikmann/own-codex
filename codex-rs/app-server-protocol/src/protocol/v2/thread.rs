@@ -30,6 +30,7 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::ThreadGoalStatus as CoreThreadGoalStatus;
 use codex_protocol::protocol::TokenUsage as CoreTokenUsage;
 use codex_protocol::protocol::TokenUsageInfo as CoreTokenUsageInfo;
+use codex_protocol::protocol::WorkflowTokenBudgetStatus as CoreWorkflowTokenBudgetStatus;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
@@ -1000,6 +1001,27 @@ pub struct ThreadCompactStartResponse {}
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct ThreadWorkflowTokenBudgetUpdateParams {
+    pub thread_id: String,
+    pub action: WorkflowTokenBudgetAction,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(tag = "type", rename_all = "camelCase", export_to = "v2/")]
+pub enum WorkflowTokenBudgetAction {
+    Extend { percent: u8 },
+    Reset,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadWorkflowTokenBudgetUpdateResponse {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct ThreadShellCommandParams {
     pub thread_id: String,
     /// Shell command string evaluated by the thread's configured shell.
@@ -1603,6 +1625,34 @@ pub struct ThreadTokenUsage {
     // TODO(aibrahim): make this not optional
     #[ts(type = "number | null")]
     pub model_context_window: Option<i64>,
+    pub workflow_budget: Option<WorkflowTokenBudgetStatus>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct WorkflowTokenBudgetStatus {
+    #[ts(type = "number")]
+    pub session_tokens_used: i64,
+    #[ts(type = "number")]
+    pub workflow_tokens_used: i64,
+    #[ts(type = "number")]
+    pub base_limit_tokens: i64,
+    #[ts(type = "number")]
+    pub effective_limit_tokens: i64,
+    pub active: bool,
+}
+
+impl From<CoreWorkflowTokenBudgetStatus> for WorkflowTokenBudgetStatus {
+    fn from(value: CoreWorkflowTokenBudgetStatus) -> Self {
+        Self {
+            session_tokens_used: value.session_tokens_used,
+            workflow_tokens_used: value.workflow_tokens_used,
+            base_limit_tokens: value.base_limit_tokens,
+            effective_limit_tokens: value.effective_limit_tokens,
+            active: value.active,
+        }
+    }
 }
 
 impl From<CoreTokenUsageInfo> for ThreadTokenUsage {
@@ -1611,6 +1661,7 @@ impl From<CoreTokenUsageInfo> for ThreadTokenUsage {
             total: value.total_token_usage.into(),
             last: value.last_token_usage.into(),
             model_context_window: value.model_context_window,
+            workflow_budget: None,
         }
     }
 }

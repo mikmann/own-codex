@@ -2443,9 +2443,22 @@ async fn cold_paginated_resume_restores_usage_without_loading_turns() -> Result<
                 model_context_window: Some(200_000),
             }),
             rate_limits: None,
+            workflow_budget: None,
         })),
     )
     .await?;
+    let state_db = StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    let root_thread_id = ThreadId::from_string(&conversation_id)?;
+    state_db
+        .start_or_resume_workflow_token_budget(root_thread_id, 1_000)
+        .await?;
+    state_db
+        .record_workflow_token_usage(root_thread_id, 400)
+        .await?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build_initialized()
@@ -2473,6 +2486,16 @@ async fn cold_paginated_resume_restores_usage_without_loading_turns() -> Result<
     assert_eq!(notification.thread_id, thread.id);
     assert_eq!(notification.turn_id, canonical_turn_id);
     assert_eq!(notification.token_usage.total.total_tokens, 150);
+    assert_eq!(
+        notification.token_usage.workflow_budget,
+        Some(codex_app_server_protocol::WorkflowTokenBudgetStatus {
+            session_tokens_used: 400,
+            workflow_tokens_used: 400,
+            base_limit_tokens: 1_000,
+            effective_limit_tokens: 1_000,
+            active: true,
+        })
+    );
 
     let turns_id = app_server
         .send_thread_turns_list_request(ThreadTurnsListParams {
@@ -2520,6 +2543,7 @@ async fn cold_paginated_resume_omits_usage_when_its_turn_is_ambiguous() -> Resul
                 model_context_window: Some(200_000),
             }),
             rate_limits: None,
+            workflow_budget: None,
         })),
     )
     .await?;
@@ -2799,6 +2823,7 @@ async fn thread_resume_token_usage_replay_can_belong_to_interrupted_turn() -> Re
                     model_context_window: Some(200_000),
                 }),
                 rate_limits: None,
+                workflow_budget: None,
             }))?,
         })
         .to_string(),

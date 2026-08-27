@@ -1148,6 +1148,11 @@ impl MessageProcessor {
                     .thread_compact_start(&request_id, params)
                     .await
             }
+            ClientRequest::ThreadWorkflowTokenBudgetUpdate { params, .. } => {
+                self.thread_processor
+                    .thread_workflow_token_budget_update(&request_id, params)
+                    .await
+            }
             ClientRequest::ThreadBackgroundTerminalsClean { params, .. } => {
                 self.thread_processor
                     .thread_background_terminals_clean(&request_id, params)

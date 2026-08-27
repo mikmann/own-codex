@@ -4909,6 +4909,21 @@
       ],
       "type": "object"
     },
+    "ThreadWorkflowTokenBudgetUpdateParams": {
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/WorkflowTokenBudgetAction"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "TurnEnvironmentParams": {
       "properties": {
         "cwd": {
@@ -5326,6 +5341,48 @@
         "mode"
       ],
       "type": "object"
+    },
+    "WorkflowTokenBudgetAction": {
+      "oneOf": [
+        {
+          "properties": {
+            "percent": {
+              "format": "uint8",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "extend"
+              ],
+              "title": "ExtendWorkflowTokenBudgetActionType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "percent",
+            "type"
+          ],
+          "title": "ExtendWorkflowTokenBudgetAction",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "reset"
+              ],
+              "title": "ResetWorkflowTokenBudgetActionType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ResetWorkflowTokenBudgetAction",
+          "type": "object"
+        }
+      ]
     }
   },
   "description": "Request from the client to the server.",
@@ -5689,6 +5746,30 @@
         "params"
       ],
       "title": "Thread/compact/startRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "thread/workflowTokenBudget/update"
+          ],
+          "title": "Thread/workflowTokenBudget/updateRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadWorkflowTokenBudgetUpdateParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/workflowTokenBudget/updateRequest",
       "type": "object"
     },
     {

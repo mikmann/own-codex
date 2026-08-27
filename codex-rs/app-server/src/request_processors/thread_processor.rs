@@ -678,6 +678,27 @@ impl ThreadRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
+    pub(crate) async fn thread_workflow_token_budget_update(
+        &self,
+        request_id: &ConnectionRequestId,
+        params: ThreadWorkflowTokenBudgetUpdateParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let ThreadWorkflowTokenBudgetUpdateParams { thread_id, action } = params;
+        let (_, thread) = self.load_thread(&thread_id).await?;
+        let op = match action {
+            WorkflowTokenBudgetAction::Extend { percent } => {
+                Op::ExtendWorkflowTokenBudget { percent }
+            }
+            WorkflowTokenBudgetAction::Reset => Op::ResetWorkflowTokenBudget,
+        };
+        self.submit_core_op(request_id, thread.as_ref(), op)
+            .await
+            .map_err(|error| {
+                internal_error(format!("failed to update workflow token budget: {error}"))
+            })?;
+        Ok(Some(ThreadWorkflowTokenBudgetUpdateResponse {}.into()))
+    }
+
     pub(crate) async fn thread_background_terminals_clean(
         &self,
         request_id: &ConnectionRequestId,

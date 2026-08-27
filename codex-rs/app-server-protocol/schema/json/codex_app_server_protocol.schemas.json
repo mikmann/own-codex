@@ -571,6 +571,30 @@
             },
             "method": {
               "enum": [
+                "thread/workflowTokenBudget/update"
+              ],
+              "title": "Thread/workflowTokenBudget/updateRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadWorkflowTokenBudgetUpdateParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/workflowTokenBudget/updateRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "thread/shellCommand"
               ],
               "title": "Thread/shellCommandRequestMethod",
@@ -21409,6 +21433,16 @@
           },
           "total": {
             "$ref": "#/definitions/v2/TokenUsageBreakdown"
+          },
+          "workflowBudget": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/WorkflowTokenBudgetStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -21510,6 +21544,28 @@
           "unsubscribed"
         ],
         "type": "string"
+      },
+      "ThreadWorkflowTokenBudgetUpdateParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "action": {
+            "$ref": "#/definitions/v2/WorkflowTokenBudgetAction"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "threadId"
+        ],
+        "title": "ThreadWorkflowTokenBudgetUpdateParams",
+        "type": "object"
+      },
+      "ThreadWorkflowTokenBudgetUpdateResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "ThreadWorkflowTokenBudgetUpdateResponse",
+        "type": "object"
       },
       "TokenUsageBreakdown": {
         "properties": {
@@ -22655,6 +22711,79 @@
           "rejected"
         ],
         "type": "string"
+      },
+      "WorkflowTokenBudgetAction": {
+        "oneOf": [
+          {
+            "properties": {
+              "percent": {
+                "format": "uint8",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "type": {
+                "enum": [
+                  "extend"
+                ],
+                "title": "ExtendWorkflowTokenBudgetActionType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "percent",
+              "type"
+            ],
+            "title": "ExtendWorkflowTokenBudgetAction",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "reset"
+                ],
+                "title": "ResetWorkflowTokenBudgetActionType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "ResetWorkflowTokenBudgetAction",
+            "type": "object"
+          }
+        ]
+      },
+      "WorkflowTokenBudgetStatus": {
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "baseLimitTokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "effectiveLimitTokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "sessionTokensUsed": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "workflowTokensUsed": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "active",
+          "baseLimitTokens",
+          "effectiveLimitTokens",
+          "sessionTokensUsed",
+          "workflowTokensUsed"
+        ],
+        "type": "object"
       },
       "WorkspaceMessage": {
         "properties": {
