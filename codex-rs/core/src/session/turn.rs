@@ -2257,6 +2257,7 @@ async fn try_run_sampling_request(
         .features
         .enabled(Feature::ConcurrentReasoningSummaries)
         && turn_context.provider.info().is_openai();
+    let workflow_budget_lease = sess.workflow_token_budget_lease(&turn_context).await?;
     let mut stream = client_session
         .stream(
             prompt,
@@ -2612,7 +2613,11 @@ async fn try_run_sampling_request(
                 )
                 .await;
                 let budget_result = sess
-                    .record_token_usage_info(&turn_context, token_usage.as_ref())
+                    .record_token_usage_info(
+                        &turn_context,
+                        token_usage.as_ref(),
+                        &workflow_budget_lease,
+                    )
                     .await;
                 should_emit_token_count = true;
                 should_emit_turn_diff = true;

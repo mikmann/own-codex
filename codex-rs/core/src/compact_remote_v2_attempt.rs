@@ -10,6 +10,7 @@ use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
+use crate::workflow_token_budget::WorkflowTokenBudgetLease;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
@@ -23,6 +24,7 @@ pub(super) struct RemoteCompactV2Attempt {
     pub(super) prompt_input: Vec<ResponseItem>,
     pub(super) compaction_output: ResponseItem,
     pub(super) token_usage: Option<TokenUsage>,
+    pub(super) workflow_budget_lease: WorkflowTokenBudgetLease,
     /// Keeps a session created for standalone compaction alive through lifecycle completion.
     pub(super) owned_client_session: Option<ModelClientSession>,
 }
@@ -112,6 +114,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
         compaction_output,
         response_id,
         token_usage,
+        workflow_budget_lease,
     } = compaction_output_result?;
     // TODO: Emit this before compaction output validation so malformed completed
     // responses still surface their raw upstream usage.
@@ -130,6 +133,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
         prompt_input,
         compaction_output,
         token_usage,
+        workflow_budget_lease,
         owned_client_session,
     })
 }

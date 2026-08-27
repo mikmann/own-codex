@@ -2772,11 +2772,19 @@ async fn record_token_usage_info_notifies_extension_contributors() {
     };
 
     session
-        .record_token_usage_info(&turn_context, Some(&first_usage))
+        .record_token_usage_info(
+            &turn_context,
+            Some(&first_usage),
+            &crate::workflow_token_budget::WorkflowTokenBudgetLease::Disabled,
+        )
         .await
         .expect("first usage should be recorded");
     session
-        .record_token_usage_info(&turn_context, Some(&second_usage))
+        .record_token_usage_info(
+            &turn_context,
+            Some(&second_usage),
+            &crate::workflow_token_budget::WorkflowTokenBudgetLease::Disabled,
+        )
         .await
         .expect("second usage should be recorded");
 

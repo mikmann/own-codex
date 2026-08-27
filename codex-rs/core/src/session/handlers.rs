@@ -736,7 +736,17 @@ pub(super) async fn submission_loop(
                 }
                 Op::ResetWorkflowTokenBudget => {
                     let turn_context = sess.new_default_turn_with_sub_id(sub.id.clone()).await;
-                    if let Err(error) = sess.close_workflow_token_budget(&turn_context).await {
+                    let result = sess.close_workflow_token_budget(&turn_context).await;
+                    let result = match result {
+                        Ok(()) => {
+                            sess.services
+                                .agent_control
+                                .interrupt_workflow_tasks(sess.thread_id)
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result {
                         sess.send_event(
                             &turn_context,
                             EventMsg::Error(error.to_error_event(/*message_prefix*/ None)),

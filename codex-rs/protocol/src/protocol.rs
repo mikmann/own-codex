@@ -2179,6 +2179,8 @@ pub struct WorkflowTokenBudgetStatus {
     pub active: bool,
 }
 
+pub const WORKFLOW_TOKEN_BUDGET_EXTENSION_PERCENTS: [u8; 4] = [25, 50, 75, 100];
+
 impl WorkflowTokenBudgetStatus {
     pub fn exhausted(self) -> bool {
         self.active

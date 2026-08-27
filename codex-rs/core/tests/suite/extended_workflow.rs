@@ -3,6 +3,7 @@ use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
+use codex_state::StateRuntime;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_completed_with_tokens;
@@ -23,7 +24,7 @@ use serde_json::json;
 use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn workflow_limit_counts_literal_provider_tokens_and_stops_without_retry() -> Result<()> {
+async fn workflow_limit_counts_provider_tokens_and_blocks_the_next_turn() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -93,6 +94,100 @@ async fn workflow_limit_counts_literal_provider_tokens_and_stops_without_retry()
         response.requests().len(),
         1,
         "workflow limit must not retry"
+    );
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "Try another request.".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    let EventMsg::Error(error) =
+        wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await
+    else {
+        unreachable!();
+    };
+    assert!(error.message.contains("workflow token limit reached"));
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("recorded requests")
+            .len(),
+        1,
+        "an exhausted workflow must stop before the next provider request"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resumed_exhausted_workflow_stops_before_sampling() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("workflow-limit-resume"),
+            ev_assistant_message("answer-resume", "Four."),
+            ev_completed_with_tokens("workflow-limit-resume", /*total_tokens*/ 30),
+        ]),
+    )
+    .await;
+    let configure = |config: &mut codex_core::config::Config| {
+        config.extended_workflow.enabled = true;
+        config.extended_workflow.workflow_budget_tokens = Some(30);
+        config.extended_workflow.experts.enabled = false;
+        config.extended_workflow.reviewers.enabled = false;
+    };
+    let mut builder = test_codex().with_config(configure);
+    let initial = builder.build_with_auto_env(&server).await?;
+    initial.submit_turn("What is two plus two?").await?;
+
+    let mut resume_builder = test_codex().with_config(configure);
+    let resumed = resume_builder.restart(&server, &initial).await?;
+    resumed
+        .codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "Continue after resume.".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    let EventMsg::Error(error) =
+        wait_for_event(&resumed.codex, |event| matches!(event, EventMsg::Error(_))).await
+    else {
+        unreachable!();
+    };
+    assert!(error.message.contains("workflow token limit reached"));
+    wait_for_event(&resumed.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("recorded requests")
+            .len(),
+        1,
+        "resume must preserve exhaustion and stop before sampling"
     );
 
     Ok(())
@@ -386,6 +481,18 @@ async fn disabled_workflow_adds_no_prompt_fragments_or_workflow_tools() -> Resul
     let names = tool_names(&body);
     assert!(!names.contains(&"plan_workflow_reviewers"));
     assert!(!names.contains(&"validate_workflow_result"));
+    let state_db = StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(test.config.codex_home.clone()),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    assert_eq!(
+        state_db
+            .workflow_token_budget(test.session_configured.thread_id)
+            .await?,
+        None,
+        "normal Codex must not create extended-workflow budget rows"
+    );
     Ok(())
 }
 

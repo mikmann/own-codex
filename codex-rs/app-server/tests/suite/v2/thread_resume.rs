@@ -16,6 +16,7 @@ use app_test_support::test_absolute_path;
 use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
 use chrono::Utc;
+use codex_app_server::INVALID_PARAMS_ERROR_CODE;
 use codex_app_server_protocol::ApprovalsReviewer;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ClientInfo;
@@ -128,6 +129,67 @@ use wiremock::matchers::method;
 use wiremock::matchers::path;
 
 use super::analytics::assert_basic_thread_initialized_event;
+
+#[tokio::test]
+async fn workflow_budget_update_rejects_an_invalid_extension_percent_immediately() -> Result<()> {
+    let responses = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    mock_responses_config(&responses.uri())
+        .with_root_config("extended_workflow = { enabled = true, workflow_budget_tokens = 1000 }")
+        .write(codex_home.path())?;
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let request_id = app_server
+        .send_raw_request(
+            "thread/workflowTokenBudget/update",
+            Some(json!({
+                "threadId": Uuid::new_v4().to_string(),
+                "action": {"type": "extend", "percent": 10}
+            })),
+        )
+        .await?;
+    let error = timeout(
+        Duration::from_secs(10),
+        app_server.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    assert_eq!(error.error.code, INVALID_PARAMS_ERROR_CODE);
+    assert_eq!(
+        error.error.message,
+        "workflow token budget extension must be one of 25, 50, 75, or 100 percent; got 10"
+    );
+
+    let thread = app_server
+        .start_thread(ThreadStartParams {
+            model: Some("gpt-5.4".to_string()),
+            ..Default::default()
+        })
+        .await?
+        .thread;
+    let request_id = app_server
+        .send_raw_request(
+            "thread/workflowTokenBudget/update",
+            Some(json!({
+                "threadId": thread.id,
+                "action": {"type": "extend", "percent": 100}
+            })),
+        )
+        .await?;
+    let error = timeout(
+        Duration::from_secs(10),
+        app_server.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, INVALID_PARAMS_ERROR_CODE);
+    assert_eq!(
+        error.error.message,
+        "workflow token budget can only be extended after the active limit is reached"
+    );
+    Ok(())
+}
 use super::analytics::mount_analytics_capture;
 use super::analytics::thread_initialized_event;
 use super::analytics::wait_for_analytics_payload;
@@ -2402,7 +2464,9 @@ async fn thread_resume_emits_restored_token_usage_before_next_turn() -> Result<(
 async fn cold_paginated_resume_restores_usage_without_loading_turns() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    mock_responses_config(&server.uri())
+        .with_root_config("extended_workflow = { enabled = true }")
+        .write(codex_home.path())?;
     let conversation_id = create_fake_paginated_rollout(
         codex_home.path(),
         "2025-01-05T12-00-00",
@@ -2453,11 +2517,11 @@ async fn cold_paginated_resume_restores_usage_without_loading_turns() -> Result<
     )
     .await?;
     let root_thread_id = ThreadId::from_string(&conversation_id)?;
-    state_db
+    let workflow_budget = state_db
         .start_or_resume_workflow_token_budget(root_thread_id, 1_000)
         .await?;
     state_db
-        .record_workflow_token_usage(root_thread_id, 400)
+        .record_workflow_token_usage(root_thread_id, &workflow_budget.workflow_id, 400)
         .await?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())

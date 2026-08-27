@@ -27,6 +27,7 @@ use crate::responses_retry::handle_retryable_response_stream_error;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
+use crate::workflow_token_budget::WorkflowTokenBudgetLease;
 use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
 use codex_analytics::CompactionReason;
@@ -279,10 +280,13 @@ async fn run_remote_compact_task_inner_impl(
         prompt_input,
         compaction_output,
         token_usage,
+        workflow_budget_lease,
         owned_client_session: _owned_client_session,
     } = attempt;
     if let Some(token_usage) = token_usage {
         sess.record_rollout_budget_usage(&token_usage)?;
+        sess.record_workflow_token_usage(&token_usage, &workflow_budget_lease)
+            .await?;
         analytics_details.active_context_tokens_before = Some(token_usage.input_tokens);
         analytics_details.compaction_summary_tokens = Some(token_usage.output_tokens);
         analytics_details.cached_input_tokens = Some(token_usage.cached_input_tokens);
@@ -330,6 +334,7 @@ struct RemoteCompactionV2Output {
     compaction_output: ResponseItem,
     response_id: String,
     token_usage: Option<TokenUsage>,
+    workflow_budget_lease: WorkflowTokenBudgetLease,
 }
 
 async fn run_remote_compaction_request_v2(
@@ -346,6 +351,7 @@ async fn run_remote_compaction_request_v2(
         .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
     let mut retries = 0;
     loop {
+        let workflow_budget_lease = sess.workflow_token_budget_lease(turn_context).await?;
         let result = match client_session
             .stream(
                 prompt,
@@ -359,7 +365,7 @@ async fn run_remote_compaction_request_v2(
             )
             .await
         {
-            Ok(stream) => collect_compaction_output(stream).await,
+            Ok(stream) => collect_compaction_output(stream, workflow_budget_lease).await,
             Err(err) => Err(err),
         };
 
@@ -384,6 +390,7 @@ async fn run_remote_compaction_request_v2(
 
 async fn collect_compaction_output(
     mut stream: ResponseStream,
+    workflow_budget_lease: WorkflowTokenBudgetLease,
 ) -> CodexResult<RemoteCompactionV2Output> {
     let mut output_item_count = 0usize;
     let mut compaction_count = 0usize;
@@ -438,6 +445,7 @@ async fn collect_compaction_output(
         compaction_output,
         response_id,
         token_usage: completed_token_usage,
+        workflow_budget_lease,
     })
 }
 
@@ -879,7 +887,7 @@ mod tests {
             }),
         ]);
 
-        let output = collect_compaction_output(stream)
+        let output = collect_compaction_output(stream, WorkflowTokenBudgetLease::Disabled)
             .await
             .expect("compaction should be collected");
 

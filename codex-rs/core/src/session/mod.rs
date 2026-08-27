@@ -41,6 +41,7 @@ use crate::session_prefix::format_inter_agent_completion_message;
 use crate::skills_load_input_from_config;
 use crate::turn_metadata::TurnMetadataState;
 use crate::turn_timing::now_unix_timestamp_ms;
+use crate::workflow_token_budget::WorkflowTokenBudgetLease;
 use async_channel::Receiver;
 use async_channel::Sender;
 use chrono::Local;
@@ -3807,9 +3808,10 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         token_usage: Option<&TokenUsage>,
+        workflow_budget_lease: &WorkflowTokenBudgetLease,
     ) -> CodexResult<()> {
         let result = self
-            .record_token_usage_info(turn_context, token_usage)
+            .record_token_usage_info(turn_context, token_usage, workflow_budget_lease)
             .await;
         self.send_token_count_event(turn_context).await;
         result
@@ -3819,6 +3821,7 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         token_usage: Option<&TokenUsage>,
+        workflow_budget_lease: &WorkflowTokenBudgetLease,
     ) -> CodexResult<()> {
         if let Some(token_usage) = token_usage {
             let token_info = {
@@ -3834,7 +3837,9 @@ impl Session {
                 state.token_info()
             };
             let budget_result = self.record_rollout_budget_usage(token_usage);
-            let workflow_budget_result = self.record_workflow_token_usage(token_usage).await;
+            let workflow_budget_result = self
+                .record_workflow_token_usage(token_usage, workflow_budget_lease)
+                .await;
             if let Some(token_info) = token_info.as_ref() {
                 for contributor in self.services.extensions.token_usage_contributors() {
                     contributor
@@ -3942,6 +3947,9 @@ impl Session {
     }
 
     pub(crate) async fn workflow_token_budget_status(&self) -> Option<WorkflowTokenBudgetStatus> {
+        if !self.get_config().await.extended_workflow.enabled {
+            return None;
+        }
         let root_thread_id = self
             .services
             .agent_control

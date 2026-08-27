@@ -702,6 +702,7 @@ async fn drain_to_completed(
     responses_metadata: &CodexResponsesMetadata,
     prompt: &Prompt,
 ) -> CodexResult<()> {
+    let workflow_budget_lease = sess.workflow_token_budget_lease(turn_context).await?;
     let mut stream = client_session
         .stream(
             prompt,
@@ -747,8 +748,12 @@ async fn drain_to_completed(
                     }),
                 )
                 .await;
-                sess.update_token_usage_info(turn_context, token_usage.as_ref())
-                    .await?;
+                sess.update_token_usage_info(
+                    turn_context,
+                    token_usage.as_ref(),
+                    &workflow_budget_lease,
+                )
+                .await?;
                 return Ok(());
             }
             Ok(_) => continue,

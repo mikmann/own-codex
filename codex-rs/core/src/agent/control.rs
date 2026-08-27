@@ -689,6 +689,22 @@ impl AgentControl {
         Ok(thread_ids)
     }
 
+    pub(crate) async fn interrupt_workflow_tasks(
+        &self,
+        caller_thread_id: ThreadId,
+    ) -> CodexResult<()> {
+        let state = self.upgrade()?;
+        let root_thread_id = self.root_thread_id_for(caller_thread_id).await;
+        let mut thread_ids = self.live_thread_spawn_descendants(root_thread_id).await?;
+        thread_ids.push(root_thread_id);
+        for thread_id in thread_ids.into_iter().rev() {
+            if let Ok(thread) = state.get_thread(thread_id).await {
+                thread.session.interrupt_task().await;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn get_agent_config_snapshot(
         &self,
         agent_id: ThreadId,

@@ -14,6 +14,7 @@ use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::WORKFLOW_TOKEN_BUDGET_EXTENSION_PERCENTS;
 
 pub(super) const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 pub(super) const THREAD_LIST_MAX_LIMIT: usize = 100;
@@ -684,7 +685,24 @@ impl ThreadRequestProcessor {
         params: ThreadWorkflowTokenBudgetUpdateParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         let ThreadWorkflowTokenBudgetUpdateParams { thread_id, action } = params;
+        if let WorkflowTokenBudgetAction::Extend { percent } = action
+            && !WORKFLOW_TOKEN_BUDGET_EXTENSION_PERCENTS.contains(&percent)
+        {
+            return Err(invalid_params(format!(
+                "workflow token budget extension must be one of 25, 50, 75, or 100 percent; got {percent}"
+            )));
+        }
         let (_, thread) = self.load_thread(&thread_id).await?;
+        if matches!(action, WorkflowTokenBudgetAction::Extend { .. })
+            && !thread
+                .workflow_token_budget_status()
+                .await
+                .is_some_and(codex_protocol::protocol::WorkflowTokenBudgetStatus::exhausted)
+        {
+            return Err(invalid_params(
+                "workflow token budget can only be extended after the active limit is reached",
+            ));
+        }
         let op = match action {
             WorkflowTokenBudgetAction::Extend { percent } => {
                 Op::ExtendWorkflowTokenBudget { percent }
