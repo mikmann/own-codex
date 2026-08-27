@@ -85,6 +85,11 @@ pub enum CodexErrorDetails {
     #[error("shared rollout token budget exhausted")]
     SessionBudgetExceeded,
 
+    #[error(
+        "workflow token limit reached; the interactive TUI can extend it, while non-interactive exec stops safely"
+    )]
+    WorkflowTokenBudgetExceeded,
+
     /// Returned by ResponsesClient when the SSE stream disconnects or errors out **after** the HTTP
     /// handshake has succeeded but **before** it finished emitting `response.completed`.
     ///
@@ -304,6 +309,7 @@ impl CodexErr {
     codex_err_unit_constructors!(
         TurnAborted,
         SessionBudgetExceeded,
+        WorkflowTokenBudgetExceeded,
         ContextWindowExceeded,
         SessionConfiguredNotFirstEvent,
         Timeout,
@@ -363,6 +369,7 @@ impl CodexErr {
         match self.details() {
             CodexErrorDetails::TurnAborted
             | CodexErrorDetails::SessionBudgetExceeded
+            | CodexErrorDetails::WorkflowTokenBudgetExceeded
             | CodexErrorDetails::Interrupted
             | CodexErrorDetails::EnvVar(_)
             | CodexErrorDetails::Fatal(_)
@@ -420,7 +427,10 @@ impl CodexErr {
     pub fn to_codex_protocol_error(&self) -> CodexErrorInfo {
         match &self.details {
             CodexErrorDetails::ContextWindowExceeded => CodexErrorInfo::ContextWindowExceeded,
-            CodexErrorDetails::SessionBudgetExceeded => CodexErrorInfo::SessionBudgetExceeded,
+            CodexErrorDetails::SessionBudgetExceeded
+            | CodexErrorDetails::WorkflowTokenBudgetExceeded => {
+                CodexErrorInfo::SessionBudgetExceeded
+            }
             CodexErrorDetails::UsageLimitReached(_)
             | CodexErrorDetails::QuotaExceeded
             | CodexErrorDetails::UsageNotIncluded => CodexErrorInfo::UsageLimitExceeded,

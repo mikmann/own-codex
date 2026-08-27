@@ -211,6 +211,33 @@ fn zero_advisory_budgets_are_rejected_with_the_config_path() {
 }
 
 #[test]
+fn workflow_budget_must_fit_the_runtime_token_counter() {
+    let config = ExtendedWorkflowToml {
+        workflow_budget_tokens: Some(u64::MAX),
+        ..Default::default()
+    };
+
+    let error = ExtendedWorkflowConfig::resolve(Some(&config)).expect_err("oversized budget");
+    assert!(error.contains("extended_workflow.workflow_budget_tokens"));
+    assert!(error.contains(&i64::MAX.to_string()));
+}
+
+#[test]
+fn zero_workflow_budget_means_unlimited() {
+    let config = ExtendedWorkflowToml {
+        workflow_budget_tokens: Some(0),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        ExtendedWorkflowConfig::resolve(Some(&config))
+            .expect("unlimited workflow budget")
+            .workflow_budget_tokens,
+        Some(0)
+    );
+}
+
+#[test]
 fn context_budget_must_fit_the_runtime_token_counter() {
     let config = ExtendedWorkflowToml {
         experts: Some(WorkflowProcessToml {

@@ -206,12 +206,15 @@ mod tests {
 
     #[test]
     fn environment_id_fallback_has_cwd_prefix() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let env_id = environment_id_from_cwd(dir.path());
-        let canonical = dir
-            .path()
+        let current_dir = std::env::current_dir().expect("current directory");
+        let filesystem_root = current_dir
+            .ancestors()
+            .last()
+            .expect("current directory should have a filesystem root");
+        let env_id = environment_id_from_cwd(filesystem_root);
+        let canonical = filesystem_root
             .canonicalize()
-            .expect("tempdir canonical path should exist")
+            .expect("filesystem root should have a canonical path")
             .to_string_lossy()
             .into_owned();
         let mut hasher = Sha256::new();

@@ -537,6 +537,12 @@ pub enum Op {
     /// Use this when callers intentionally want to stop long-lived background shells.
     CleanBackgroundTerminals,
 
+    /// Increase the active extended-workflow token ceiling by a percentage of its base limit.
+    ExtendWorkflowTokenBudget { percent: u8 },
+
+    /// Abandon the active extended workflow and reset only its token counter.
+    ResetWorkflowTokenBudget,
+
     /// Start a realtime conversation stream.
     RealtimeConversationStart(ConversationStartParams),
 
@@ -868,6 +874,8 @@ impl Op {
         match self {
             Self::Interrupt => "interrupt",
             Self::CleanBackgroundTerminals => "clean_background_terminals",
+            Self::ExtendWorkflowTokenBudget { .. } => "extend_workflow_token_budget",
+            Self::ResetWorkflowTokenBudget => "reset_workflow_token_budget",
             Self::RealtimeConversationStart(_) => "realtime_conversation_start",
             Self::RealtimeConversationAudio(_) => "realtime_conversation_audio",
             Self::RealtimeConversationText(_) => "realtime_conversation_text",
@@ -2154,6 +2162,29 @@ impl TokenUsageInfo {
 pub struct TokenCountEvent {
     pub info: Option<TokenUsageInfo>,
     pub rate_limits: Option<RateLimitSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_budget: Option<WorkflowTokenBudgetStatus>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct WorkflowTokenBudgetStatus {
+    #[ts(type = "number")]
+    pub session_tokens_used: i64,
+    #[ts(type = "number")]
+    pub workflow_tokens_used: i64,
+    #[ts(type = "number")]
+    pub base_limit_tokens: i64,
+    #[ts(type = "number")]
+    pub effective_limit_tokens: i64,
+    pub active: bool,
+}
+
+impl WorkflowTokenBudgetStatus {
+    pub fn exhausted(self) -> bool {
+        self.active
+            && self.effective_limit_tokens > 0
+            && self.workflow_tokens_used >= self.effective_limit_tokens
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]

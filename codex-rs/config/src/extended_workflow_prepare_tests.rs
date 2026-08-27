@@ -8,7 +8,7 @@ fn repository() -> TempDir {
 }
 
 #[test]
-fn plans_and_applies_minimal_empty_repository() {
+fn plans_and_applies_complete_empty_repository() {
     let repo = repository();
     let plan = plan_extended_workflow_preparation(repo.path()).expect("plan");
     assert_eq!(plan.action, PrepareAction::Create);
@@ -20,8 +20,52 @@ fn plans_and_applies_minimal_empty_repository() {
     assert_eq!(report.created, vec![plan.config_path.clone()]);
     let contents = fs::read_to_string(&plan.config_path).expect("prepared config");
     assert!(contents.contains("[extended_workflow]"));
+    assert!(contents.contains("workflow_budget_tokens = 0"));
+    assert!(contents.contains("name = \"expert_1\""));
+    assert!(contents.contains("model = \"gpt-5.6-terra\""));
+    assert!(contents.contains("name = \"reviewer_4\""));
+    assert!(contents.contains("reasoning_effort = \"max\""));
+    assert!(contents.contains("\"session-tokens\", \"workflow-tokens\""));
     assert!(!repo.path().join("AGENTS.md").exists());
     assert!(!repo.path().join(CODEX_DIR).join("agents").exists());
+}
+
+#[test]
+fn global_preparation_uses_the_selected_home_and_never_overwrites() {
+    let home = tempfile::tempdir().expect("global home");
+    let plan = plan_global_extended_workflow_preparation(home.path()).expect("global plan");
+    assert_eq!(plan.scope, PrepareWorkflowScope::Global);
+    assert_eq!(plan.action, PrepareAction::Create);
+    assert_eq!(
+        plan.config_path,
+        fs::canonicalize(home.path())
+            .expect("canonical global home")
+            .join(CONFIG_FILE)
+    );
+    apply_extended_workflow_preparation(&plan).expect("global apply");
+
+    let original = fs::read_to_string(&plan.config_path).expect("global config");
+    let second = plan_global_extended_workflow_preparation(home.path()).expect("second plan");
+    assert_eq!(second.action, PrepareAction::Unchanged);
+    apply_extended_workflow_preparation(&second).expect("unchanged apply");
+    assert_eq!(
+        fs::read_to_string(&plan.config_path).expect("preserved global config"),
+        original
+    );
+}
+
+#[test]
+fn global_preparation_creates_a_missing_extended_workflow_home() {
+    let parent = tempfile::tempdir().expect("global parent");
+    let home = parent.path().join(".codex-extended-workflow");
+    let plan = plan_global_extended_workflow_preparation(&home).expect("global plan");
+    assert_eq!(plan.scope, PrepareWorkflowScope::Global);
+    assert_eq!(plan.action, PrepareAction::Create);
+    assert!(!home.exists(), "preview must not create the global home");
+
+    let report = apply_extended_workflow_preparation(&plan).expect("global apply");
+    assert_eq!(report.created, vec![plan.config_path.clone()]);
+    assert!(plan.config_path.is_file());
 }
 
 #[test]

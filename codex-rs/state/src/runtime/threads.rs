@@ -1880,6 +1880,10 @@ ON CONFLICT(id) DO UPDATE SET
             .bind(thread_id_string)
             .execute(&mut *tx)
             .await?;
+            sqlx::query("DELETE FROM extended_workflow_token_budgets WHERE root_thread_id = ?")
+                .bind(thread_id_string)
+                .execute(&mut *tx)
+                .await?;
         }
         for thread_id_string in &thread_id_strings {
             sqlx::query("DELETE FROM thread_dynamic_tools WHERE thread_id = ?")
@@ -2759,6 +2763,13 @@ mod tests {
         .fetch_one(runtime.pool.as_ref())
         .await?;
         assert_eq!(workflow_validation_count, 0);
+        let workflow_budget_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM extended_workflow_token_budgets WHERE root_thread_id = ?",
+        )
+        .bind(thread_id.to_string())
+        .fetch_one(runtime.pool.as_ref())
+        .await?;
+        assert_eq!(workflow_budget_count, 0);
         assert_eq!(
             runtime.thread_goals().get_thread_goal(thread_id).await?,
             None
@@ -4084,6 +4095,7 @@ mod tests {
                     model_context_window: None,
                 }),
                 rate_limits: None,
+                workflow_budget: None,
             },
         ))];
         let override_updated_at =

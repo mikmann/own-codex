@@ -1414,6 +1414,7 @@ async fn paginated_projection_accepts_float_rate_limits_and_later_final_answers(
                 plan_type: None,
                 rate_limit_reached_type: None,
             }),
+            workflow_budget: None,
         }))
     };
 

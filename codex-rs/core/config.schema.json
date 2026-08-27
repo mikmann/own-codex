@@ -996,7 +996,7 @@
           "$ref": "#/definitions/WorkflowProcessToml"
         },
         "workflow_budget_tokens": {
-          "description": "Advisory token budget for the complete workflow. This is not a provider hard limit.",
+          "description": "Enforced cumulative provider-token stop for the active workflow and all subagents.\n\nEnforcement happens after each provider response, so responses already in flight can cross the configured limit before later sampling is stopped.",
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"

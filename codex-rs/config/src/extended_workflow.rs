@@ -25,7 +25,10 @@ pub struct ExtendedWorkflowToml {
     pub enabled: Option<bool>,
     /// Marks normal model-visible workflow diagnostics as audit-enabled. No files are written.
     pub audit_mode: Option<bool>,
-    /// Advisory token budget for the complete workflow. This is not a provider hard limit.
+    /// Enforced cumulative provider-token stop for the active workflow and all subagents.
+    ///
+    /// Enforcement happens after each provider response, so responses already in flight can cross
+    /// the configured limit before later sampling is stopped.
     pub workflow_budget_tokens: Option<u64>,
     /// Hard UTF-8 byte limit for one structured expert or reviewer result.
     pub max_result_bytes: Option<usize>,
@@ -123,10 +126,15 @@ impl ExtendedWorkflowConfig {
                 ..Self::default()
             });
         };
-        validate_positive_optional(
-            "extended_workflow.workflow_budget_tokens",
-            config.workflow_budget_tokens,
-        )?;
+        if config
+            .workflow_budget_tokens
+            .is_some_and(|budget| i64::try_from(budget).is_err())
+        {
+            return Err(format!(
+                "extended_workflow.workflow_budget_tokens must be at most {} tokens",
+                i64::MAX
+            ));
+        }
         let max_result_bytes = config.max_result_bytes.unwrap_or(DEFAULT_MAX_RESULT_BYTES);
         if !(1..=HARD_MAX_RESULT_BYTES).contains(&max_result_bytes) {
             return Err(format!(
@@ -342,23 +350,76 @@ fn profile(name: &str, role: &str) -> WorkflowAgentProfileConfig {
     }
 }
 
+fn configured_profile(
+    name: &str,
+    role: &str,
+    model: &str,
+    reasoning_effort: ReasoningEffort,
+) -> WorkflowAgentProfileConfig {
+    WorkflowAgentProfileConfig {
+        model: Some(model.to_string()),
+        reasoning_effort: Some(reasoning_effort),
+        ..profile(name, role)
+    }
+}
+
 fn default_expert_profiles() -> Vec<WorkflowAgentProfileConfig> {
     vec![
-        profile("architecture", "Architecture"),
-        profile("orchestration", "Orchestration and context"),
-        profile("security", "Security and permissions"),
+        configured_profile(
+            "expert_1",
+            "Architecture",
+            "gpt-5.6-sol",
+            ReasoningEffort::High,
+        ),
+        configured_profile(
+            "expert_2",
+            "Orchestration and context",
+            "gpt-5.6-terra",
+            ReasoningEffort::XHigh,
+        ),
+        configured_profile(
+            "expert_3",
+            "Security and permissions",
+            "gpt-5.5",
+            ReasoningEffort::High,
+        ),
+        configured_profile(
+            "expert_4",
+            "Testing and compatibility",
+            "gpt-5.6-sol",
+            ReasoningEffort::Max,
+        ),
         profile("cli_ux", "CLI and user experience"),
-        profile("testing", "Testing and compatibility"),
         profile("performance", "Performance and concurrency"),
     ]
 }
 
 fn default_reviewer_profiles() -> Vec<WorkflowAgentProfileConfig> {
     vec![
-        profile("correctness", "Correctness and architecture"),
-        profile("security", "Security and permissions"),
-        profile("reliability", "Concurrency and reliability"),
-        profile("compatibility", "Testing and backward compatibility"),
+        configured_profile(
+            "reviewer_1",
+            "Correctness and architecture",
+            "gpt-5.6-sol",
+            ReasoningEffort::High,
+        ),
+        configured_profile(
+            "reviewer_2",
+            "Security and permissions",
+            "gpt-5.6-terra",
+            ReasoningEffort::XHigh,
+        ),
+        configured_profile(
+            "reviewer_3",
+            "Testing and regression",
+            "gpt-5.5",
+            ReasoningEffort::High,
+        ),
+        configured_profile(
+            "reviewer_4",
+            "Product and workflow compatibility",
+            "gpt-5.6-sol",
+            ReasoningEffort::Max,
+        ),
         profile("performance", "Performance"),
         profile("documentation", "Documentation and user experience"),
     ]

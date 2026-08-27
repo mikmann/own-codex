@@ -14,10 +14,6 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use thiserror::Error;
-use toml_edit::DocumentMut;
-use toml_edit::Item;
-use toml_edit::Table;
-use toml_edit::value;
 
 const CODEX_DIR: &str = ".codex";
 const CONFIG_FILE: &str = "config.toml";
@@ -31,8 +27,16 @@ pub enum PrepareAction {
     Conflict,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrepareWorkflowScope {
+    Repository,
+    Global,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PrepareWorkflowPlan {
+    pub scope: PrepareWorkflowScope,
     pub repository_root: PathBuf,
     pub config_path: PathBuf,
     pub action: PrepareAction,
@@ -100,7 +104,7 @@ pub fn plan_extended_workflow_preparation(
             let contents = prepared_document()?;
             (
                 PrepareAction::Create,
-                "create the minimal repository workflow configuration; AGENTS.md and .codex/agents are not required"
+                "create the complete repository workflow configuration; AGENTS.md and .codex/agents are not required"
                     .to_string(),
                 Some(contents),
             )
@@ -109,6 +113,7 @@ pub fn plan_extended_workflow_preparation(
     };
 
     Ok(PrepareWorkflowPlan {
+        scope: PrepareWorkflowScope::Repository,
         repository_root,
         config_path,
         action,
@@ -116,6 +121,78 @@ pub fn plan_extended_workflow_preparation(
         before_sha256,
         desired_contents,
     })
+}
+
+pub fn plan_global_extended_workflow_preparation(
+    codex_home: &Path,
+) -> Result<PrepareWorkflowPlan, PrepareWorkflowError> {
+    let repository_root = canonicalize_planned_directory(codex_home)?;
+    ensure_directory_when_present(&repository_root)?;
+    let config_path = repository_root.join(CONFIG_FILE);
+    ensure_existing_path_within_root(&repository_root, &config_path)?;
+    ensure_file_when_present(&config_path)?;
+    let existing = match fs::read_to_string(&config_path) {
+        Ok(existing) => Some(existing),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(source) => {
+            return Err(PrepareWorkflowError::Inspect {
+                path: config_path,
+                source,
+            });
+        }
+    };
+    let before_sha256 = existing.as_deref().map(content_sha256);
+    let (action, detail, desired_contents) = match existing.as_deref() {
+        None => (
+            PrepareAction::Create,
+            "create the complete global extended-workflow configuration".to_string(),
+            Some(prepared_document()?),
+        ),
+        Some(contents) => plan_existing_config(&config_path, contents)?,
+    };
+    Ok(PrepareWorkflowPlan {
+        scope: PrepareWorkflowScope::Global,
+        repository_root,
+        config_path,
+        action,
+        detail,
+        before_sha256,
+        desired_contents,
+    })
+}
+
+fn canonicalize_planned_directory(path: &Path) -> Result<PathBuf, PrepareWorkflowError> {
+    match fs::canonicalize(path) {
+        Ok(path) => Ok(path),
+        Err(source) if source.kind() == ErrorKind::NotFound => {
+            let parent = path.parent().ok_or_else(|| PrepareWorkflowError::Inspect {
+                path: path.to_path_buf(),
+                source: io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "the global Codex home has no parent directory",
+                ),
+            })?;
+            let file_name = path
+                .file_name()
+                .ok_or_else(|| PrepareWorkflowError::Inspect {
+                    path: path.to_path_buf(),
+                    source: io::Error::new(
+                        ErrorKind::InvalidInput,
+                        "the global Codex home has no directory name",
+                    ),
+                })?;
+            let canonical_parent =
+                fs::canonicalize(parent).map_err(|source| PrepareWorkflowError::Inspect {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            Ok(canonical_parent.join(file_name))
+        }
+        Err(source) => Err(PrepareWorkflowError::Inspect {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
 }
 
 pub fn apply_extended_workflow_preparation(
@@ -127,14 +204,22 @@ pub fn apply_extended_workflow_preparation(
             message: plan.detail.clone(),
         });
     }
-    if get_git_repo_root(&plan.repository_root)
-        .and_then(|root| fs::canonicalize(root).ok())
-        .as_deref()
-        != Some(plan.repository_root.as_path())
+    if plan.scope == PrepareWorkflowScope::Repository
+        && get_git_repo_root(&plan.repository_root)
+            .and_then(|root| fs::canonicalize(root).ok())
+            .as_deref()
+            != Some(plan.repository_root.as_path())
     {
         return Err(PrepareWorkflowError::PreviewStale);
     }
-    let codex_dir = plan.repository_root.join(CODEX_DIR);
+    let codex_dir = plan
+        .config_path
+        .parent()
+        .ok_or_else(|| PrepareWorkflowError::UnsafePath {
+            path: plan.config_path.clone(),
+            message: "prepared config path has no parent directory".to_string(),
+        })?
+        .to_path_buf();
     ensure_existing_path_within_root(&plan.repository_root, &codex_dir)?;
     ensure_directory_when_present(&codex_dir)?;
     ensure_existing_path_within_root(&plan.repository_root, &plan.config_path)?;
@@ -278,21 +363,79 @@ fn plan_existing_config(
 }
 
 fn prepared_document() -> Result<String, PrepareWorkflowError> {
-    let mut document =
-        "".parse::<DocumentMut>()
-            .map_err(|error| PrepareWorkflowError::Conflict {
-                path: PathBuf::from(CONFIG_FILE),
-                message: format!("existing Codex configuration is not editable TOML: {error}"),
-            })?;
-    let mut workflow = Table::new();
-    workflow.insert("enabled", value(true));
-    workflow.decor_mut().set_prefix(
-        "# Prepared by codex-extended-workflow. Expert/reviewer defaults are built in.\n",
-    );
-    document
-        .as_table_mut()
-        .insert("extended_workflow", Item::Table(workflow));
-    Ok(document.to_string())
+    Ok(r#"# Prepared by codex-extended-workflow.
+# Existing configuration files are never overwritten; merge this template manually if needed.
+
+[extended_workflow]
+enabled = true
+audit_mode = true
+# 0 means unlimited. A non-zero value covers the main agent, experts, reviewers, and compactions.
+workflow_budget_tokens = 0
+max_result_bytes = 8192
+
+[extended_workflow.experts]
+enabled = true
+min = 2
+max = 4
+
+[[extended_workflow.experts.profiles]]
+name = "expert_1"
+role = "Architecture"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
+[[extended_workflow.experts.profiles]]
+name = "expert_2"
+role = "Orchestration and context"
+model = "gpt-5.6-terra"
+reasoning_effort = "xhigh"
+
+[[extended_workflow.experts.profiles]]
+name = "expert_3"
+role = "Security and permissions"
+model = "gpt-5.5"
+reasoning_effort = "high"
+
+[[extended_workflow.experts.profiles]]
+name = "expert_4"
+role = "Testing and compatibility"
+model = "gpt-5.6-sol"
+reasoning_effort = "max"
+
+[extended_workflow.reviewers]
+enabled = true
+min = 2
+max = 4
+
+[[extended_workflow.reviewers.profiles]]
+name = "reviewer_1"
+role = "Correctness and architecture"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
+[[extended_workflow.reviewers.profiles]]
+name = "reviewer_2"
+role = "Security and permissions"
+model = "gpt-5.6-terra"
+reasoning_effort = "xhigh"
+
+[[extended_workflow.reviewers.profiles]]
+name = "reviewer_3"
+role = "Testing and regression"
+model = "gpt-5.5"
+reasoning_effort = "high"
+
+[[extended_workflow.reviewers.profiles]]
+name = "reviewer_4"
+role = "Product and workflow compatibility"
+model = "gpt-5.6-sol"
+reasoning_effort = "max"
+
+[tui]
+status_line = ["model-with-reasoning", "session-tokens", "workflow-tokens"]
+status_line_use_colors = true
+"#
+    .to_string())
 }
 
 fn ensure_directory_when_present(path: &Path) -> Result<(), PrepareWorkflowError> {
