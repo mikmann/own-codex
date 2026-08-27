@@ -27,7 +27,6 @@ use crate::responses_retry::handle_retryable_response_stream_error;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
-use crate::workflow_token_budget::WorkflowTokenBudgetLease;
 use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
 use codex_analytics::CompactionReason;
@@ -280,13 +279,9 @@ async fn run_remote_compact_task_inner_impl(
         prompt_input,
         compaction_output,
         token_usage,
-        workflow_budget_lease,
         owned_client_session: _owned_client_session,
     } = attempt;
     if let Some(token_usage) = token_usage {
-        sess.record_rollout_budget_usage(&token_usage)?;
-        sess.record_workflow_token_usage(&token_usage, &workflow_budget_lease)
-            .await?;
         analytics_details.active_context_tokens_before = Some(token_usage.input_tokens);
         analytics_details.compaction_summary_tokens = Some(token_usage.output_tokens);
         analytics_details.cached_input_tokens = Some(token_usage.cached_input_tokens);
@@ -334,7 +329,33 @@ struct RemoteCompactionV2Output {
     compaction_output: ResponseItem,
     response_id: String,
     token_usage: Option<TokenUsage>,
-    workflow_budget_lease: WorkflowTokenBudgetLease,
+}
+
+struct RemoteCompactionV2Completion {
+    compaction_output: Option<ResponseItem>,
+    response_id: String,
+    token_usage: Option<TokenUsage>,
+    output_item_count: usize,
+    compaction_count: usize,
+}
+
+impl RemoteCompactionV2Completion {
+    fn into_output(self) -> CodexResult<RemoteCompactionV2Output> {
+        if self.compaction_count != 1 {
+            return Err(CodexErr::Fatal(format!(
+                "remote compaction v2 expected exactly one compaction output item, got {} from {} output items",
+                self.compaction_count, self.output_item_count
+            )));
+        }
+        let Some(compaction_output) = self.compaction_output else {
+            unreachable!("compaction output must exist when count is exactly one");
+        };
+        Ok(RemoteCompactionV2Output {
+            compaction_output,
+            response_id: self.response_id,
+            token_usage: self.token_usage,
+        })
+    }
 }
 
 async fn run_remote_compaction_request_v2(
@@ -365,12 +386,22 @@ async fn run_remote_compaction_request_v2(
             )
             .await
         {
-            Ok(stream) => collect_compaction_output(stream, workflow_budget_lease).await,
+            Ok(stream) => collect_compaction_output(stream).await,
             Err(err) => Err(err),
         };
 
         match result {
-            Ok(compaction_output) => return Ok(compaction_output),
+            Ok(completion) => {
+                if let Some(token_usage) = completion.token_usage.as_ref() {
+                    let rollout_budget_result = sess.record_rollout_budget_usage(token_usage);
+                    let workflow_budget_result = sess
+                        .record_workflow_token_usage(token_usage, &workflow_budget_lease)
+                        .await;
+                    rollout_budget_result?;
+                    workflow_budget_result?;
+                }
+                return completion.into_output();
+            }
             Err(err) if !err.is_retryable() => return Err(err),
             Err(err) => {
                 handle_retryable_response_stream_error(
@@ -390,8 +421,7 @@ async fn run_remote_compaction_request_v2(
 
 async fn collect_compaction_output(
     mut stream: ResponseStream,
-    workflow_budget_lease: WorkflowTokenBudgetLease,
-) -> CodexResult<RemoteCompactionV2Output> {
+) -> CodexResult<RemoteCompactionV2Completion> {
     let mut output_item_count = 0usize;
     let mut compaction_count = 0usize;
     let mut compaction_output = None;
@@ -429,23 +459,15 @@ async fn collect_compaction_output(
         ));
     }
 
-    if compaction_count != 1 {
-        return Err(CodexErr::Fatal(format!(
-            "remote compaction v2 expected exactly one compaction output item, got {compaction_count} from {output_item_count} output items"
-        )));
-    }
-
-    let Some(compaction_output) = compaction_output else {
-        unreachable!("compaction output must exist when count is exactly one");
-    };
     let Some(response_id) = completed_response_id else {
         unreachable!("response id must exist after response.completed");
     };
-    Ok(RemoteCompactionV2Output {
+    Ok(RemoteCompactionV2Completion {
         compaction_output,
         response_id,
         token_usage: completed_token_usage,
-        workflow_budget_lease,
+        output_item_count,
+        compaction_count,
     })
 }
 
@@ -887,9 +909,11 @@ mod tests {
             }),
         ]);
 
-        let output = collect_compaction_output(stream, WorkflowTokenBudgetLease::Disabled)
+        let output = collect_compaction_output(stream)
             .await
-            .expect("compaction should be collected");
+            .expect("compaction should be collected")
+            .into_output()
+            .expect("compaction should be valid");
 
         assert_eq!(output.compaction_output, compaction);
         assert_eq!(output.response_id, "resp-compact");
@@ -904,6 +928,38 @@ mod tests {
                 total_tokens: 123_498,
                 codex_rollout_budget_units: None,
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_compaction_output_preserves_usage_before_structure_validation() {
+        let token_usage = TokenUsage {
+            input_tokens: 100,
+            cached_input_tokens: 20,
+            cache_write_input_tokens: 0,
+            output_tokens: 7,
+            reasoning_output_tokens: 1,
+            total_tokens: 107,
+            codex_rollout_budget_units: None,
+        };
+        let stream = response_stream(vec![Ok(ResponseEvent::Completed {
+            response_id: "resp-invalid-compact".to_string(),
+            token_usage: Some(token_usage.clone()),
+            end_turn: Some(true),
+        })]);
+
+        let completion = collect_compaction_output(stream)
+            .await
+            .expect("completed response should retain usage before validation");
+
+        assert_eq!(completion.token_usage, Some(token_usage));
+        let Err(error) = completion.into_output() else {
+            panic!("missing compaction output must fail validation");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("exactly one compaction output item")
         );
     }
 }

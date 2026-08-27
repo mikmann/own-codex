@@ -166,17 +166,24 @@ RETURNING workflow_id,
         &self,
         root_thread_id: ThreadId,
     ) -> anyhow::Result<Option<WorkflowTokenBudgetRecord>> {
-        sqlx::query(
+        let row = sqlx::query(
             r#"
 UPDATE extended_workflow_token_budgets
 SET workflow_tokens_used = 0, active = 0
-WHERE root_thread_id = ?
+WHERE root_thread_id = ? AND active = 1
+RETURNING workflow_id,
+          base_limit_tokens,
+          effective_limit_tokens,
+          workflow_tokens_used,
+          session_tokens_used,
+          active
             "#,
         )
         .bind(root_thread_id.to_string())
-        .execute(self.pool.as_ref())
+        .fetch_optional(self.pool.as_ref())
         .await?;
-        self.workflow_token_budget(root_thread_id).await
+        row.map(|row| workflow_token_budget_record(&row))
+            .transpose()
     }
 
     pub async fn workflow_token_budget(

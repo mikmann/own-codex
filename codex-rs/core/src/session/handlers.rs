@@ -738,12 +738,13 @@ pub(super) async fn submission_loop(
                     let turn_context = sess.new_default_turn_with_sub_id(sub.id.clone()).await;
                     let result = sess.close_workflow_token_budget(&turn_context).await;
                     let result = match result {
-                        Ok(()) => {
+                        Ok(true) => {
                             sess.services
                                 .agent_control
                                 .interrupt_workflow_tasks(sess.thread_id)
                                 .await
                         }
+                        Ok(false) => Ok(()),
                         Err(error) => Err(error),
                     };
                     if let Err(error) = result {

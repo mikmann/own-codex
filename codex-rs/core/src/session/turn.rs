@@ -156,6 +156,19 @@ pub(crate) async fn run_turn(
 ) -> CodexResult<Option<String>> {
     let mut client_session =
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
+    if turn_context.config.extended_workflow.enabled
+        && crate::extended_workflow::is_root_workflow_source(&turn_context.session_source)
+        && let Err(error) = sess
+            .start_or_resume_workflow_token_budget(&turn_context)
+            .await
+    {
+        sess.send_event(
+            &turn_context,
+            EventMsg::Error(error.to_error_event(/*message_prefix*/ None)),
+        )
+        .await;
+        return Ok(None);
+    }
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
@@ -899,17 +912,6 @@ async fn build_skills_and_plugins(
     if turn_context.config.extended_workflow.enabled
         && crate::extended_workflow::is_root_workflow_source(&turn_context.session_source)
     {
-        if let Err(error) = sess
-            .start_or_resume_workflow_token_budget(turn_context)
-            .await
-        {
-            sess.send_event(
-                turn_context,
-                EventMsg::Error(error.to_error_event(/*message_prefix*/ None)),
-            )
-            .await;
-            return None;
-        }
         let request_text = user_input
             .iter()
             .filter_map(|input| match input {

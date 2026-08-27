@@ -157,11 +157,12 @@ impl WorkflowTokenBudget {
             .fallback
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(snapshot) = fallback.as_mut() {
-            snapshot.status.workflow_tokens_used = 0;
-            snapshot.status.active = false;
-        }
-        Ok(fallback.as_ref().map(|snapshot| snapshot.status))
+        let Some(snapshot) = fallback.as_mut().filter(|snapshot| snapshot.status.active) else {
+            return Ok(None);
+        };
+        snapshot.status.workflow_tokens_used = 0;
+        snapshot.status.active = false;
+        Ok(Some(snapshot.status))
     }
 
     pub(crate) async fn status(

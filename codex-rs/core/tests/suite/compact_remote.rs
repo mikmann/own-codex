@@ -43,6 +43,7 @@ use codex_protocol::protocol::RealtimeOutputModality;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::user_input::UserInput;
+use codex_state::StateRuntime;
 use core_test_support::PathBufExt;
 use core_test_support::apps_test_server::configure_search_capable_model;
 use core_test_support::context_snapshot;
@@ -1522,6 +1523,77 @@ async fn remote_compact_v2_accepts_additional_output_items_before_compaction() -
         "expected follow-up request to ignore unrelated output items from the compaction stream"
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_remote_compact_v2_output_still_records_workflow_usage() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_builder(
+        test_codex()
+            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+            .with_config(|config| {
+                let _ = config.features.enable(Feature::RemoteCompactionV2);
+                config.extended_workflow.enabled = true;
+                config.extended_workflow.workflow_budget_tokens = Some(1_000);
+                config.extended_workflow.experts.enabled = false;
+                config.extended_workflow.reviewers.enabled = false;
+            }),
+    )
+    .await?;
+    let codex = harness.test().codex.clone();
+    let requests = responses::mount_sse_sequence(
+        harness.server(),
+        vec![
+            responses::sse(vec![
+                responses::ev_assistant_message("initial-answer", "Initial workflow complete."),
+                responses::ev_completed_with_tokens("initial-response", /*total_tokens*/ 10),
+            ]),
+            responses::sse(vec![
+                responses::ev_assistant_message("invalid-compact", "Not a compaction item."),
+                responses::ev_completed_with_tokens("invalid-compaction", /*total_tokens*/ 25),
+            ]),
+        ],
+    )
+    .await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "Complete an initial workflow.".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    codex.submit(Op::Compact).await?;
+    let error = wait_for_event_match(&codex, |event| match event {
+        EventMsg::Error(error) => Some(error.message.clone()),
+        _ => None,
+    })
+    .await;
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    assert!(error.contains("exactly one compaction output item"));
+    assert_eq!(requests.requests().len(), 2);
+    let state_db = StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(harness.test().config.codex_home.clone()),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    let status = state_db
+        .workflow_token_budget(harness.test().session_configured.thread_id)
+        .await?
+        .expect("workflow budget should contain malformed response usage");
+    assert_eq!(status.session_tokens_used, 35);
+    assert_eq!(status.workflow_tokens_used, 25);
+    assert!(status.active);
     Ok(())
 }
 

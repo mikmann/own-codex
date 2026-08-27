@@ -132,6 +132,64 @@ async fn workflow_limit_counts_provider_tokens_and_blocks_the_next_turn() -> Res
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn next_workflow_starts_budget_before_pre_sampling_compaction() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let requests = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("workflow-before-compact"),
+                ev_assistant_message("answer-before-compact", "First workflow complete."),
+                ev_completed_with_tokens("workflow-before-compact", /*total_tokens*/ 30),
+            ]),
+            sse(vec![
+                ev_response_created("workflow-compact"),
+                ev_assistant_message("workflow-summary", "Compacted history."),
+                ev_completed_with_tokens("workflow-compact", /*total_tokens*/ 10),
+            ]),
+            sse(vec![
+                ev_response_created("workflow-after-compact"),
+                ev_assistant_message("answer-after-compact", "Second workflow complete."),
+                ev_completed_with_tokens("workflow-after-compact", /*total_tokens*/ 10),
+            ]),
+        ],
+    )
+    .await;
+    let mut builder = test_codex().with_config(|config| {
+        config.extended_workflow.enabled = true;
+        config.extended_workflow.workflow_budget_tokens = Some(100);
+        config.extended_workflow.experts.enabled = false;
+        config.extended_workflow.reviewers.enabled = false;
+        config.model_auto_compact_token_limit = Some(20);
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+
+    test.submit_turn("Complete the first workflow.").await?;
+    test.submit_turn("Start the next workflow after compaction.")
+        .await?;
+
+    assert_eq!(
+        requests.requests().len(),
+        3,
+        "the next workflow must initialize its budget before compacting and sampling"
+    );
+    let state_db = StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(test.config.codex_home.clone()),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    let status = state_db
+        .workflow_token_budget(test.session_configured.thread_id)
+        .await?
+        .expect("workflow budget should persist session totals");
+    assert_eq!(status.session_tokens_used, 50);
+    assert!(!status.active);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resumed_exhausted_workflow_stops_before_sampling() -> Result<()> {
     skip_if_no_network!(Ok(()));
 

@@ -55,7 +55,16 @@ async fn workflow_budget_persists_lifecycle_and_session_total() -> anyhow::Resul
         }
     );
 
-    runtime.close_workflow_token_budget(root_thread_id).await?;
+    let closed = runtime
+        .close_workflow_token_budget(root_thread_id)
+        .await?
+        .expect("active workflow should close");
+    assert!(!closed.active);
+    assert_eq!(
+        runtime.close_workflow_token_budget(root_thread_id).await?,
+        None,
+        "an inactive workflow must not report a second close"
+    );
     let next = runtime
         .start_or_resume_workflow_token_budget(root_thread_id, 2_000)
         .await?;

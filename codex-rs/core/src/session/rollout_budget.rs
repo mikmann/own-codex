@@ -198,21 +198,23 @@ impl Session {
     pub(crate) async fn close_workflow_token_budget(
         &self,
         turn_context: &TurnContext,
-    ) -> CodexResult<()> {
+    ) -> CodexResult<bool> {
         let root_thread_id = self
             .services
             .agent_control
             .root_thread_id_for(self.thread_id)
             .await;
-        self.services
+        let closed = self
+            .services
             .agent_control
             .workflow_token_budget()
             .close(self.services.state_db.as_ref(), root_thread_id)
             .await
             .map_err(|error| {
                 CodexErr::Fatal(format!("failed to close workflow token budget: {error}"))
-            })?;
+            })?
+            .is_some();
         self.send_token_count_event(turn_context).await;
-        Ok(())
+        Ok(closed)
     }
 }
