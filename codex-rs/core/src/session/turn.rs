@@ -156,19 +156,26 @@ pub(crate) async fn run_turn(
 ) -> CodexResult<Option<String>> {
     let mut client_session =
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
-    if turn_context.config.extended_workflow.enabled
+    let workflow_budget_start = if turn_context.config.extended_workflow.enabled
         && crate::extended_workflow::is_root_workflow_source(&turn_context.session_source)
-        && let Err(error) = sess
+    {
+        match sess
             .start_or_resume_workflow_token_budget(&turn_context)
             .await
-    {
-        sess.send_event(
-            &turn_context,
-            EventMsg::Error(error.to_error_event(/*message_prefix*/ None)),
-        )
-        .await;
-        return Ok(None);
-    }
+        {
+            Ok(start) => Some(start),
+            Err(error) => {
+                sess.send_event(
+                    &turn_context,
+                    EventMsg::Error(error.to_error_event(/*message_prefix*/ None)),
+                )
+                .await;
+                return Ok(None);
+            }
+        }
+    } else {
+        None
+    };
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
@@ -557,11 +564,13 @@ pub(crate) async fn run_turn(
                     {
                         return Ok(None);
                     }
-                    if turn_context.config.extended_workflow.enabled
-                        && crate::extended_workflow::is_root_workflow_source(
-                            &turn_context.session_source,
-                        )
-                        && let Err(error) = sess.close_workflow_token_budget(&turn_context).await
+                    if let Some(workflow_budget_start) = workflow_budget_start.as_ref()
+                        && let Err(error) = sess
+                            .close_workflow_token_budget(
+                                &turn_context,
+                                workflow_budget_start.lease(),
+                            )
+                            .await
                     {
                         sess.send_event(
                             &turn_context,
@@ -1279,6 +1288,23 @@ async fn run_auto_compact(
                 step_context,
                 fallback_step_context,
                 client_session,
+                initial_context_injection,
+                reason,
+                phase,
+            )
+            .await?;
+        }
+        RemoteCompactionSupport::V1 | RemoteCompactionSupport::V2
+            if crate::workflow_token_budget::requires_metered_compaction(&turn_context.config) =>
+        {
+            emit_compact_metric(
+                &sess.services.session_telemetry,
+                "local",
+                /*manual*/ false,
+            );
+            run_inline_auto_compact_task(
+                Arc::clone(sess),
+                Arc::clone(turn_context),
                 initial_context_injection,
                 reason,
                 phase,

@@ -10,6 +10,7 @@ use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use codex_protocol::auth::AuthMode;
+use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_rollout_trace::CompactionTraceContext;
@@ -29,6 +30,12 @@ pub(super) async fn run_remote_compact_attempt(
     analytics_details: &mut CompactionAnalyticsDetails,
 ) -> CodexResult<RemoteCompactAttempt> {
     let turn_context = &step_context.turn;
+    if crate::workflow_token_budget::requires_metered_compaction(&turn_context.config) {
+        return Err(CodexErr::Fatal(
+            "remote compaction v1 cannot enforce a positive workflow token limit because the endpoint does not report token usage"
+                .to_string(),
+        ));
+    }
     let mut history = sess.clone_history().await;
     let base_instructions = sess.get_base_instructions().await;
     let (rewritten_outputs, estimated_deleted_tokens) =

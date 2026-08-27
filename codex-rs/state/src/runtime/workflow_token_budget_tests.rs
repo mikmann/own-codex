@@ -106,6 +106,29 @@ async fn active_workflow_keeps_its_original_limit_on_resume() -> anyhow::Result<
 }
 
 #[tokio::test]
+async fn start_outcome_distinguishes_new_and_resumed_generations() -> anyhow::Result<()> {
+    let runtime = runtime().await?;
+    let root_thread_id = ThreadId::new();
+
+    let first = runtime
+        .start_or_resume_workflow_token_budget_with_outcome(root_thread_id, 1_000)
+        .await?;
+    let WorkflowTokenBudgetStartOutcome::StartedNew(first) = first else {
+        panic!("the first generation must be reported as new");
+    };
+    let resumed = runtime
+        .start_or_resume_workflow_token_budget_with_outcome(root_thread_id, 2_000)
+        .await?;
+    let WorkflowTokenBudgetStartOutcome::Resumed(resumed) = resumed else {
+        panic!("an active generation must be reported as resumed");
+    };
+
+    assert_eq!(resumed.workflow_id, first.workflow_id);
+    assert_eq!(resumed.base_limit_tokens, 1_000);
+    Ok(())
+}
+
+#[tokio::test]
 async fn stale_workflow_usage_only_updates_the_session_total() -> anyhow::Result<()> {
     let runtime = runtime().await?;
     let root_thread_id = ThreadId::new();
@@ -118,6 +141,13 @@ async fn stale_workflow_usage_only_updates_the_session_total() -> anyhow::Result
         .await?;
 
     assert_ne!(first.workflow_id, second.workflow_id);
+    assert_eq!(
+        runtime
+            .close_workflow_token_budget_generation(root_thread_id, &first.workflow_id)
+            .await?,
+        None,
+        "a stale generation must not close the active workflow"
+    );
     assert_eq!(
         runtime
             .record_workflow_token_usage(root_thread_id, &first.workflow_id, 700)

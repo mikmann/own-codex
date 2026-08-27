@@ -12,12 +12,36 @@ pub struct WorkflowTokenBudgetRecord {
     pub active: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkflowTokenBudgetStartOutcome {
+    StartedNew(WorkflowTokenBudgetRecord),
+    Resumed(WorkflowTokenBudgetRecord),
+}
+
+impl WorkflowTokenBudgetStartOutcome {
+    pub fn record(&self) -> &WorkflowTokenBudgetRecord {
+        match self {
+            Self::StartedNew(record) | Self::Resumed(record) => record,
+        }
+    }
+}
+
 impl StateRuntime {
     pub async fn start_or_resume_workflow_token_budget(
         &self,
         root_thread_id: ThreadId,
         base_limit_tokens: i64,
     ) -> anyhow::Result<WorkflowTokenBudgetRecord> {
+        self.start_or_resume_workflow_token_budget_with_outcome(root_thread_id, base_limit_tokens)
+            .await
+            .map(|outcome| outcome.record().clone())
+    }
+
+    pub async fn start_or_resume_workflow_token_budget_with_outcome(
+        &self,
+        root_thread_id: ThreadId,
+        base_limit_tokens: i64,
+    ) -> anyhow::Result<WorkflowTokenBudgetStartOutcome> {
         let workflow_id = uuid::Uuid::new_v4().to_string();
         let row = sqlx::query(
             r#"
@@ -55,12 +79,17 @@ RETURNING workflow_id,
             "#,
         )
         .bind(root_thread_id.to_string())
-        .bind(workflow_id)
+        .bind(&workflow_id)
         .bind(base_limit_tokens)
         .bind(base_limit_tokens)
         .fetch_one(self.pool.as_ref())
         .await?;
-        workflow_token_budget_record(&row)
+        let record = workflow_token_budget_record(&row)?;
+        if record.workflow_id == workflow_id {
+            Ok(WorkflowTokenBudgetStartOutcome::StartedNew(record))
+        } else {
+            Ok(WorkflowTokenBudgetStartOutcome::Resumed(record))
+        }
     }
 
     pub async fn record_workflow_token_usage(
@@ -180,6 +209,32 @@ RETURNING workflow_id,
             "#,
         )
         .bind(root_thread_id.to_string())
+        .fetch_optional(self.pool.as_ref())
+        .await?;
+        row.map(|row| workflow_token_budget_record(&row))
+            .transpose()
+    }
+
+    pub async fn close_workflow_token_budget_generation(
+        &self,
+        root_thread_id: ThreadId,
+        workflow_id: &str,
+    ) -> anyhow::Result<Option<WorkflowTokenBudgetRecord>> {
+        let row = sqlx::query(
+            r#"
+UPDATE extended_workflow_token_budgets
+SET workflow_tokens_used = 0, active = 0
+WHERE root_thread_id = ? AND workflow_id = ? AND active = 1
+RETURNING workflow_id,
+          base_limit_tokens,
+          effective_limit_tokens,
+          workflow_tokens_used,
+          session_tokens_used,
+          active
+            "#,
+        )
+        .bind(root_thread_id.to_string())
+        .bind(workflow_id)
         .fetch_optional(self.pool.as_ref())
         .await?;
         row.map(|row| workflow_token_budget_record(&row))

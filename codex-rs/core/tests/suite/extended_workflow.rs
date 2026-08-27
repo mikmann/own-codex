@@ -190,6 +190,62 @@ async fn next_workflow_starts_budget_before_pre_sampling_compaction() -> Result<
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_compaction_preserves_an_existing_active_workflow_generation() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let response = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("manual-active-workflow-compact"),
+            ev_assistant_message("manual-active-workflow-summary", "Compacted history."),
+            ev_completed_with_tokens("manual-active-workflow-compact", /*total_tokens*/ 25),
+        ]),
+    )
+    .await;
+    let mut builder = test_codex().with_config(|config| {
+        config.extended_workflow.enabled = true;
+        config.extended_workflow.workflow_budget_tokens = Some(1_000);
+        config.extended_workflow.experts.enabled = false;
+        config.extended_workflow.reviewers.enabled = false;
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+    let state_db = StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(test.config.codex_home.clone()),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    let active = state_db
+        .start_or_resume_workflow_token_budget(test.session_configured.thread_id, 1_000)
+        .await?;
+    state_db
+        .record_workflow_token_usage(test.session_configured.thread_id, &active.workflow_id, 400)
+        .await?;
+
+    test.codex.submit(Op::Compact).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    assert_eq!(response.requests().len(), 1);
+    assert_eq!(
+        state_db
+            .workflow_token_budget(test.session_configured.thread_id)
+            .await?,
+        Some(codex_state::WorkflowTokenBudgetRecord {
+            workflow_id: active.workflow_id,
+            base_limit_tokens: 1_000,
+            effective_limit_tokens: 1_000,
+            workflow_tokens_used: 425,
+            session_tokens_used: 425,
+            active: true,
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resumed_exhausted_workflow_stops_before_sampling() -> Result<()> {
     skip_if_no_network!(Ok(()));
 

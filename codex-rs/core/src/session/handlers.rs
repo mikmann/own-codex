@@ -736,7 +736,7 @@ pub(super) async fn submission_loop(
                 }
                 Op::ResetWorkflowTokenBudget => {
                     let turn_context = sess.new_default_turn_with_sub_id(sub.id.clone()).await;
-                    let result = sess.close_workflow_token_budget(&turn_context).await;
+                    let result = sess.reset_workflow_token_budget(&turn_context).await;
                     let result = match result {
                         Ok(true) => {
                             sess.services

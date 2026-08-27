@@ -2,6 +2,7 @@ use super::session::Session;
 use super::turn_context::TurnContext;
 use crate::context::ContextualUserFragment;
 use crate::workflow_token_budget::WorkflowTokenBudgetLease;
+use crate::workflow_token_budget::WorkflowTokenBudgetStart;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::TokenUsage;
@@ -40,9 +41,12 @@ impl Session {
     pub(crate) async fn start_or_resume_workflow_token_budget(
         &self,
         turn_context: &TurnContext,
-    ) -> CodexResult<()> {
+    ) -> CodexResult<WorkflowTokenBudgetStart> {
         if !turn_context.config.extended_workflow.enabled {
-            return Ok(());
+            return Err(CodexErr::Fatal(
+                "cannot start a workflow token budget while extended workflow is disabled"
+                    .to_string(),
+            ));
         }
         let limit = turn_context
             .config
@@ -62,7 +66,7 @@ impl Session {
                 "workflow token limits require the persistent state database".to_string(),
             ));
         }
-        let status = self
+        let start = self
             .services
             .agent_control
             .workflow_token_budget()
@@ -73,10 +77,10 @@ impl Session {
                     "failed to initialize workflow token budget: {error}"
                 ))
             })?;
-        if status.exhausted() {
+        if start.status().exhausted() {
             return Err(CodexErr::WorkflowTokenBudgetExceeded);
         }
-        Ok(())
+        Ok(start)
     }
 
     pub(crate) async fn workflow_token_budget_lease(
@@ -198,6 +202,7 @@ impl Session {
     pub(crate) async fn close_workflow_token_budget(
         &self,
         turn_context: &TurnContext,
+        lease: &WorkflowTokenBudgetLease,
     ) -> CodexResult<bool> {
         let root_thread_id = self
             .services
@@ -208,7 +213,7 @@ impl Session {
             .services
             .agent_control
             .workflow_token_budget()
-            .close(self.services.state_db.as_ref(), root_thread_id)
+            .close(self.services.state_db.as_ref(), root_thread_id, lease)
             .await
             .map_err(|error| {
                 CodexErr::Fatal(format!("failed to close workflow token budget: {error}"))
@@ -216,5 +221,28 @@ impl Session {
             .is_some();
         self.send_token_count_event(turn_context).await;
         Ok(closed)
+    }
+
+    pub(crate) async fn reset_workflow_token_budget(
+        &self,
+        turn_context: &TurnContext,
+    ) -> CodexResult<bool> {
+        let root_thread_id = self
+            .services
+            .agent_control
+            .root_thread_id_for(self.thread_id)
+            .await;
+        let reset = self
+            .services
+            .agent_control
+            .workflow_token_budget()
+            .reset(self.services.state_db.as_ref(), root_thread_id)
+            .await
+            .map_err(|error| {
+                CodexErr::Fatal(format!("failed to reset workflow token budget: {error}"))
+            })?
+            .is_some();
+        self.send_token_count_event(turn_context).await;
+        Ok(reset)
     }
 }

@@ -1,8 +1,11 @@
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::WorkflowTokenBudgetStatus;
 use codex_rollout::state_db::StateDbHandle;
+use codex_state::WorkflowTokenBudgetStartOutcome;
 use std::sync::Mutex;
 use uuid::Uuid;
+
+use crate::config::Config;
 
 #[derive(Clone, Debug)]
 struct WorkflowTokenBudgetSnapshot {
@@ -16,6 +19,27 @@ pub(crate) enum WorkflowTokenBudgetLease {
     Active { workflow_id: String },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkflowTokenBudgetStart {
+    status: WorkflowTokenBudgetStatus,
+    lease: WorkflowTokenBudgetLease,
+    started_new: bool,
+}
+
+impl WorkflowTokenBudgetStart {
+    pub(crate) fn status(&self) -> WorkflowTokenBudgetStatus {
+        self.status
+    }
+
+    pub(crate) fn lease(&self) -> &WorkflowTokenBudgetLease {
+        &self.lease
+    }
+
+    pub(crate) fn started_new(&self) -> bool {
+        self.started_new
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct WorkflowTokenBudget {
     fallback: Mutex<Option<WorkflowTokenBudgetSnapshot>>,
@@ -27,18 +51,27 @@ impl WorkflowTokenBudget {
         state_db: Option<&StateDbHandle>,
         root_thread_id: ThreadId,
         base_limit_tokens: i64,
-    ) -> anyhow::Result<WorkflowTokenBudgetStatus> {
+    ) -> anyhow::Result<WorkflowTokenBudgetStart> {
         if let Some(state_db) = state_db {
             return state_db
-                .start_or_resume_workflow_token_budget(root_thread_id, base_limit_tokens)
+                .start_or_resume_workflow_token_budget_with_outcome(
+                    root_thread_id,
+                    base_limit_tokens,
+                )
                 .await
-                .map(workflow_token_budget_snapshot)
-                .map(|snapshot| snapshot.status);
+                .map(|outcome| {
+                    let started_new =
+                        matches!(outcome, WorkflowTokenBudgetStartOutcome::StartedNew(_));
+                    workflow_token_budget_start(outcome.record(), started_new)
+                });
         }
         let mut fallback = self
             .fallback
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let started_new = fallback
+            .as_ref()
+            .is_none_or(|snapshot| !snapshot.status.active);
         let snapshot = fallback.get_or_insert_with(|| WorkflowTokenBudgetSnapshot {
             status: WorkflowTokenBudgetStatus {
                 session_tokens_used: 0,
@@ -56,7 +89,13 @@ impl WorkflowTokenBudget {
             snapshot.status.active = true;
             snapshot.workflow_id = Uuid::new_v4().to_string();
         }
-        Ok(snapshot.status)
+        Ok(WorkflowTokenBudgetStart {
+            status: snapshot.status,
+            lease: WorkflowTokenBudgetLease::Active {
+                workflow_id: snapshot.workflow_id.clone(),
+            },
+            started_new,
+        })
     }
 
     pub(crate) async fn lease(
@@ -146,6 +185,36 @@ impl WorkflowTokenBudget {
         &self,
         state_db: Option<&StateDbHandle>,
         root_thread_id: ThreadId,
+        lease: &WorkflowTokenBudgetLease,
+    ) -> anyhow::Result<Option<WorkflowTokenBudgetStatus>> {
+        let WorkflowTokenBudgetLease::Active { workflow_id } = lease else {
+            return Ok(None);
+        };
+        if let Some(state_db) = state_db {
+            return state_db
+                .close_workflow_token_budget_generation(root_thread_id, workflow_id)
+                .await
+                .map(|record| record.map(|record| workflow_token_budget_status(&record)));
+        }
+        let mut fallback = self
+            .fallback
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(snapshot) = fallback
+            .as_mut()
+            .filter(|snapshot| snapshot.status.active && snapshot.workflow_id == *workflow_id)
+        else {
+            return Ok(None);
+        };
+        snapshot.status.workflow_tokens_used = 0;
+        snapshot.status.active = false;
+        Ok(Some(snapshot.status))
+    }
+
+    pub(crate) async fn reset(
+        &self,
+        state_db: Option<&StateDbHandle>,
+        root_thread_id: ThreadId,
     ) -> anyhow::Result<Option<WorkflowTokenBudgetStatus>> {
         if let Some(state_db) = state_db {
             return state_db
@@ -194,12 +263,33 @@ impl WorkflowTokenBudget {
     }
 }
 
+pub(crate) fn requires_metered_compaction(config: &Config) -> bool {
+    config.extended_workflow.enabled
+        && config
+            .extended_workflow
+            .workflow_budget_tokens
+            .is_some_and(|limit| limit > 0)
+}
+
 fn workflow_token_budget_snapshot(
     value: codex_state::WorkflowTokenBudgetRecord,
 ) -> WorkflowTokenBudgetSnapshot {
     WorkflowTokenBudgetSnapshot {
         status: workflow_token_budget_status(&value),
         workflow_id: value.workflow_id,
+    }
+}
+
+fn workflow_token_budget_start(
+    value: &codex_state::WorkflowTokenBudgetRecord,
+    started_new: bool,
+) -> WorkflowTokenBudgetStart {
+    WorkflowTokenBudgetStart {
+        status: workflow_token_budget_status(value),
+        lease: WorkflowTokenBudgetLease::Active {
+            workflow_id: value.workflow_id.clone(),
+        },
+        started_new,
     }
 }
 

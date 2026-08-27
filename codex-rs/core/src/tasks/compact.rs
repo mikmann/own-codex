@@ -35,9 +35,11 @@ impl SessionTask for CompactTask {
         let _profile_guard = ctx.turn_timing_state.begin_compaction();
         let tracks_workflow_budget = ctx.config.extended_workflow.enabled
             && crate::extended_workflow::is_root_workflow_source(&ctx.session_source);
-        if tracks_workflow_budget {
-            session.start_or_resume_workflow_token_budget(&ctx).await?;
-        }
+        let workflow_budget_start = if tracks_workflow_budget {
+            Some(session.start_or_resume_workflow_token_budget(&ctx).await?)
+        } else {
+            None
+        };
 
         let result = if ctx.config.features.enabled(Feature::TokenBudget) {
             crate::compact_token_budget::run_manual_compact_task(session.clone(), ctx.clone()).await
@@ -53,6 +55,26 @@ impl SessionTask for CompactTask {
                     );
                     crate::compact_remote_v2::run_remote_compact_task(session.clone(), ctx.clone())
                         .await
+                }
+                RemoteCompactionSupport::V1 | RemoteCompactionSupport::V2
+                    if crate::workflow_token_budget::requires_metered_compaction(&ctx.config) =>
+                {
+                    emit_compact_metric(
+                        &session.services.session_telemetry,
+                        "local",
+                        /*manual*/ true,
+                    );
+                    let input = vec![UserInput::Text {
+                        text: ctx
+                            .config
+                            .compact_prompt
+                            .as_deref()
+                            .unwrap_or(crate::compact::SUMMARIZATION_PROMPT)
+                            .to_string(),
+                        // Compaction prompt is synthesized; no UI element ranges to preserve.
+                        text_elements: Vec::new(),
+                    }];
+                    crate::compact::run_compact_task(session.clone(), ctx.clone(), input).await
                 }
                 RemoteCompactionSupport::V1 | RemoteCompactionSupport::V2 => {
                     emit_compact_metric(
@@ -83,8 +105,13 @@ impl SessionTask for CompactTask {
                 }
             }
         };
-        if result.is_ok() && tracks_workflow_budget {
-            session.close_workflow_token_budget(&ctx).await?;
+        if result.is_ok()
+            && let Some(workflow_budget_start) = workflow_budget_start.as_ref()
+            && workflow_budget_start.started_new()
+        {
+            session
+                .close_workflow_token_budget(&ctx, workflow_budget_start.lease())
+                .await?;
         }
         if let Err(err) = result
             && matches!(err.details(), CodexErrorDetails::TurnAborted)

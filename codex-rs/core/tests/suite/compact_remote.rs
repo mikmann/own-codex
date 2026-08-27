@@ -1598,6 +1598,53 @@ async fn invalid_remote_compact_v2_output_still_records_workflow_usage() -> Resu
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn positive_workflow_limit_uses_metered_local_compaction_instead_of_remote_v1() -> Result<()>
+{
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_builder(
+        test_codex()
+            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+            .with_config(|config| {
+                config.extended_workflow.enabled = true;
+                config.extended_workflow.workflow_budget_tokens = Some(1_000);
+                config.extended_workflow.experts.enabled = false;
+                config.extended_workflow.reviewers.enabled = false;
+            }),
+    )
+    .await?;
+    let response = mount_sse_once(
+        harness.server(),
+        sse(vec![
+            responses::ev_assistant_message("metered-local-summary", "Compacted history."),
+            responses::ev_completed_with_tokens("metered-local-compact", /*total_tokens*/ 25),
+        ]),
+    )
+    .await;
+
+    harness.test().codex.submit(Op::Compact).await?;
+    wait_for_event(&harness.test().codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    assert_eq!(response.requests().len(), 1);
+    let state_db = StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(harness.test().config.codex_home.clone()),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    let status = state_db
+        .workflow_token_budget(harness.test().session_configured.thread_id)
+        .await?
+        .expect("standalone compaction should persist session usage");
+    assert_eq!(status.session_tokens_used, 25);
+    assert_eq!(status.workflow_tokens_used, 0);
+    assert!(!status.active);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_compact_filters_deferred_dynamic_tools() -> Result<()> {
     skip_if_no_network!(Ok(()));
 

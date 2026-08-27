@@ -74,6 +74,7 @@ pub use recovery::sqlite_error_detail_is_lock;
 pub use remote_control::RemoteControlEnrollmentRecord;
 pub use threads::ThreadFilterOptions;
 pub use workflow_token_budget::WorkflowTokenBudgetRecord;
+pub use workflow_token_budget::WorkflowTokenBudgetStartOutcome;
 
 // "Partition" is the retained-log-content bucket we cap at 10 MiB:
 // - one bucket per non-null thread_id

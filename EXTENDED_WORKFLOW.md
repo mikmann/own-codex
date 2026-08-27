@@ -329,6 +329,10 @@ provider-side hard output-token cap when the API/runtime cannot do so.
   reasoning/output usage. `0` means unlimited. The CLI equivalent is
   `--workflow-token-limit <TOKENS>`; without it the repository, then global
   configuration is used, otherwise the workflow is unlimited.
+- When a positive limit is active, providers whose legacy remote-compaction v1
+  endpoint does not report token usage use the metered local compaction path
+  instead. A direct v1 call is rejected before the provider request so an
+  unmetered compaction cannot bypass the workflow ceiling.
 - The base limit and current usage are persisted in the selected Alpha-3 SQLite
   state database and restored by `resume`. A successful workflow completion
   closes the workflow and starts the next independent request at zero while the
