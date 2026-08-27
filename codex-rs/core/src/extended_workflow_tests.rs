@@ -154,20 +154,21 @@ fn insufficient_budget_blocks_before_spawn() {
 }
 
 #[test]
-fn workflow_budget_is_split_across_enabled_subagent_rounds() {
+fn workflow_budget_does_not_reduce_the_planned_agent_count() {
     let config = ExtendedWorkflowConfig {
-        workflow_budget_tokens: Some(4_800),
+        workflow_budget_tokens: Some(1),
         ..Default::default()
     };
     let plan = plan_turn("Implementiere eine Änderung.", TEST_TURN_ID, &config);
-    assert_eq!(plan.experts.estimated_tokens, 2_400);
-    assert_eq!(plan.advisory_workflow_budget, Some(4_800));
+    assert_eq!(plan.experts.selected.len(), config.experts.min);
+    assert!(!plan.experts.budget_blocked);
+    assert_eq!(plan.advisory_workflow_budget, Some(1));
 }
 
 #[test]
-fn concept_round_does_not_reserve_budget_for_an_inapplicable_reviewer_round() {
+fn zero_workflow_budget_is_unlimited_for_agent_planning() {
     let mut config = ExtendedWorkflowConfig {
-        workflow_budget_tokens: Some(4_800),
+        workflow_budget_tokens: Some(0),
         ..Default::default()
     };
     config.experts.min = 3;
@@ -176,11 +177,9 @@ fn concept_round_does_not_reserve_budget_for_an_inapplicable_reviewer_round() {
         profile.token_budget = Some(1_500);
     }
 
-    let concept = plan_turn("Create a concept for the parser.", TEST_TURN_ID, &config);
-    let work_order = plan_turn("Change the parser.", TEST_TURN_ID, &config);
-
-    assert!(!concept.experts.budget_blocked);
-    assert!(work_order.experts.budget_blocked);
+    let plan = plan_turn("Change the parser.", TEST_TURN_ID, &config);
+    assert_eq!(plan.experts.selected.len(), 3);
+    assert!(!plan.experts.budget_blocked);
 }
 
 #[test]

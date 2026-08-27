@@ -380,6 +380,7 @@ use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnModerationMetadataEvent;
 use codex_protocol::protocol::WarningEvent;
+use codex_protocol::protocol::WorkflowTokenBudgetStatus;
 use codex_protocol::user_input::UserInput;
 use codex_tools::UnifiedExecShellMode;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -3833,6 +3834,7 @@ impl Session {
                 state.token_info()
             };
             let budget_result = self.record_rollout_budget_usage(token_usage);
+            let workflow_budget_result = self.record_workflow_token_usage(token_usage).await;
             if let Some(token_info) = token_info.as_ref() {
                 for contributor in self.services.extensions.token_usage_contributors() {
                     contributor
@@ -3846,6 +3848,7 @@ impl Session {
                 }
             }
             budget_result?;
+            workflow_budget_result?;
         }
         Ok(())
     }
@@ -3929,8 +3932,30 @@ impl Session {
             let state = self.state.lock().await;
             state.token_info_and_rate_limits()
         };
-        let event = EventMsg::TokenCount(TokenCountEvent { info, rate_limits });
+        let workflow_budget = self.workflow_token_budget_status().await;
+        let event = EventMsg::TokenCount(TokenCountEvent {
+            info,
+            rate_limits,
+            workflow_budget,
+        });
         self.send_event(turn_context, event).await;
+    }
+
+    pub(crate) async fn workflow_token_budget_status(&self) -> Option<WorkflowTokenBudgetStatus> {
+        let root_thread_id = self
+            .services
+            .agent_control
+            .root_thread_id_for(self.thread_id)
+            .await;
+        self.services
+            .agent_control
+            .workflow_token_budget()
+            .status(self.services.state_db.as_ref(), root_thread_id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "failed to read workflow token budget status");
+                None
+            })
     }
 
     pub(crate) async fn set_total_tokens_full(&self, turn_context: &TurnContext) {

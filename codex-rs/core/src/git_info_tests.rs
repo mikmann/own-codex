@@ -607,9 +607,13 @@ async fn test_get_git_working_tree_state_branch_fallback() {
 
 #[tokio::test]
 async fn resolve_root_git_project_for_trust_returns_none_outside_repo() {
-    let tmp = TempDir::new().expect("tempdir");
+    let current_dir = std::env::current_dir().expect("current directory");
+    let filesystem_root = current_dir
+        .ancestors()
+        .last()
+        .expect("current directory should have a filesystem root");
     assert!(
-        resolve_root_git_project_for_trust(LOCAL_FS.as_ref(), &tmp.path().abs())
+        resolve_root_git_project_for_trust(LOCAL_FS.as_ref(), &filesystem_root.abs())
             .await
             .is_none()
     );

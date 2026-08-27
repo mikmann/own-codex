@@ -274,7 +274,10 @@ impl AgentControl {
         if let Ok(thread) = state.get_thread(thread_id).await {
             self.touch_loaded_v2_residency(&state, thread_id).await;
             let residency_pin = self.pin_v2_residency(thread_id)?;
-            if is_v2_resident_session_source(&thread.session_source) && residency_pin.is_none() {
+            if thread.multi_agent_version() == Some(MultiAgentVersion::V2)
+                && is_v2_resident_session_source(&thread.session_source)
+                && residency_pin.is_none()
+            {
                 return Err(CodexErr::UnsupportedOperation(format!(
                     "agent `{thread_id}` is not yet resident; retry the operation"
                 )));

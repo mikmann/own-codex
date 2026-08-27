@@ -1085,19 +1085,12 @@ pub fn plan_turn(input: &str, turn_id: &str, config: &ExtendedWorkflowConfig) ->
             &[&["design", "proposal"]],
         ) > 0;
     let desired_experts = desired_expert_count(&classification, &config.experts);
-    let expert_workflow_budget = subagent_round_share(
-        config.workflow_budget_tokens,
-        classification.class == RequestClass::WorkOrder
-            && config.reviewers.enabled
-            && config.reviewers.max > 0,
-    );
     let experts = plan_process(
         &classification,
         WorkflowAgentKind::Expert,
         turn_id,
         &config.experts,
         desired_experts,
-        expert_workflow_budget,
     );
     WorkflowTurnPlan {
         classification,
@@ -1110,7 +1103,7 @@ pub fn plan_turn(input: &str, turn_id: &str, config: &ExtendedWorkflowConfig) ->
         reviewer_min: config.reviewers.min,
         reviewer_max: config.reviewers.max,
         advisory_workflow_budget: config.workflow_budget_tokens,
-        budget_scope: "Budgets are advisory pre-spawn estimates for subagents. The workflow budget is split conservatively between enabled expert and reviewer rounds; provider context/input/output and main-agent tokens are reported by existing telemetry and are not presented as hard limits."
+        budget_scope: "workflow_budget_tokens is a hard cumulative provider total-token ceiling shared by the main agent, experts, reviewers, and compactions; zero or omission means unlimited. It does not reduce the planned agent count. Per-profile and round budgets remain advisory pre-spawn estimates."
             .to_string(),
         audit_mode_enabled: config.audit_mode,
         audit_files_written: false,
@@ -1124,28 +1117,13 @@ pub fn plan_reviewers(
 ) -> WorkflowProcessPlan {
     let classification = classify_request(change_summary);
     let desired = desired_reviewer_count(&classification, &config.reviewers);
-    let reviewer_workflow_budget = subagent_round_share(
-        config.workflow_budget_tokens,
-        config.experts.enabled && config.experts.max > 0,
-    );
     plan_process(
         &classification,
         WorkflowAgentKind::Reviewer,
         turn_id,
         &config.reviewers,
         desired,
-        reviewer_workflow_budget,
     )
-}
-
-fn subagent_round_share(workflow_budget: Option<u64>, another_round_enabled: bool) -> Option<u64> {
-    workflow_budget.map(|budget| {
-        if another_round_enabled {
-            budget / 2
-        } else {
-            budget
-        }
-    })
 }
 
 fn desired_expert_count(
@@ -1199,7 +1177,6 @@ fn plan_process(
     turn_id: &str,
     process: &WorkflowProcessConfig,
     mut desired: usize,
-    workflow_budget: Option<u64>,
 ) -> WorkflowProcessPlan {
     if !process.enabled || process.max == 0 || desired == 0 {
         return WorkflowProcessPlan {
@@ -1213,7 +1190,7 @@ fn plan_process(
         };
     }
 
-    let effective_budget = min_optional(process.round_budget_tokens, workflow_budget);
+    let effective_budget = process.round_budget_tokens;
     let mut budget_message = None;
     if let Some(budget) = effective_budget {
         while desired > process.min
@@ -1349,14 +1326,6 @@ fn estimated_profile_tokens(profile: &WorkflowAgentProfileConfig) -> u64 {
     profile
         .token_budget
         .unwrap_or(DEFAULT_ESTIMATED_AGENT_TOKENS)
-}
-
-fn min_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.min(right)),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
 }
 
 fn lexical_tokens(text: &str) -> Vec<&str> {

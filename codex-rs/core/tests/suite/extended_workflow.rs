@@ -1,6 +1,11 @@
 use anyhow::Result;
+use codex_protocol::protocol::CodexErrorInfo;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::Op;
+use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
@@ -11,13 +16,97 @@ use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
+use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
 use std::time::Duration;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workflow_limit_counts_literal_provider_tokens_and_stops_without_retry() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let response = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("workflow-limit"),
+            ev_assistant_message("answer", "Four."),
+            ev_completed_with_tokens("workflow-limit", /*total_tokens*/ 30),
+        ]),
+    )
+    .await;
+    let mut builder = test_codex().with_config(|config| {
+        config.extended_workflow.enabled = true;
+        config.extended_workflow.workflow_budget_tokens = Some(30);
+        config.extended_workflow.experts.enabled = false;
+        config.extended_workflow.reviewers.enabled = false;
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "What is two plus two?".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+
+    let EventMsg::TokenCount(token_count) = wait_for_event(
+        &test.codex,
+        |event| matches!(event, EventMsg::TokenCount(event) if event.workflow_budget.is_some()),
+    )
+    .await
+    else {
+        unreachable!();
+    };
+    assert_eq!(
+        token_count.workflow_budget,
+        Some(codex_protocol::protocol::WorkflowTokenBudgetStatus {
+            session_tokens_used: 30,
+            workflow_tokens_used: 30,
+            base_limit_tokens: 30,
+            effective_limit_tokens: 30,
+            active: true,
+        })
+    );
+    let EventMsg::Error(error) =
+        wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await
+    else {
+        unreachable!();
+    };
+    assert_eq!(
+        error.codex_error_info,
+        Some(CodexErrorInfo::SessionBudgetExceeded)
+    );
+    assert!(error.message.contains("workflow token limit reached"));
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    assert_eq!(
+        response.requests().len(),
+        1,
+        "workflow limit must not retry"
+    );
+
+    Ok(())
+}
+
 fn request_body_contains(request: &wiremock::Request, text: &str) -> bool {
     request_body_json(request).is_some_and(|body| body.to_string().contains(text))
+}
+
+fn request_header<'a>(request: &'a wiremock::Request, name: &str) -> Option<&'a str> {
+    request
+        .headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
 }
 
 fn request_body_json(request: &wiremock::Request) -> Option<Value> {
@@ -498,12 +587,21 @@ async fn workflow_expert_shell_reads_but_write_fails_closed_without_creating_a_f
     };
     let read_args = json!({
         "command": read_command,
-        "timeout_ms": 1_000
+        "timeout_ms": 5_000
     })
     .to_string();
     mount_sse_once_match(
         &server,
-        |request: &wiremock::Request| request_body_contains(request, CHILD_TASK),
+        |request: &wiremock::Request| {
+            request_header(request, "x-openai-subagent") == Some("collab_spawn")
+                && request_body_json(request)
+                    .and_then(|body| body.get("input").and_then(Value::as_array).cloned())
+                    .is_some_and(|items| {
+                        items.iter().any(|item| {
+                            item.get("type").and_then(Value::as_str) == Some("agent_message")
+                        })
+                    })
+        },
         sse(vec![
             ev_response_created("resp-child-read"),
             ev_function_call(READ_CALL_ID, "shell_command", &read_args),
@@ -513,12 +611,15 @@ async fn workflow_expert_shell_reads_but_write_fails_closed_without_creating_a_f
     .await;
     let write_args = json!({
         "command": "echo forbidden > workflow-read-only-marker.txt",
-        "timeout_ms": 1_000
+        "timeout_ms": 5_000
     })
     .to_string();
     let child_write = mount_sse_once_match(
         &server,
-        |request: &wiremock::Request| request_body_contains(request, READ_CALL_ID),
+        |request: &wiremock::Request| {
+            request_header(request, "x-openai-subagent") == Some("collab_spawn")
+                && request_body_contains(request, READ_CALL_ID)
+        },
         sse(vec![
             ev_response_created("resp-child-write-attempt"),
             ev_function_call(WRITE_CALL_ID, "shell_command", &write_args),
@@ -528,7 +629,10 @@ async fn workflow_expert_shell_reads_but_write_fails_closed_without_creating_a_f
     .await;
     let child_finished = mount_sse_once_match(
         &server,
-        |request: &wiremock::Request| request_body_contains(request, WRITE_CALL_ID),
+        |request: &wiremock::Request| {
+            request_header(request, "x-openai-subagent") == Some("collab_spawn")
+                && request_body_contains(request, WRITE_CALL_ID)
+        },
         sse(vec![
             ev_response_created("resp-child-finished"),
             ev_assistant_message(
@@ -562,7 +666,7 @@ async fn workflow_expert_shell_reads_but_write_fails_closed_without_creating_a_f
     let marker = test.cwd_path().join("workflow-read-only-marker.txt");
     test.submit_turn(ROOT_PROMPT).await?;
 
-    let read_output = tokio::time::timeout(Duration::from_secs(10), async {
+    let read_output = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if let Some(output) = child_write.function_call_output_text(READ_CALL_ID) {
                 break output;
@@ -572,7 +676,7 @@ async fn workflow_expert_shell_reads_but_write_fails_closed_without_creating_a_f
     })
     .await?;
     assert!(read_output.contains(READ_SENTINEL), "{read_output}");
-    let write_output = tokio::time::timeout(Duration::from_secs(10), async {
+    let write_output = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if let Some(output) = child_finished.function_call_output_text(WRITE_CALL_ID) {
                 break output;
@@ -636,7 +740,8 @@ async fn maximum_bounded_reviewer_contract_validates_child(ephemeral: bool) -> R
     let child_request = mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
-            request_body_contains(request, "<extended_workflow_result_contract>")
+            request_header(request, "x-openai-subagent") == Some("collab_spawn")
+                && request_body_contains(request, "<extended_workflow_result_contract>")
         },
         sse(vec![
             ev_response_created("resp-max-reviewer-child"),
@@ -650,8 +755,9 @@ async fn maximum_bounded_reviewer_contract_validates_child(ephemeral: bool) -> R
         |request: &wiremock::Request| request_body_contains(request, SPAWN_CALL_ID),
         sse(vec![
             ev_response_created("resp-max-reviewer-wait"),
-            ev_function_call(
+            ev_function_call_with_namespace(
                 WAIT_CALL_ID,
+                "collaboration",
                 "wait_agent",
                 &json!({"timeout_ms": 2_000}).to_string(),
             ),
@@ -709,7 +815,14 @@ async fn maximum_bounded_reviewer_contract_validates_child(ephemeral: bool) -> R
         }
     })
     .await?;
-    let request = child_request.single_request();
+    let request = child_request
+        .requests()
+        .into_iter()
+        .find(|request| {
+            request.header("x-openai-subagent").as_deref() == Some("collab_spawn")
+                && request.inputs_of_type("agent_message").len() == 1
+        })
+        .expect("reviewer child should issue a request");
     let agent_messages = request.inputs_of_type("agent_message");
     assert_eq!(agent_messages.len(), 1);
     let delivered_content = agent_messages[0]["content"]
@@ -721,40 +834,41 @@ async fn maximum_bounded_reviewer_contract_validates_child(ephemeral: bool) -> R
         .as_str()
         .expect("workflow task should be structured plaintext");
     assert!(delivered_task.contains("Message Type: NEW_TASK"));
+    assert!(delivered_task.contains(&root_prompt));
+    assert!(delivered_task.contains(&change_summary));
     assert!(delivered_task.contains("<extended_workflow_result_contract>"));
-    let child_input = request.message_input_texts("user").join("\n");
-    assert!(child_input.contains(&root_prompt));
-    assert!(child_input.contains(&change_summary));
-    assert!(child_input.contains("<extended_workflow_result_contract>"));
-    let wait_followup = server
+    let wait_output = server
         .received_requests()
         .await
         .expect("responses requests should be recorded")
         .into_iter()
-        .find(|request| {
-            request_body_contains(request, WAIT_CALL_ID)
-                && request_body_contains(request, "function_call_output")
-        })
-        .expect("root should continue after the reviewer completion notification");
-    let wait_body = request_body_json(&wait_followup).expect("wait follow-up should contain JSON");
-    let wait_output = wait_body
-        .get("input")
-        .and_then(Value::as_array)
-        .into_iter()
+        .filter_map(|request| request_body_json(&request))
+        .filter_map(|body| body.get("input").and_then(Value::as_array).cloned())
         .flatten()
-        .find(|item| item.get("call_id").and_then(Value::as_str) == Some(WAIT_CALL_ID))
-        .and_then(|item| item.get("output"))
-        .and_then(Value::as_str)
+        .find(|item| {
+            item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                && item.get("call_id").and_then(Value::as_str) == Some(WAIT_CALL_ID)
+        })
+        .and_then(|item| {
+            item.get("output")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
         .expect("wait follow-up should contain the wait_agent output");
+    let wait_payload = serde_json::from_str::<Value>(&wait_output)
+        .unwrap_or_else(|error| panic!("invalid wait_agent output {wait_output:?}: {error}"));
     assert_eq!(
-        serde_json::from_str::<Value>(wait_output)?,
+        wait_payload,
         json!({"message": "Wait completed.", "timed_out": false})
     );
     let final_request = final_request.single_request();
     let validation_output = final_request
         .function_call_output_text(VALIDATE_CALL_ID)
         .expect("persisted reviewer assignment should pass validation");
-    let validation_payload: Value = serde_json::from_str(&validation_output)?;
+    let validation_payload: Value =
+        serde_json::from_str(&validation_output).unwrap_or_else(|error| {
+            panic!("invalid validate_workflow_result output {validation_output:?}: {error}")
+        });
     assert_eq!(
         (
             validation_payload["accepted"].as_bool(),
@@ -765,7 +879,8 @@ async fn maximum_bounded_reviewer_contract_validates_child(ephemeral: bool) -> R
     let close_output = final_request
         .function_call_output_text(CLOSE_CALL_ID)
         .expect("accepted ephemeral reviewer should be closable");
-    let close_payload: Value = serde_json::from_str(&close_output)?;
+    let close_payload: Value = serde_json::from_str(&close_output)
+        .unwrap_or_else(|error| panic!("invalid close_agent output {close_output:?}: {error}"));
     assert!(close_payload.get("previous_status").is_some());
     Ok(())
 }

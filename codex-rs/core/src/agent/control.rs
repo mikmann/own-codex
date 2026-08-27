@@ -18,6 +18,7 @@ use crate::session_prefix::format_subagent_notification_message;
 use crate::thread_manager::ResumeThreadWithHistoryOptions;
 use crate::thread_manager::ThreadManagerState;
 use crate::thread_rollout_truncation::truncate_rollout_to_last_n_fork_turns;
+use crate::workflow_token_budget::WorkflowTokenBudget;
 use codex_protocol::AgentPath;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
@@ -151,6 +152,7 @@ pub(crate) struct AgentControl {
     agent_execution_limiter: Arc<AgentExecutionLimiter>,
     /// Session-scoped state shared by the root thread and every cloned sub-agent control handle.
     rollout_budget: Arc<RolloutBudget>,
+    workflow_token_budget: Arc<WorkflowTokenBudget>,
     /// Serializes lifecycle transitions against spawn publication while still allowing unrelated
     /// spawns in the same agent tree to proceed in parallel.
     lifecycle_gate: Arc<RwLock<()>>,
@@ -192,7 +194,7 @@ impl AgentControl {
         self.session_id
     }
 
-    async fn root_thread_id_for(&self, thread_id: ThreadId) -> ThreadId {
+    pub(crate) async fn root_thread_id_for(&self, thread_id: ThreadId) -> ThreadId {
         if let Some(root_thread_id) = self.state.agent_id_for_path(&AgentPath::root()) {
             return root_thread_id;
         }
@@ -218,6 +220,10 @@ impl AgentControl {
 
     pub(crate) fn rollout_budget(&self) -> &RolloutBudget {
         self.rollout_budget.as_ref()
+    }
+
+    pub(crate) fn workflow_token_budget(&self) -> &WorkflowTokenBudget {
+        self.workflow_token_budget.as_ref()
     }
 
     pub(crate) async fn begin_workflow_validation(

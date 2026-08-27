@@ -155,9 +155,9 @@ impl SkillProvider for CatalogSkillProvider {
 const FULL_CATALOG_CONTEXT_WINDOW: i64 = 40_000;
 const SHORTENING_CONTEXT_WINDOW: i64 = 12_000;
 const EXECUTOR_OMITTING_CONTEXT_WINDOW: i64 = 2_000;
-const HOST_OMITTING_CONTEXT_WINDOW: i64 = 2_000;
+const HOST_OMITTING_CONTEXT_WINDOW: i64 = 2_500;
 const MIXED_EXECUTOR_OMITTING_CONTEXT_WINDOW: i64 = 2_000;
-const MIXED_HOST_OMITTING_CONTEXT_WINDOW: i64 = 6_000;
+const MIXED_HOST_OMITTING_CONTEXT_WINDOW: i64 = 6_500;
 const HOST_CATALOG: [(&str, &str); 4] = [
     (
         "host-alpha",
@@ -203,14 +203,14 @@ const EXECUTOR_CATALOG: [(&str, &str); 6] = [
     ),
 ];
 
-fn executor_catalog(skills: &[(&str, &str)]) -> SkillCatalog {
+fn test_catalog(skills: &[(&str, &str)], source_kind: SkillSourceKind) -> SkillCatalog {
     SkillCatalog {
         entries: skills
             .iter()
             .map(|(name, description)| {
                 SkillCatalogEntry::new(
                     SkillPackageId(format!("test/{name}")),
-                    SkillAuthority::new(SkillSourceKind::Executor, "test"),
+                    SkillAuthority::new(source_kind.clone(), "test"),
                     *name,
                     *description,
                     SkillResourceId::new(format!("{name}/SKILL.md")),
@@ -236,7 +236,7 @@ fn write_host_skills(codex_home: &std::path::Path, skills: &[(&str, &str)]) -> R
 
 fn catalog_extensions(
     executor_catalog: SkillCatalog,
-    include_host_provider: bool,
+    host_provider: Option<Arc<dyn SkillProvider>>,
 ) -> (
     Arc<codex_extension_api::ExtensionRegistry<Config>>,
     std::sync::mpsc::Receiver<CapturedExtensionEvent>,
@@ -248,8 +248,8 @@ fn catalog_extensions(
         SkillProviders::new().with_executor_provider(Arc::new(CatalogSkillProvider {
             catalog: executor_catalog,
         }));
-    if include_host_provider {
-        providers = providers.with_host_provider(Arc::new(HostSkillProvider::new()));
+    if let Some(host_provider) = host_provider {
+        providers = providers.with_host_provider(host_provider);
     }
     install_with_providers(&mut extensions, providers, |config: &Config| {
         SkillsExtensionConfig {
@@ -402,8 +402,15 @@ async fn rendered_catalogs_for_turns(
     if !host_skills.is_empty() {
         write_host_skills(codex_home.path(), host_skills)?;
     }
-    let (extensions, event_rx) =
-        catalog_extensions(executor_catalog(executor_skills), !host_skills.is_empty());
+    let host_provider: Option<Arc<dyn SkillProvider>> = (!host_skills.is_empty()).then(|| {
+        Arc::new(CatalogSkillProvider {
+            catalog: test_catalog(host_skills, SkillSourceKind::Host),
+        }) as Arc<dyn SkillProvider>
+    });
+    let (extensions, event_rx) = catalog_extensions(
+        test_catalog(executor_skills, SkillSourceKind::Executor),
+        host_provider,
+    );
     let mut builder = test_codex()
         .with_home(Arc::clone(&codex_home))
         .with_extensions(extensions)
@@ -1043,13 +1050,15 @@ async fn production_turn_preserves_host_alias_root_order_across_turns() -> Resul
     }
     let first_root = AbsolutePathBuf::try_from(std::fs::canonicalize(&first_root_path)?)?;
     let second_root = AbsolutePathBuf::try_from(std::fs::canonicalize(&second_root_path)?)?;
-    let (extensions, _) =
-        catalog_extensions(SkillCatalog::default(), /*include_host_provider*/ true);
+    let (extensions, _) = catalog_extensions(
+        SkillCatalog::default(),
+        Some(Arc::new(HostSkillProvider::new())),
+    );
     let mut builder = test_codex()
         .with_home(Arc::clone(&codex_home))
         .with_extensions(extensions)
         .with_model_info_override("gpt-5.5", |model_info| {
-            model_info.context_window = Some(SHORTENING_CONTEXT_WINDOW);
+            model_info.context_window = Some(FULL_CATALOG_CONTEXT_WINDOW);
             model_info.max_context_window = None;
         })
         .with_config(configure_catalog_test);
@@ -1083,7 +1092,7 @@ async fn production_turn_preserves_host_alias_root_order_across_turns() -> Resul
             let developer_text = request.message_input_texts("developer").join("\n");
             let alias_lines = developer_text
                 .lines()
-                .filter(|line| line.starts_with("- `r"))
+                .filter(|line| expected_alias_lines.iter().any(|expected| expected == line))
                 .map(str::to_string)
                 .collect::<Vec<_>>();
             let skill_lines = developer_text
@@ -1236,8 +1245,10 @@ async fn production_turn_keeps_full_snapshot_host_skill_prompt() -> Result<()> {
         "x".repeat(8_000)
     );
     std::fs::write(skill_dir.join("SKILL.md"), &skill_contents)?;
-    let (extensions, _) =
-        catalog_extensions(SkillCatalog::default(), /*include_host_provider*/ true);
+    let (extensions, _) = catalog_extensions(
+        SkillCatalog::default(),
+        Some(Arc::new(HostSkillProvider::new())),
+    );
     let mut builder = test_codex()
         .with_home(Arc::clone(&codex_home))
         .with_extensions(extensions)
@@ -1277,8 +1288,10 @@ async fn production_turn_keeps_core_host_injection_when_catalog_listings_are_dis
         "x".repeat(8_000)
     );
     std::fs::write(skill_dir.join("SKILL.md"), &skill_contents)?;
-    let (extensions, _) =
-        catalog_extensions(SkillCatalog::default(), /*include_host_provider*/ true);
+    let (extensions, _) = catalog_extensions(
+        SkillCatalog::default(),
+        Some(Arc::new(HostSkillProvider::new())),
+    );
     let mut builder = test_codex()
         .with_home(Arc::clone(&codex_home))
         .with_extensions(extensions)
@@ -1558,7 +1571,7 @@ async fn production_turn_omits_host_skills_before_executor_skills_under_extreme_
     let host_lines = skill_lines(catalog_text(&developer_texts, "host"), "host");
     let executor_lines = skill_lines(catalog_text(&developer_texts, "exec"), "exec");
 
-    assert_eq!(skill_names(&host_lines), vec!["host-beta"]);
+    assert_eq!(skill_names(&host_lines), vec!["host-alpha"]);
     assert_eq!(
         skill_names(&executor_lines),
         EXECUTOR_CATALOG

@@ -388,8 +388,8 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
         .experts
         .profiles
         .iter_mut()
-        .find(|profile| profile.name == "architecture")
-        .expect("default architecture profile");
+        .find(|profile| profile.name == "expert_1")
+        .expect("default expert_1 profile");
     profile.agent_type = Some(role_name.clone());
     profile.model = Some("gpt-5.4".to_string());
     profile.reasoning_effort = Some(ReasoningEffort::High);
@@ -404,8 +404,8 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
         .experts
         .selected
         .iter()
-        .find(|profile| profile.name == "architecture")
-        .expect("architecture should be selected")
+        .find(|profile| profile.name == "expert_1")
+        .expect("expert_1 should be selected")
         .task_name
         .clone();
     turn.extension_data.insert(
@@ -443,7 +443,7 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
     let (content, _) = expect_text_output(output);
     let result: SpawnAgentResult =
         serde_json::from_str(&content).expect("spawn_agent result should be json");
-    assert_eq!(result.nickname.as_deref(), Some("architecture"));
+    assert_eq!(result.nickname.as_deref(), Some("expert_1"));
 
     let child_thread_id = session
         .services

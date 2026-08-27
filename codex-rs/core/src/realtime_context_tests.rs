@@ -11,6 +11,7 @@ use super::format_startup_context_blob;
 use chrono::TimeZone;
 use chrono::Utc;
 use codex_git_utils::GitSha;
+use codex_git_utils::get_git_repo_root;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::PermissionProfile;
@@ -26,6 +27,20 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
+
+fn tempdir_outside_git_repo() -> TempDir {
+    let temp_dir = TempDir::new().expect("tempdir");
+    if get_git_repo_root(temp_dir.path()).is_none() {
+        return temp_dir;
+    }
+
+    let current_dir = std::env::current_dir().expect("current directory");
+    let repo_root = get_git_repo_root(&current_dir).expect("test should run from a Git checkout");
+    let repo_parent = repo_root
+        .parent()
+        .expect("Git checkout should have a parent directory");
+    TempDir::new_in(repo_parent).expect("create tempdir outside the Git checkout")
+}
 
 fn stored_thread(cwd: &str, title: &str, first_user_message: &str) -> StoredThread {
     StoredThread {
@@ -245,7 +260,7 @@ fn fixed_section_budgets_apply_per_section_without_total_blob_truncation() {
 
 #[tokio::test]
 async fn workspace_section_requires_meaningful_structure() {
-    let cwd = TempDir::new().expect("tempdir");
+    let cwd = tempdir_outside_git_repo();
     assert_eq!(
         build_workspace_section_with_user_root(&cwd.path().abs(), /*user_root*/ None).await,
         None
@@ -291,7 +306,7 @@ async fn workspace_section_includes_user_root_tree_when_distinct() {
 
 #[tokio::test]
 async fn recent_work_section_groups_threads_by_cwd() {
-    let root = TempDir::new().expect("tempdir");
+    let root = tempdir_outside_git_repo();
     let repo = root.path().join("repo");
     let workspace_a = repo.join("workspace-a");
     let workspace_b = repo.join("workspace-b");

@@ -140,6 +140,7 @@ pub mod shell;
 pub(crate) mod shell_snapshot;
 pub mod spawn;
 pub(crate) mod state_db_bridge;
+mod workflow_token_budget;
 pub use state_db_bridge::StateDbHandle;
 pub use state_db_bridge::init_state_db;
 mod thread_rollout_truncation;

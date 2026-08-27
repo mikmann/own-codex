@@ -34,4 +34,111 @@ impl Session {
         }
         Ok(())
     }
+
+    pub(crate) async fn start_or_resume_workflow_token_budget(
+        &self,
+        turn_context: &TurnContext,
+    ) -> CodexResult<()> {
+        let limit = turn_context
+            .config
+            .extended_workflow
+            .workflow_budget_tokens
+            .unwrap_or(0);
+        let limit = i64::try_from(limit).map_err(|_| {
+            CodexErr::Fatal("workflow token limit exceeds the supported range".to_string())
+        })?;
+        let root_thread_id = self
+            .services
+            .agent_control
+            .root_thread_id_for(self.thread_id)
+            .await;
+        self.services
+            .agent_control
+            .workflow_token_budget()
+            .start_or_resume(self.services.state_db.as_ref(), root_thread_id, limit)
+            .await
+            .map_err(|error| {
+                CodexErr::Fatal(format!(
+                    "failed to initialize workflow token budget: {error}"
+                ))
+            })?;
+        Ok(())
+    }
+
+    pub(crate) async fn record_workflow_token_usage(&self, usage: &TokenUsage) -> CodexResult<()> {
+        let root_thread_id = self
+            .services
+            .agent_control
+            .root_thread_id_for(self.thread_id)
+            .await;
+        let status = self
+            .services
+            .agent_control
+            .workflow_token_budget()
+            .record_usage(
+                self.services.state_db.as_ref(),
+                root_thread_id,
+                usage.total_tokens,
+            )
+            .await
+            .map_err(|error| {
+                CodexErr::Fatal(format!("failed to persist workflow token usage: {error}"))
+            })?;
+        if status.is_some_and(codex_protocol::protocol::WorkflowTokenBudgetStatus::exhausted) {
+            return Err(CodexErr::WorkflowTokenBudgetExceeded);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn extend_workflow_token_budget(
+        &self,
+        turn_context: &TurnContext,
+        percent: u8,
+    ) -> CodexResult<()> {
+        if ![25, 50, 75, 100].contains(&percent) {
+            return Err(CodexErr::Fatal(format!(
+                "workflow token budget extension must be one of 25, 50, 75, or 100 percent; got {percent}"
+            )));
+        }
+        let root_thread_id = self
+            .services
+            .agent_control
+            .root_thread_id_for(self.thread_id)
+            .await;
+        self.services
+            .agent_control
+            .workflow_token_budget()
+            .extend(
+                self.services.state_db.as_ref(),
+                root_thread_id,
+                i64::from(percent),
+            )
+            .await
+            .map_err(|error| {
+                CodexErr::Fatal(format!("failed to extend workflow token budget: {error}"))
+            })?;
+        self.send_token_count_event(turn_context).await;
+        Ok(())
+    }
+
+    pub(crate) async fn close_workflow_token_budget(
+        &self,
+        turn_context: &TurnContext,
+    ) -> CodexResult<()> {
+        let root_thread_id = self
+            .services
+            .agent_control
+            .root_thread_id_for(self.thread_id)
+            .await;
+        self.services
+            .agent_control
+            .workflow_token_budget()
+            .close(self.services.state_db.as_ref(), root_thread_id)
+            .await
+            .map_err(|error| {
+                CodexErr::Fatal(format!("failed to close workflow token budget: {error}"))
+            })?;
+        self.send_token_count_event(turn_context).await;
+        Ok(())
+    }
 }

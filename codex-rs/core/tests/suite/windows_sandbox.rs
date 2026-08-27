@@ -95,11 +95,14 @@ fn stage_windows_sandbox_helpers() -> anyhow::Result<()> {
         let helper = codex_utils_cargo_bin::cargo_bin(helper_name)?;
         let file_name = Path::new(helper_name).with_extension("exe");
         let destination = resources_dir.join(file_name);
+        if destination.exists() {
+            continue;
+        }
         if let Err(err) = std::fs::copy(&helper, &destination) {
             // A sandbox helper can briefly remain alive after the sandboxed
             // command exits. Bazel may retry the test while that process still
             // has the staged executable open, so keep the already-staged copy.
-            if err.kind() == std::io::ErrorKind::PermissionDenied && destination.exists() {
+            if destination.exists() {
                 continue;
             }
             return Err(err).with_context(|| {
@@ -210,8 +213,26 @@ async fn windows_elevated_does_not_create_missing_workspace_metadata() -> anyhow
     stage_windows_sandbox_helpers()?;
     let workspace = TempDir::new()?;
     let cwd = dunce::canonicalize(workspace.path())?.abs();
-    let permission_profile = PermissionProfile::workspace_write()
-        .materialize_project_roots_with_workspace_roots(std::slice::from_ref(&cwd));
+    let permission_profile = PermissionProfile::from_runtime_permissions(
+        &FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Read,
+                missing_path_behavior: None,
+            },
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
+                },
+                access: FileSystemAccessMode::Write,
+                missing_path_behavior: None,
+            },
+        ]),
+        NetworkSandboxPolicy::Restricted,
+    )
+    .materialize_project_roots_with_workspace_roots(std::slice::from_ref(&cwd));
 
     let output = process_exec_tool_call(
         ExecParams {

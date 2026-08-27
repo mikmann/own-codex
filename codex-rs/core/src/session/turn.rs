@@ -544,6 +544,19 @@ pub(crate) async fn run_turn(
                     {
                         return Ok(None);
                     }
+                    if turn_context.config.extended_workflow.enabled
+                        && crate::extended_workflow::is_root_workflow_source(
+                            &turn_context.session_source,
+                        )
+                        && let Err(error) = sess.close_workflow_token_budget(&turn_context).await
+                    {
+                        sess.send_event(
+                            &turn_context,
+                            EventMsg::Error(error.to_error_event(/*message_prefix*/ None)),
+                        )
+                        .await;
+                        return Ok(None);
+                    }
                     break;
                 }
                 continue;
@@ -886,6 +899,17 @@ async fn build_skills_and_plugins(
     if turn_context.config.extended_workflow.enabled
         && crate::extended_workflow::is_root_workflow_source(&turn_context.session_source)
     {
+        if let Err(error) = sess
+            .start_or_resume_workflow_token_budget(turn_context)
+            .await
+        {
+            sess.send_event(
+                turn_context,
+                EventMsg::Error(error.to_error_event(/*message_prefix*/ None)),
+            )
+            .await;
+            return None;
+        }
         let request_text = user_input
             .iter()
             .filter_map(|input| match input {

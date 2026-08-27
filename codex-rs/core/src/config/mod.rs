@@ -3872,7 +3872,9 @@ impl Config {
             .clone();
 
         let shell_environment_policy = cfg.shell_environment_policy.into();
-        let allow_login_shell = cfg.allow_login_shell.unwrap_or(true);
+        let allow_login_shell = cfg
+            .allow_login_shell
+            .unwrap_or(!cfg!(windows) || !extended_workflow.enabled);
 
         let history = cfg.history.unwrap_or_default();
 

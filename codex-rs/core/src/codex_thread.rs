@@ -42,6 +42,7 @@ use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::protocol::W3cTraceContext;
+use codex_protocol::protocol::WorkflowTokenBudgetStatus;
 use codex_protocol::user_input::UserInput;
 use codex_thread_store::StoredThread;
 use codex_thread_store::StoredThreadHistory;
@@ -499,6 +500,11 @@ impl CodexThread {
     /// `thread/tokenUsage/updated` payload incomplete.
     pub async fn token_usage_info(&self) -> Option<TokenUsageInfo> {
         self.session.token_usage_info().await
+    }
+
+    /// Returns the persisted workflow and session token counters for this root-agent tree.
+    pub async fn workflow_token_budget_status(&self) -> Option<WorkflowTokenBudgetStatus> {
+        self.session.workflow_token_budget_status().await
     }
 
     /// Records a user-role session-prefix message without creating a new user turn boundary.

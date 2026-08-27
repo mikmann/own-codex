@@ -65,6 +65,19 @@ fn policy_closes_only_agents_with_terminal_validation_outcomes() {
 }
 
 #[test]
+fn policy_requires_clm_safe_windows_commands_and_native_patching() {
+    let policy = ExtendedWorkflowPolicy::try_new(&ExtendedWorkflowConfig::default())
+        .expect("default policy should fit");
+    assert!(policy.body().contains("Constrained Language Mode"));
+    assert!(policy.body().contains("avoid [pscustomobject]"));
+    assert!(
+        policy
+            .body()
+            .contains("never invoke apply_patch through PowerShell")
+    );
+}
+
+#[test]
 fn turn_context_is_bounded_json() {
     let plan = plan_turn(
         "Was ist Rust?",

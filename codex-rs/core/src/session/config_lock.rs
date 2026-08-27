@@ -171,7 +171,10 @@ fn save_config_resolved_fields(
         token_budget.enabled = Some(config.features.enabled(Feature::TokenBudget));
         features.token_budget = Some(FeatureToml::Config(token_budget));
     }
-    if let Some(rollout_budget) = config.rollout_budget.as_ref() {
+    if let Some(rollout_budget) = config.rollout_budget.as_ref()
+        && (config.features.enabled(Feature::RolloutBudget)
+            || config.extended_workflow.workflow_budget_tokens.is_none())
+    {
         let mut rollout_budget: RolloutBudgetConfigToml =
             resolved_config_to_toml(rollout_budget, "features.rollout_budget")?;
         rollout_budget.enabled = Some(config.features.enabled(Feature::RolloutBudget));

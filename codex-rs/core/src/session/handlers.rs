@@ -720,6 +720,31 @@ pub(super) async fn submission_loop(
                     clean_background_terminals(&sess).await;
                     false
                 }
+                Op::ExtendWorkflowTokenBudget { percent } => {
+                    let turn_context = sess.new_default_turn_with_sub_id(sub.id.clone()).await;
+                    if let Err(error) = sess
+                        .extend_workflow_token_budget(&turn_context, percent)
+                        .await
+                    {
+                        sess.send_event(
+                            &turn_context,
+                            EventMsg::Error(error.to_error_event(/*message_prefix*/ None)),
+                        )
+                        .await;
+                    }
+                    false
+                }
+                Op::ResetWorkflowTokenBudget => {
+                    let turn_context = sess.new_default_turn_with_sub_id(sub.id.clone()).await;
+                    if let Err(error) = sess.close_workflow_token_budget(&turn_context).await {
+                        sess.send_event(
+                            &turn_context,
+                            EventMsg::Error(error.to_error_event(/*message_prefix*/ None)),
+                        )
+                        .await;
+                    }
+                    false
+                }
                 Op::RealtimeConversationStart(params) => {
                     if let Err(err) =
                         handle_realtime_conversation_start(&sess, sub.id.clone(), params).await

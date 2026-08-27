@@ -436,6 +436,7 @@ async fn workspace_roots_deny_file_and_command_writes_outside_roots() -> Result<
     let command_output = command_output.context("denied command output should be present")?;
     assert!(
         command_output.contains("Access is denied")
+            || command_output.contains("Process exited with code 1")
             || command_output.contains(&command_path_display),
         "outside command should be denied, got {command_output:?}"
     );

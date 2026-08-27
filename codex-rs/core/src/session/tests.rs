@@ -2594,24 +2594,28 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
         TokenCountEvent {
             info: Some(info1),
             rate_limits: None,
+            workflow_budget: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
             info: None,
             rate_limits: None,
+            workflow_budget: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
             info: Some(info2.clone()),
             rate_limits: None,
+            workflow_budget: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
             info: None,
             rate_limits: None,
+            workflow_budget: None,
         },
     )));
 
@@ -8893,7 +8897,12 @@ async fn record_context_updates_emits_environment_item_for_time_changes() {
             &session.services.models_manager,
         )
         .await;
-    current_context.timezone = Some("Europe/Berlin".to_string());
+    let changed_timezone = if previous_context.timezone.as_deref() == Some("Europe/Berlin") {
+        "Etc/UTC"
+    } else {
+        "Europe/Berlin"
+    };
+    current_context.timezone = Some(changed_timezone.to_string());
 
     let update_items =
         record_context_update_items(&session, previous_context, current_context).await;
@@ -8904,7 +8913,7 @@ async fn record_context_updates_emits_environment_item_for_time_changes() {
         .expect("environment update item should be emitted");
     let current_date = chrono::Local::now().format("%Y-%m-%d").to_string();
     assert!(environment_update.contains(&format!("<current_date>{current_date}</current_date>")));
-    assert!(environment_update.contains("<timezone>Europe/Berlin</timezone>"));
+    assert!(environment_update.contains(&format!("<timezone>{changed_timezone}</timezone>")));
 }
 
 #[tokio::test]

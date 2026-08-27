@@ -802,6 +802,88 @@ prefill_token_weight = 0.1
 }
 
 #[tokio::test]
+async fn extended_workflow_budget_does_not_enable_weighted_rollout_budget() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config_toml: ConfigToml = toml::from_str(
+        r#"
+[extended_workflow]
+enabled = true
+workflow_budget_tokens = 10000
+"#,
+    )
+    .expect("TOML deserialization should succeed");
+    let config = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert!(!config.features.enabled(Feature::RolloutBudget));
+    assert_eq!(config.permissions.allow_login_shell, !cfg!(windows));
+    assert_eq!(config.rollout_budget, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn extended_workflow_respects_explicit_login_shell_opt_in() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config_toml: ConfigToml = toml::from_str(
+        r#"
+allow_login_shell = true
+
+[extended_workflow]
+enabled = true
+"#,
+    )
+    .expect("TOML deserialization should succeed");
+    let config = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert!(config.permissions.allow_login_shell);
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_rollout_budget_remains_independent_from_workflow_limit() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config_toml: ConfigToml = toml::from_str(
+        r#"
+[extended_workflow]
+enabled = true
+workflow_budget_tokens = 10000
+
+[features.rollout_budget]
+enabled = true
+limit_tokens = 6000
+reminder_at_remaining_tokens = [5000, 3000, 1000]
+"#,
+    )
+    .expect("TOML deserialization should succeed");
+    let config = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.rollout_budget,
+        Some(RolloutBudgetConfig {
+            limit_tokens: 6_000,
+            reminder_at_remaining_tokens: vec![5_000, 3_000, 1_000],
+            sampling_token_weight: 1.0,
+            prefill_token_weight: 1.0,
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_config_rejects_enabled_rollout_budget_without_limit() -> std::io::Result<()> {
     for config_toml in [
         "[features]\nrollout_budget = true\n",
