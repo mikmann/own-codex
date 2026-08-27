@@ -36,7 +36,7 @@ const SIDE_SLASH_COMMAND_UNAVAILABLE_HINT: &str =
     "Press Ctrl+C to return to the main thread first.";
 const GOAL_USAGE_HINT: &str = "Example: /goal improve benchmark coverage";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
-const PREPARE_EXTENDED_WORKFLOW_USAGE: &str = "Usage: /prepare-extend-workflow [apply]";
+const PREPARE_EXTENDED_WORKFLOW_USAGE: &str = "Usage: /prepare-extend-workflow [global] [apply]";
 const USAGE_CHATGPT_LOGIN_REQUIRED: &str = "Sign in with ChatGPT to use /usage.";
 
 impl ChatWidget {
@@ -132,20 +132,24 @@ impl ChatWidget {
             .send(AppEvent::RawOutputModeChanged { enabled });
     }
 
-    fn prepare_extended_workflow_repository(&mut self, apply: bool) {
+    fn prepare_extended_workflow(&mut self, apply: bool, global: bool) {
         let cwd = self
             .current_cwd
             .clone()
             .unwrap_or_else(|| self.config.cwd.to_path_buf());
-        let plan =
-            match codex_config::extended_workflow_prepare::plan_extended_workflow_preparation(&cwd)
-            {
-                Ok(plan) => plan,
-                Err(error) => {
-                    self.add_error_message(format!("Repository preparation failed: {error}"));
-                    return;
-                }
-            };
+        let plan = match if global {
+            codex_config::extended_workflow_prepare::plan_global_extended_workflow_preparation(
+                &self.config.codex_home,
+            )
+        } else {
+            codex_config::extended_workflow_prepare::plan_extended_workflow_preparation(&cwd)
+        } {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.add_error_message(format!("Repository preparation failed: {error}"));
+                return;
+            }
+        };
         let action = match plan.action {
             codex_config::extended_workflow_prepare::PrepareAction::Create => "Create",
             codex_config::extended_workflow_prepare::PrepareAction::Unchanged => "Unchanged",
@@ -164,7 +168,8 @@ impl ChatWidget {
         };
         self.add_info_message(
             format!(
-                "Repository preparation preview\nRepository: {}\n[{action}] {} — {}\n{next_step}",
+                "Extended workflow preparation preview\nScope: {}\nRoot: {}\n[{action}] {} — {}\n{next_step}",
+                if global { "global" } else { "repository" },
                 plan.repository_root.display(),
                 plan.config_path.display(),
                 plan.detail
@@ -339,7 +344,16 @@ impl ChatWidget {
                 self.submit_user_message(INIT_PROMPT.to_string().into());
             }
             SlashCommand::PrepareExtendWorkflow => {
-                self.prepare_extended_workflow_repository(/*apply*/ false);
+                self.prepare_extended_workflow(/*apply*/ false, /*global*/ false);
+            }
+            SlashCommand::WorkflowResetBudget => {
+                self.app_event_tx
+                    .send(AppEvent::CodexOp(AppCommand::ResetWorkflowTokenBudget));
+                self.add_info_message(
+                    "The active workflow was abandoned. Its token counter is reset; session tokens are preserved."
+                        .to_string(),
+                    /*hint*/ None,
+                );
             }
             SlashCommand::Compact => {
                 if self.blocks_direct_input {
@@ -992,8 +1006,21 @@ impl ChatWidget {
                     .send(AppEvent::BeginWindowsSandboxGrantReadRoot { path: args });
             }
             SlashCommand::PrepareExtendWorkflow if !trimmed.is_empty() => {
-                match trimmed.to_ascii_lowercase().as_str() {
-                    "apply" => self.prepare_extended_workflow_repository(/*apply*/ true),
+                match trimmed
+                    .to_ascii_lowercase()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .as_slice()
+                {
+                    ["apply"] => {
+                        self.prepare_extended_workflow(/*apply*/ true, /*global*/ false)
+                    }
+                    ["global"] => {
+                        self.prepare_extended_workflow(/*apply*/ false, /*global*/ true)
+                    }
+                    ["global", "apply"] | ["apply", "global"] => {
+                        self.prepare_extended_workflow(/*apply*/ true, /*global*/ true)
+                    }
                     _ => self.add_error_message(PREPARE_EXTENDED_WORKFLOW_USAGE.to_string()),
                 }
             }
@@ -1176,6 +1203,7 @@ impl ChatWidget {
             | SlashCommand::Diff
             | SlashCommand::App
             | SlashCommand::Rename
+            | SlashCommand::WorkflowResetBudget
             | SlashCommand::TestApproval => QueueDrain::Continue,
             SlashCommand::Feedback
             | SlashCommand::New

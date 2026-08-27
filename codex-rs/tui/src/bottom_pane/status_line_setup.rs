@@ -118,6 +118,12 @@ pub(crate) enum StatusLineItem {
     /// Total tokens used in the current session.
     UsedTokens,
 
+    /// Provider tokens used by the complete root-agent tree in this session.
+    SessionTokens,
+
+    /// Provider tokens used by the currently active extended workflow.
+    WorkflowTokens,
+
     /// Total input tokens consumed.
     TotalInputTokens,
 
@@ -180,6 +186,12 @@ impl StatusLineItem {
                 "Total context window size in tokens (omitted when unknown)"
             }
             StatusLineItem::UsedTokens => "Total tokens used in session (omitted when zero)",
+            StatusLineItem::SessionTokens => {
+                "All provider tokens used by this root-agent tree, including completed workflows"
+            }
+            StatusLineItem::WorkflowTokens => {
+                "Provider tokens used by the active extended workflow and its current limit"
+            }
             StatusLineItem::TotalInputTokens => "Total input tokens used in session",
             StatusLineItem::TotalOutputTokens => "Total output tokens used in session",
             StatusLineItem::SessionId => "Current thread identifier (omitted until thread starts)",
@@ -217,6 +229,8 @@ impl StatusLineItem {
             StatusLineItem::CodexVersion => StatusSurfacePreviewItem::CodexVersion,
             StatusLineItem::ContextWindowSize => StatusSurfacePreviewItem::ContextWindowSize,
             StatusLineItem::UsedTokens => StatusSurfacePreviewItem::UsedTokens,
+            StatusLineItem::SessionTokens => StatusSurfacePreviewItem::SessionTokens,
+            StatusLineItem::WorkflowTokens => StatusSurfacePreviewItem::WorkflowTokens,
             StatusLineItem::TotalInputTokens => StatusSurfacePreviewItem::TotalInputTokens,
             StatusLineItem::TotalOutputTokens => StatusSurfacePreviewItem::TotalOutputTokens,
             StatusLineItem::SessionId => StatusSurfacePreviewItem::SessionId,

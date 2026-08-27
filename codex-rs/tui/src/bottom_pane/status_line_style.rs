@@ -42,6 +42,8 @@ impl StatusLineAccent {
             | StatusLineItem::ContextUsed
             | StatusLineItem::ContextWindowSize
             | StatusLineItem::UsedTokens
+            | StatusLineItem::SessionTokens
+            | StatusLineItem::WorkflowTokens
             | StatusLineItem::TotalInputTokens
             | StatusLineItem::TotalOutputTokens => Self::Usage,
             StatusLineItem::FiveHourLimit | StatusLineItem::WeeklyLimit => Self::Limit,
@@ -104,7 +106,9 @@ where
         if !spans.is_empty() {
             spans.push(STATUS_LINE_SEPARATOR.dim());
         }
-        let style = if use_theme_colors {
+        let style = if use_theme_colors && item == StatusLineItem::WorkflowTokens {
+            workflow_budget_style(&text)
+        } else if use_theme_colors {
             let accent = StatusLineAccent::for_item(item);
             soften_status_line_style(
                 theme_style_for_accent(accent).unwrap_or_else(|| accent.fallback_style()),
@@ -121,6 +125,20 @@ where
     }
 
     (!spans.is_empty()).then(|| Line::from(spans))
+}
+
+fn workflow_budget_style(text: &str) -> Style {
+    let percent = text
+        .rsplit_once('(')
+        .and_then(|(_, suffix)| suffix.strip_suffix(" %)"))
+        .map(|value| value.replace(',', "."))
+        .and_then(|value| value.parse::<f64>().ok());
+    match percent {
+        Some(percent) if percent >= 100.0 => Style::default().red(),
+        Some(percent) if percent >= 75.0 => Style::default().yellow(),
+        Some(_) => Style::default().green(),
+        None => Style::default().dim(),
+    }
 }
 
 fn soften_status_line_style(mut style: Style) -> Style {

@@ -26,6 +26,10 @@ use serde_json::Value;
 pub(crate) enum AppCommand {
     Interrupt,
     CleanBackgroundTerminals,
+    ExtendWorkflowTokenBudget {
+        percent: u8,
+    },
+    ResetWorkflowTokenBudget,
     RunUserShellCommand {
         command: String,
     },

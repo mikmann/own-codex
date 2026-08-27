@@ -1,0 +1,19 @@
+---
+source: tui/src/chatwidget/tests/status_and_layout.rs
+expression: "render_bottom_popup(&chat, 82)"
+---
+  Workflow-Tokenlimit erreicht
+  Verbraucht: 16.200 / 16.000 Tokens. Weitere Tokens freigeben?
+
+› 1. +100% des Basislimits  Erhöht die Obergrenze um 16.000 Tokens; der
+                            Verbrauch wird nicht zurückgesetzt.
+  2. +75% des Basislimits   Erhöht die Obergrenze um 12.000 Tokens; der
+                            Verbrauch wird nicht zurückgesetzt.
+  3. +50% des Basislimits   Erhöht die Obergrenze um 8.000 Tokens; der Verbrauch
+                            wird nicht zurückgesetzt.
+  4. +25% des Basislimits   Erhöht die Obergrenze um 4.000 Tokens; der Verbrauch
+                            wird nicht zurückgesetzt.
+  5. Stop                   Keine weiteren Tokens freigeben; der Workflow bleibt
+                            angehalten.
+
+  Press enter to confirm or esc to go back

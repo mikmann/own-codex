@@ -38,6 +38,7 @@ pub enum SlashCommand {
     App,
     Init,
     PrepareExtendWorkflow,
+    WorkflowResetBudget,
     Compact,
     Plan,
     Goal,
@@ -87,7 +88,10 @@ impl SlashCommand {
             SlashCommand::New => "start a new chat during a conversation",
             SlashCommand::Init => "create an AGENTS.md file with instructions for Codex",
             SlashCommand::PrepareExtendWorkflow => {
-                "preview or apply the minimal repository workflow configuration"
+                "preview or apply the complete repository or global workflow configuration"
+            }
+            SlashCommand::WorkflowResetBudget => {
+                "abandon the active workflow and reset only its token counter"
             }
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
             SlashCommand::Review => "review my current changes and find issues",
@@ -201,6 +205,7 @@ impl SlashCommand {
             | SlashCommand::Fork
             | SlashCommand::Init
             | SlashCommand::PrepareExtendWorkflow
+            | SlashCommand::WorkflowResetBudget
             | SlashCommand::Compact
             | SlashCommand::Keymap
             | SlashCommand::Vim

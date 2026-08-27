@@ -25,6 +25,8 @@ pub(crate) enum StatusSurfacePreviewItem {
     CodexVersion,
     ContextWindowSize,
     UsedTokens,
+    SessionTokens,
+    WorkflowTokens,
     TotalInputTokens,
     TotalOutputTokens,
     SessionId,
@@ -58,6 +60,10 @@ impl StatusSurfacePreviewItem {
             StatusSurfacePreviewItem::CodexVersion => "0.0.0",
             StatusSurfacePreviewItem::ContextWindowSize => "0 window",
             StatusSurfacePreviewItem::UsedTokens => "0 used",
+            StatusSurfacePreviewItem::SessionTokens => "Session: 243.510 Tokens",
+            StatusSurfacePreviewItem::WorkflowTokens => {
+                "Workflow: 92.400 / 150.000 Tokens (61,6 %)"
+            }
             StatusSurfacePreviewItem::TotalInputTokens => "0 in",
             StatusSurfacePreviewItem::TotalOutputTokens => "0 out",
             StatusSurfacePreviewItem::SessionId => "550e8400-e29b-41d4",
@@ -91,6 +97,8 @@ impl StatusSurfacePreviewItem {
             Self::CodexVersion,
             Self::ContextWindowSize,
             Self::UsedTokens,
+            Self::SessionTokens,
+            Self::WorkflowTokens,
             Self::TotalInputTokens,
             Self::TotalOutputTokens,
             Self::SessionId,

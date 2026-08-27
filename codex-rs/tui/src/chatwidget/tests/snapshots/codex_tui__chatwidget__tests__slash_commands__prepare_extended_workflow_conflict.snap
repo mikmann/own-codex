@@ -2,8 +2,9 @@
 source: tui/src/chatwidget/tests/slash_commands.rs
 expression: rendered
 ---
-• Repository preparation preview
-Repository: <REPO>
+• Extended workflow preparation preview
+Scope: repository
+Root: <REPO>
 [Conflict] <CONFIG> — existing config.toml has no [extended_workflow] table and is never replaced automatically; add `[extended_workflow]` followed by `enabled = true` manually, then run the command again
 No files changed. Resolve the reported conflict before retrying.
 

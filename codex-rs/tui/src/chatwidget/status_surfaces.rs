@@ -689,6 +689,30 @@ impl ChatWidget {
                     Some(format!("{} used", format_tokens_compact(total)))
                 }
             }
+            StatusLineItem::SessionTokens => self.workflow_token_budget.map(|status| {
+                format!(
+                    "Session: {} Tokens",
+                    format_workflow_tokens(status.session_tokens_used)
+                )
+            }),
+            StatusLineItem::WorkflowTokens => Some(match self.workflow_token_budget {
+                Some(status) if status.active && status.effective_limit_tokens == 0 => format!(
+                    "Workflow: {} / ∞ Tokens",
+                    format_workflow_tokens(status.workflow_tokens_used)
+                ),
+                Some(status) if status.active => {
+                    let percent = status.workflow_tokens_used as f64
+                        / status.effective_limit_tokens.max(1) as f64
+                        * 100.0;
+                    let percent = format!("{percent:.1}").replace('.', ",");
+                    format!(
+                        "Workflow: {} / {} Tokens ({percent} %)",
+                        format_workflow_tokens(status.workflow_tokens_used),
+                        format_workflow_tokens(status.effective_limit_tokens)
+                    )
+                }
+                Some(_) | None => "Workflow: inaktiv".to_string(),
+            }),
             StatusLineItem::ContextRemaining => self
                 .status_line_context_remaining_percent()
                 .map(|remaining| format!("Context {remaining}% left")),
@@ -783,6 +807,8 @@ impl ChatWidget {
             StatusSurfacePreviewItem::CodexVersion => StatusLineItem::CodexVersion,
             StatusSurfacePreviewItem::ContextWindowSize => StatusLineItem::ContextWindowSize,
             StatusSurfacePreviewItem::UsedTokens => StatusLineItem::UsedTokens,
+            StatusSurfacePreviewItem::SessionTokens => StatusLineItem::SessionTokens,
+            StatusSurfacePreviewItem::WorkflowTokens => StatusLineItem::WorkflowTokens,
             StatusSurfacePreviewItem::TotalInputTokens => StatusLineItem::TotalInputTokens,
             StatusSurfacePreviewItem::TotalOutputTokens => StatusLineItem::TotalOutputTokens,
             StatusSurfacePreviewItem::SessionId => StatusLineItem::SessionId,
@@ -994,6 +1020,10 @@ impl ChatWidget {
         truncated.push_str("...");
         truncated
     }
+}
+
+pub(super) fn format_workflow_tokens(tokens: i64) -> String {
+    codex_protocol::num_format::format_with_separators(tokens.max(0)).replace(',', ".")
 }
 
 fn five_hour_status_window(

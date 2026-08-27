@@ -393,6 +393,7 @@ pub(crate) use self::permissions_menu::cyber_model_approval_reviewer;
 mod protocol;
 mod protocol_requests;
 mod rate_limits;
+mod workflow_token_budget;
 use self::rate_limits::RateLimitErrorKind;
 use self::rate_limits::RateLimitSwitchPromptState;
 use self::rate_limits::RateLimitWarningState;
@@ -565,6 +566,8 @@ pub(crate) struct ChatWidget {
     runtime_model_provider_base_url: Option<String>,
     pub(crate) remote_connection: Option<RemoteConnectionStatus>,
     token_info: Option<TokenUsageInfo>,
+    workflow_token_budget: Option<codex_app_server_protocol::WorkflowTokenBudgetStatus>,
+    workflow_budget_prompted_limit: Option<i64>,
     token_usage_pending: bool,
     rate_limit_snapshots_by_limit_id: BTreeMap<String, RateLimitSnapshotDisplay>,
     refreshing_status_outputs: Vec<(u64, StatusHistoryHandle)>,

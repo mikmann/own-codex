@@ -646,6 +646,26 @@ impl App {
                 });
                 Ok(true)
             }
+            AppCommand::ExtendWorkflowTokenBudget { percent } => {
+                app_server
+                    .thread_workflow_token_budget_update(
+                        thread_id,
+                        codex_app_server_protocol::WorkflowTokenBudgetAction::Extend {
+                            percent: *percent,
+                        },
+                    )
+                    .await?;
+                Ok(true)
+            }
+            AppCommand::ResetWorkflowTokenBudget => {
+                app_server
+                    .thread_workflow_token_budget_update(
+                        thread_id,
+                        codex_app_server_protocol::WorkflowTokenBudgetAction::Reset,
+                    )
+                    .await?;
+                Ok(true)
+            }
             AppCommand::UserTurn {
                 items,
                 cwd,

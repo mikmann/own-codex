@@ -30,6 +30,8 @@ impl ChatWidget {
         }
         match notification {
             ServerNotification::ThreadTokenUsageUpdated(notification) => {
+                self.workflow_token_budget = notification.token_usage.workflow_budget;
+                self.maybe_prompt_for_workflow_budget_extension();
                 self.set_token_info(Some(token_usage_info_from_app_server(
                     notification.token_usage,
                 )));

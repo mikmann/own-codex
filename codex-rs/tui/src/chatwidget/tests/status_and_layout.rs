@@ -15,6 +15,62 @@ fn enable_test_ambient_pet(chat: &mut ChatWidget) {
     chat.install_test_ambient_pet_for_tests(/*animations_enabled*/ false);
 }
 
+#[tokio::test]
+async fn workflow_status_line_uses_persisted_tree_totals_and_effective_limit() {
+    let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.workflow_token_budget = Some(codex_app_server_protocol::WorkflowTokenBudgetStatus {
+        session_tokens_used: 243_510,
+        workflow_tokens_used: 92_400,
+        base_limit_tokens: 100_000,
+        effective_limit_tokens: 150_000,
+        active: true,
+    });
+
+    assert_eq!(
+        chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::SessionTokens),
+        Some("Session: 243.510 Tokens".to_string())
+    );
+    assert_eq!(
+        chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::WorkflowTokens),
+        Some("Workflow: 92.400 / 150.000 Tokens (61,6 %)".to_string())
+    );
+
+    chat.workflow_token_budget = Some(codex_app_server_protocol::WorkflowTokenBudgetStatus {
+        effective_limit_tokens: 0,
+        ..chat.workflow_token_budget.expect("status")
+    });
+    assert_eq!(
+        chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::WorkflowTokens),
+        Some("Workflow: 92.400 / ∞ Tokens".to_string())
+    );
+}
+
+#[tokio::test]
+async fn workflow_budget_limit_prompt_offers_base_relative_extensions() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.workflow_token_budget = Some(codex_app_server_protocol::WorkflowTokenBudgetStatus {
+        session_tokens_used: 24_000,
+        workflow_tokens_used: 16_200,
+        base_limit_tokens: 16_000,
+        effective_limit_tokens: 16_000,
+        active: true,
+    });
+
+    chat.maybe_prompt_for_workflow_budget_extension();
+    assert_chatwidget_snapshot!(
+        "workflow_budget_limit_extension_prompt",
+        render_bottom_popup(&chat, /*width*/ 82)
+    );
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(
+        std::iter::from_fn(|| rx.try_recv().ok()).any(|event| matches!(
+            event,
+            AppEvent::CodexOp(AppCommand::ExtendWorkflowTokenBudget { percent: 100 })
+        ))
+    );
+}
+
 fn take_workspace_headline_request_id(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
 ) -> u64 {

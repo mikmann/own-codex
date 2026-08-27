@@ -875,6 +875,19 @@ async fn prepare_extended_workflow_preview_has_snapshot_coverage() {
 }
 
 #[tokio::test]
+async fn workflow_reset_budget_closes_only_the_active_workflow() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.dispatch_command(SlashCommand::WorkflowResetBudget);
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::CodexOp(AppCommand::ResetWorkflowTokenBudget))
+    );
+    assert!(drain_unwrapped_history(&mut rx).contains("session tokens are preserved"));
+}
+
+#[tokio::test]
 async fn prepare_extended_workflow_conflict_has_snapshot_coverage() {
     let repository = tempfile::tempdir().expect("temporary repository");
     std::fs::create_dir(repository.path().join(".git")).expect("git marker");

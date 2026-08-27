@@ -107,6 +107,8 @@ use codex_app_server_protocol::ThreadUnarchiveParams;
 use codex_app_server_protocol::ThreadUnarchiveResponse;
 use codex_app_server_protocol::ThreadUnsubscribeParams;
 use codex_app_server_protocol::ThreadUnsubscribeResponse;
+use codex_app_server_protocol::ThreadWorkflowTokenBudgetUpdateParams;
+use codex_app_server_protocol::ThreadWorkflowTokenBudgetUpdateResponse;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnInterruptParams;
 use codex_app_server_protocol::TurnInterruptResponse;
@@ -115,6 +117,7 @@ use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::TurnSteerResponse;
 use codex_app_server_protocol::UserInput;
+use codex_app_server_protocol::WorkflowTokenBudgetAction;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::ThreadId;
 use codex_protocol::approvals::GuardianAssessmentEvent;
@@ -1324,6 +1327,26 @@ impl AppServerSession {
             })
             .await
             .wrap_err("thread/compact/start failed in TUI")?;
+        Ok(())
+    }
+
+    pub(crate) async fn thread_workflow_token_budget_update(
+        &mut self,
+        thread_id: ThreadId,
+        action: WorkflowTokenBudgetAction,
+    ) -> Result<()> {
+        let request_id = self.next_request_id();
+        let _: ThreadWorkflowTokenBudgetUpdateResponse = self
+            .client
+            .request_typed(ClientRequest::ThreadWorkflowTokenBudgetUpdate {
+                request_id,
+                params: ThreadWorkflowTokenBudgetUpdateParams {
+                    thread_id: thread_id.to_string(),
+                    action,
+                },
+            })
+            .await
+            .wrap_err("thread/workflowTokenBudget/update failed in TUI")?;
         Ok(())
     }
 
