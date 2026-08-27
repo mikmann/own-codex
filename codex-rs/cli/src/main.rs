@@ -72,6 +72,7 @@ use codex_config::extended_workflow::EXTENDED_WORKFLOW_MAX_AGENTS;
 use codex_config::extended_workflow_prepare::PrepareAction;
 use codex_config::extended_workflow_prepare::apply_extended_workflow_preparation;
 use codex_config::extended_workflow_prepare::plan_extended_workflow_preparation;
+use codex_config::extended_workflow_prepare::plan_global_extended_workflow_preparation;
 use codex_core::build_models_manager;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
@@ -100,7 +101,7 @@ use codex_terminal_detection::TerminalName;
 #[clap(
     name = "codex-extended-workflow",
     author,
-    version = "v0.147.1-alpha-3",
+    version = "v0.147.1-alpha-4",
     // If a sub‑command is given, ignore requirements of the default args.
     subcommand_negates_reqs = true,
     // The executable is sometimes invoked via a platform‑specific name like
@@ -115,7 +116,7 @@ struct MultitoolCli {
     psp: bool,
 
     /// Extended launcher only: use normal Codex state and sessions; credentials stay isolated.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Extended workflow options")]
     shared_state: bool,
 
     #[clap(flatten)]
@@ -139,10 +140,23 @@ struct MultitoolCli {
 
 #[derive(Debug, Args, Default)]
 struct ExtendedWorkflowProcessOverrides {
+    /// Token limit for one complete workflow including experts, reviewers, and compactions.
+    /// Use 0 for unlimited. At the limit, interactive sessions can add 25/50/75/100% of the
+    /// original limit; non-interactive exec stops safely.
+    #[arg(
+        long = "workflow-token-limit",
+        global = true,
+        help_heading = "Extended workflow options",
+        value_name = "TOKENS",
+        value_parser = parse_extended_workflow_token_limit
+    )]
+    workflow_token_limit: Option<u64>,
+
     /// Override the minimum expert count for this invocation (0..=6).
     #[arg(
         long = "expert-min",
         global = true,
+        help_heading = "Extended workflow options",
         value_name = "COUNT",
         value_parser = parse_extended_workflow_agent_count
     )]
@@ -152,6 +166,7 @@ struct ExtendedWorkflowProcessOverrides {
     #[arg(
         long = "expert-max",
         global = true,
+        help_heading = "Extended workflow options",
         value_name = "COUNT",
         value_parser = parse_extended_workflow_agent_count
     )]
@@ -161,6 +176,7 @@ struct ExtendedWorkflowProcessOverrides {
     #[arg(
         long = "reviewer-min",
         global = true,
+        help_heading = "Extended workflow options",
         value_name = "COUNT",
         value_parser = parse_extended_workflow_agent_count
     )]
@@ -170,17 +186,26 @@ struct ExtendedWorkflowProcessOverrides {
     #[arg(
         long = "reviewer-max",
         global = true,
+        help_heading = "Extended workflow options",
         value_name = "COUNT",
         value_parser = parse_extended_workflow_agent_count
     )]
     reviewer_max: Option<usize>,
 
     /// Disable the expert process for this invocation.
-    #[arg(long = "disable-experts", global = true)]
+    #[arg(
+        long = "disable-experts",
+        global = true,
+        help_heading = "Extended workflow options"
+    )]
     disable_experts: bool,
 
     /// Disable the reviewer process for this invocation.
-    #[arg(long = "disable-reviewers", global = true)]
+    #[arg(
+        long = "disable-reviewers",
+        global = true,
+        help_heading = "Extended workflow options"
+    )]
     disable_reviewers: bool,
 }
 
@@ -188,15 +213,23 @@ impl ExtendedWorkflowProcessOverrides {
     fn into_config_overrides(self) -> anyhow::Result<Vec<String>> {
         validate_extended_workflow_process_range("expert", self.expert_min, self.expert_max)?;
         validate_extended_workflow_process_range("reviewer", self.reviewer_min, self.reviewer_max)?;
-        let mut overrides = [
-            ("extended_workflow.experts.min", self.expert_min),
-            ("extended_workflow.experts.max", self.expert_max),
-            ("extended_workflow.reviewers.min", self.reviewer_min),
-            ("extended_workflow.reviewers.max", self.reviewer_max),
-        ]
+        let mut overrides = [(
+            "extended_workflow.workflow_budget_tokens",
+            self.workflow_token_limit,
+        )]
         .into_iter()
         .filter_map(|(key, value)| value.map(|value| format!("{key}={value}")))
         .collect::<Vec<_>>();
+        overrides.extend(
+            [
+                ("extended_workflow.experts.min", self.expert_min),
+                ("extended_workflow.experts.max", self.expert_max),
+                ("extended_workflow.reviewers.min", self.reviewer_min),
+                ("extended_workflow.reviewers.max", self.reviewer_max),
+            ]
+            .into_iter()
+            .filter_map(|(key, value)| value.map(|value| format!("{key}={value}"))),
+        );
         if self.disable_experts {
             overrides.push("extended_workflow.experts.enabled=false".to_string());
         }
@@ -204,6 +237,20 @@ impl ExtendedWorkflowProcessOverrides {
             overrides.push("extended_workflow.reviewers.enabled=false".to_string());
         }
         Ok(overrides)
+    }
+}
+
+fn parse_extended_workflow_token_limit(value: &str) -> Result<u64, String> {
+    let limit = value
+        .parse::<u64>()
+        .map_err(|_| "workflow token limit must be a non-negative integer".to_string())?;
+    if i64::try_from(limit).is_err() {
+        Err(format!(
+            "workflow token limit must be between 0 and {}; got {limit}",
+            i64::MAX
+        ))
+    } else {
+        Ok(limit)
     }
 }
 
@@ -339,6 +386,10 @@ struct PrepareExtendWorkflowCommand {
     /// Apply the displayed plan. Without this flag the command is a read-only preview.
     #[arg(long)]
     apply: bool,
+
+    /// Prepare the isolated user configuration instead of the current repository.
+    #[arg(long, conflicts_with = "cwd")]
+    global: bool,
 
     /// Repository directory to inspect. Defaults to the current directory.
     #[arg(short = 'C', long = "cd", value_name = "DIR")]
@@ -1943,9 +1994,18 @@ fn profile_v2_for_subcommand<'a>(
 }
 
 fn run_prepare_extend_workflow(command: PrepareExtendWorkflowCommand) -> anyhow::Result<()> {
-    let start = command.cwd.unwrap_or(std::env::current_dir()?);
-    let plan = plan_extended_workflow_preparation(&start)?;
-    println!("Repository: {}", plan.repository_root.display());
+    let plan = if command.global {
+        plan_global_extended_workflow_preparation(&find_codex_home()?)?
+    } else {
+        let start = command.cwd.unwrap_or(std::env::current_dir()?);
+        plan_extended_workflow_preparation(&start)?
+    };
+    let scope = if command.global {
+        "Global home"
+    } else {
+        "Repository"
+    };
+    println!("{scope}: {}", plan.repository_root.display());
     println!(
         "[{:?}] {} — {}",
         plan.action,
@@ -2951,6 +3011,8 @@ mod tests {
             "extended_workflow.experts.min=1",
             "resume",
             "--last",
+            "--workflow-token-limit",
+            "12000",
             "--expert-min",
             "2",
             "--expert-max",
@@ -2974,6 +3036,7 @@ mod tests {
             raw_overrides,
             vec![
                 "extended_workflow.experts.min=1",
+                "extended_workflow.workflow_budget_tokens=12000",
                 "extended_workflow.experts.min=2",
                 "extended_workflow.experts.max=6",
                 "extended_workflow.reviewers.min=3",
@@ -2981,6 +3044,32 @@ mod tests {
                 "extended_workflow.experts.enabled=false",
                 "extended_workflow.reviewers.enabled=false",
             ]
+        );
+    }
+
+    #[test]
+    fn workflow_token_limit_accepts_unlimited_zero_and_rejects_values_above_runtime_capacity() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex-extended-workflow",
+            "--workflow-token-limit",
+            "0",
+        ])
+        .expect("zero means unlimited");
+        assert_eq!(
+            cli.extended_workflow_process_overrides.workflow_token_limit,
+            Some(0)
+        );
+
+        let error = MultitoolCli::try_parse_from([
+            "codex-extended-workflow",
+            "--workflow-token-limit",
+            "18446744073709551615",
+        ])
+        .expect_err("value above runtime capacity");
+        assert!(
+            error
+                .to_string()
+                .contains("workflow token limit must be between 0")
         );
     }
 

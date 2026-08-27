@@ -5,7 +5,7 @@ second agent runtime or a repository-specific ticket format. The fork is based
 on the official `rust-v0.147.0` tag at
 `be6e8eac029b183056b7e4402879f15d2c85f61b`. The requested upstream spelling
 `v0.147.0` was absent and the use of `rust-v0.147.0` was explicitly approved.
-The distribution and local release tag use `v0.147.1-alpha-3`.
+The distribution and local release tag use `v0.147.1-alpha-4`.
 
 ## Architecture
 
@@ -197,7 +197,7 @@ For a one-off invocation, the four dedicated global arguments override the
 repository values without changing the file:
 
 ```shell
-codex-extended-workflow --expert-min 2 --expert-max 4 --reviewer-min 2 --reviewer-max 4
+codex-extended-workflow --workflow-token-limit 16000 --expert-min 2 --expert-max 4 --reviewer-min 2 --reviewer-max 4
 ```
 
 Either process, or both processes together, can be disabled for one invocation:
@@ -323,10 +323,28 @@ provider-side hard output-token cap when the API/runtime cannot do so.
   conservative byte-based estimate of the canonical assignment alone. An
   assignment that cannot fit is rejected visibly; the estimate is not
   presented as an exact provider token count.
-- Profile `token_budget`, `round_budget_tokens`, and
-  `workflow_budget_tokens` remain conservative advisory planning values because
-  the shared provider runtime does not expose an independent hard per-child
-  output-token stop for this path.
+- `workflow_budget_tokens` is an enforced cumulative provider-token stop shared
+  by the main agent, experts, reviewers, and compactions in one workflow.
+  Provider `total_tokens` are counted literally, including cached input and
+  reasoning/output usage. `0` means unlimited. The CLI equivalent is
+  `--workflow-token-limit <TOKENS>`; without it the repository, then global
+  configuration is used, otherwise the workflow is unlimited.
+- The base limit and current usage are persisted in the selected Alpha-3 SQLite
+  state database and restored by `resume`. A successful workflow completion
+  closes the workflow and starts the next independent request at zero while the
+  session total continues. `/workflow-reset-budget` explicitly abandons the
+  current workflow and resets only its counter.
+- At a non-zero ceiling the TUI offers another 100%, 75%, 50%, or 25% of the
+  original base limit, or Stop. An extension raises the ceiling and never
+  clears already used tokens. Non-interactive `exec` cannot ask and stops. Since
+  provider usage is known only after a response completes, concurrent responses
+  already in flight can overshoot a ceiling.
+- Profile `token_budget` and `round_budget_tokens` remain conservative advisory
+  planning values because the shared provider runtime does not expose an
+  independent hard per-child output-token stop for this path. The overall
+  `workflow_budget_tokens` limit is not divided into round estimates and does
+  not reduce the configured expert or reviewer count before actual usage
+  reaches the persisted ceiling.
 - The planner estimates selected subagents and refuses to start a
   round when the configured minimum cannot fit; it reports `budget_blocked`
   instead of silently reducing quality.
@@ -340,6 +358,13 @@ provider-side hard output-token cap when the API/runtime cannot do so.
   Compact task contracts, bounded result objects, and summaries limit context
   growth; requests for full or partial parent history are rejected before
   spawning.
+
+On Windows, an enabled extended workflow defaults shell tools to non-login
+PowerShell, which adds `-NoProfile` and avoids profile failures under
+Constrained Language Mode. An explicit top-level `allow_login_shell = true`
+still opts back into login-shell behavior. The workflow policy also requires
+CLM-compatible commands and direct native patch tooling instead of PowerShell
+pipelines or batch wrappers around `apply_patch`.
 
 No time- or token-saving percentage is claimed: this repository has no stable
 provider-token benchmark baseline. Comparisons must use actual provider usage
@@ -409,10 +434,15 @@ codex-extended-workflow prepare-extend-workflow
 
 # Prints the plan first, then performs only that safe change.
 codex-extended-workflow prepare-extend-workflow --apply
+
+# Global isolated configuration under ~/.codex-extended-workflow/config.toml.
+codex-extended-workflow prepare-extend-workflow --global
+codex-extended-workflow prepare-extend-workflow --global --apply
 ```
 
-In the TUI use `/prepare-extend-workflow` and
-`/prepare-extend-workflow apply`. The command finds the nearest Git worktree
+In the TUI use `/prepare-extend-workflow`, `/prepare-extend-workflow apply`,
+`/prepare-extend-workflow global`, or `/prepare-extend-workflow global apply`.
+Repository mode finds the nearest Git worktree
 root, analyzes existing Codex TOML, rejects malformed or explicitly disabled
 workflow configuration as a conflict, and also treats an existing file without
 an `[extended_workflow]` table as a manual-merge conflict. Existing files are
@@ -425,13 +455,11 @@ no force or overwrite option. For a manual merge, add `[extended_workflow]` and
 `enabled = true`, then preview again. Outside Git, in non-writable repositories,
 and on stale previews it fails without replacing user content.
 
-For an empty repository the only created content is:
-
-```toml
-# Prepared by codex-extended-workflow. Expert/reviewer defaults are built in.
-[extended_workflow]
-enabled = true
-```
+For an empty target the generated, commented configuration includes the
+explicit expert and reviewer profiles, 2..4 process ranges, audit and result
+limits, `workflow_budget_tokens = 0`, and the `session-tokens` and
+`workflow-tokens` status-line items. Existing files are still a manual-merge
+boundary and are never overwritten.
 
 ## CLI compatibility and versioning
 
@@ -445,7 +473,7 @@ the extended defaults while `bin/codex.js` remains the disabled-by-default
 compatibility entry point. Rust crate names and other public interfaces remain
 stable. App-server, foreground remote control, MCP tool sessions, and the
 TypeScript SDK propagate the same one-shot product default; an explicit
-configuration value still wins. Both launchers report `v0.147.1-alpha-3`.
+configuration value still wins. Both launchers report `v0.147.1-alpha-4`.
 
 The official app-server updater and update prompt are hard-disabled when the
 extended product mode is active, preventing a managed daemon from replacing

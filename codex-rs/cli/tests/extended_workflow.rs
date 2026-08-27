@@ -23,7 +23,7 @@ fn primary_and_compatibility_launchers_report_the_distribution_version() -> Resu
             .assert()
             .success()
             .stdout(predicate::str::contains(
-                "codex-extended-workflow v0.147.1-alpha-3",
+                "codex-extended-workflow v0.147.1-alpha-4",
             ));
     }
     Ok(())
@@ -38,13 +38,17 @@ fn help_resume_and_completion_use_the_primary_name() -> Result<()> {
         .stdout(predicate::str::contains(
             "codex-extended-workflow [OPTIONS]",
         ))
+        .stdout(predicate::str::contains("--workflow-token-limit <TOKENS>"))
         .stdout(predicate::str::contains("--expert-min <COUNT>"))
         .stdout(predicate::str::contains("--expert-max <COUNT>"))
         .stdout(predicate::str::contains("--reviewer-min <COUNT>"))
         .stdout(predicate::str::contains("--reviewer-max <COUNT>"))
         .stdout(predicate::str::contains("--disable-experts"))
         .stdout(predicate::str::contains("--disable-reviewers"))
-        .stdout(predicate::str::contains("--shared-state"));
+        .stdout(predicate::str::contains("--shared-state"))
+        .stdout(predicate::str::contains("Extended workflow options"))
+        .stdout(predicate::str::contains("Use 0"))
+        .stdout(predicate::str::contains("for unlimited"));
     command("codex-extended-workflow")?
         .args(["exec", "--help"])
         .assert()
@@ -64,6 +68,20 @@ fn help_resume_and_completion_use_the_primary_name() -> Result<()> {
         .assert()
         .success()
         .stdout(predicate::str::contains("codex-extended-workflow"));
+    Ok(())
+}
+
+#[test]
+fn workflow_token_limit_is_available_to_runtime_commands() -> Result<()> {
+    command("codex-extended-workflow")?
+        .args([
+            "--workflow-token-limit",
+            "12000",
+            "completion",
+            "powershell",
+        ])
+        .assert()
+        .success();
     Ok(())
 }
 
