@@ -23,9 +23,15 @@ retained as a compatibility entry point. The primary launcher enables the
 extended workflow only when no CLI, repository, or global setting explicitly
 sets `extended_workflow.enabled`; the compatibility launcher preserves the
 upstream disabled default. The visible distribution version is
-`v0.147.1-alpha-4`. Automatic app-server updates are disabled in the extended
+`v0.147.1-alpha-5`. Automatic app-server updates are disabled in the extended
 product mode so this fork cannot silently replace itself with an official Codex
 package; the compatibility `codex` launcher retains upstream behavior.
+
+Reviewer findings of every severity now require an explicit resolution and one
+bounded re-review by the same reviewer. Low and Medium findings may be fixed or
+receive a concrete disposition that the reviewer accepts; High and Critical
+findings must be fixed. Only a `pass` verdict with an empty finding list closes
+the reviewer gate.
 
 By default, the primary launcher keeps local credentials, configuration,
 sessions, logs, and SQLite state under `~/.codex-extended-workflow`, separate

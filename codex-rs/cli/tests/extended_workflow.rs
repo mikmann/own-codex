@@ -23,7 +23,7 @@ fn primary_and_compatibility_launchers_report_the_distribution_version() -> Resu
             .assert()
             .success()
             .stdout(predicate::str::contains(
-                "codex-extended-workflow v0.147.1-alpha-4",
+                "codex-extended-workflow v0.147.1-alpha-5",
             ));
     }
     Ok(())

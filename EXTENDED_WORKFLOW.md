@@ -5,7 +5,7 @@ second agent runtime or a repository-specific ticket format. The fork is based
 on the official `rust-v0.147.0` tag at
 `be6e8eac029b183056b7e4402879f15d2c85f61b`. The requested upstream spelling
 `v0.147.0` was absent and the use of `rust-v0.147.0` was explicitly approved.
-The distribution and local release tag use `v0.147.1-alpha-4`.
+The distribution and local release tag use `v0.147.1-alpha-5`.
 
 ## Architecture
 
@@ -294,6 +294,21 @@ the reviewer's latest persisted terminal output revision and digest. A newer
 reviewer output invalidates the earlier pass and requires validation of that
 new output, so stale approval cannot satisfy the completion gate.
 
+A structurally valid reviewer result with one or more findings is retained as
+review evidence, but it is not a passing result regardless of severity. The
+validator returns `has_unresolved_findings = true` and permits exactly one
+newer post-resolution output revision from that same reviewer. Low and Medium
+findings may be fixed or receive a concrete false-positive, out-of-scope, or
+deferral disposition that the reviewer explicitly accepts. High and Critical
+findings must be fixed. Only `verdict = "pass"` with an empty finding list
+satisfies the reviewer gate. If the initial review and the single re-review
+both contain findings, the workflow stops for a user decision instead of
+silently accepting residual risk or extending the loop.
+
+Persisted validations created by an earlier Alpha keep their stored outcome so
+existing resumable sessions are not rewritten. Any reviewer output newly
+validated by Alpha-5 uses the stricter all-severity resolution rule.
+
 ## Reproducible reviewer severity
 
 Severity is computed by `severity_for_dimensions`, not accepted as an
@@ -477,7 +492,7 @@ the extended defaults while `bin/codex.js` remains the disabled-by-default
 compatibility entry point. Rust crate names and other public interfaces remain
 stable. App-server, foreground remote control, MCP tool sessions, and the
 TypeScript SDK propagate the same one-shot product default; an explicit
-configuration value still wins. Both launchers report `v0.147.1-alpha-4`.
+configuration value still wins. Both launchers report `v0.147.1-alpha-5`.
 
 The official app-server updater and update prompt are hard-disabled when the
 extended product mode is active, preventing a managed daemon from replacing

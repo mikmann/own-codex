@@ -17,14 +17,14 @@ class ConfigureSdkPackageJsonTest(unittest.TestCase):
             "dependencies": {"existing": "1.0.0"},
         }
 
-        build_npm_package.configure_sdk_package_json(package_json, "0.147.1-alpha-4")
+        build_npm_package.configure_sdk_package_json(package_json, "0.147.1-alpha-5")
 
         self.assertEqual(package_json["scripts"], {"test": "jest"})
         self.assertEqual(
             package_json["dependencies"],
             {
                 "existing": "1.0.0",
-                "codex-extended-workflow": "0.147.1-alpha-4",
+                "codex-extended-workflow": "0.147.1-alpha-5",
             },
         )
 

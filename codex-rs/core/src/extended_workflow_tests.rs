@@ -770,6 +770,72 @@ fn work_order_reviewer_gate_requires_distinct_passing_agents_and_roles() {
 }
 
 #[test]
+fn reviewer_gate_requires_low_and_medium_findings_to_complete_a_bounded_re_review() {
+    let mut config = ExtendedWorkflowConfig::default();
+    config.reviewers.min = 1;
+    config.reviewers.max = 1;
+    let root_request = "Implementiere die Review-Aufloesung fuer Low und Medium.";
+    let runtime = WorkflowTurnRuntimeState::new(
+        &plan_turn(root_request, TEST_TURN_ID, &config),
+        root_request,
+    );
+    let reviewer_plan = plan_reviewers(
+        "Low and Medium review resolution changes",
+        TEST_TURN_ID,
+        &config,
+    );
+    runtime
+        .install_reviewers(&reviewer_plan, "Low and Medium review resolution changes")
+        .expect("reviewer plan should install");
+    let reviewer = reviewer_plan.selected.first().expect("selected reviewer");
+    let reviewer_thread_id = codex_protocol::ThreadId::new();
+    let unresolved = codex_agent_graph_store::WorkflowValidationRecord {
+        validation_key: "reviewer:resolution".to_string(),
+        result_kind: "reviewer".to_string(),
+        agent_thread_id: Some(reviewer_thread_id),
+        agent_role: Some(reviewer.role.clone()),
+        submissions: 1,
+        accepted: true,
+        review_cycles: 1,
+        output_revision: 1,
+        output_sha256: "initial-low-medium-review".to_string(),
+        reviewer_pass: false,
+        has_high_or_critical: false,
+    };
+
+    let WorkflowCompletionGate::Continue(message) =
+        runtime.reviewer_completion_gate(std::slice::from_ref(&unresolved))
+    else {
+        panic!("the initial Low/Medium review must require a re-review")
+    };
+    assert!(message.contains("Low or Medium"));
+    assert!(message.contains("new output revision"));
+
+    let exhausted = codex_agent_graph_store::WorkflowValidationRecord {
+        review_cycles: 2,
+        output_revision: 2,
+        ..unresolved.clone()
+    };
+    let WorkflowCompletionGate::Blocked(message) = runtime.reviewer_completion_gate(&[exhausted])
+    else {
+        panic!("a second unresolved review must require a user decision")
+    };
+    assert!(message.contains("initial review and one re-review"));
+    assert!(message.contains("Ask the user"));
+
+    let resolved = codex_agent_graph_store::WorkflowValidationRecord {
+        review_cycles: 2,
+        output_revision: 2,
+        reviewer_pass: true,
+        ..unresolved
+    };
+    assert_eq!(
+        runtime.reviewer_completion_gate(&[resolved]),
+        WorkflowCompletionGate::Satisfied
+    );
+}
+
+#[test]
 fn simple_answer_does_not_require_reviewer_completion() {
     let config = ExtendedWorkflowConfig::default();
     let runtime = WorkflowTurnRuntimeState::new(

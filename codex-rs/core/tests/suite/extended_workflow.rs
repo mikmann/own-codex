@@ -440,6 +440,10 @@ enum WorkflowReviewerFollowupResponder {
         call_id: &'static str,
         result: &'static str,
     },
+    Followup {
+        call_id: &'static str,
+        message: &'static str,
+    },
     Close {
         call_id: &'static str,
     },
@@ -464,6 +468,12 @@ impl wiremock::Respond for WorkflowReviewerFollowupResponder {
                         .expect("reviewer result fixture should be valid JSON")
                 })
                 .to_string(),
+            ),
+            Self::Followup { call_id, message } => (
+                "resp-root-reviewer-followup",
+                *call_id,
+                "followup_task",
+                json!({"target": task_name, "message": message}).to_string(),
             ),
             Self::Close { call_id } => (
                 "resp-root-reviewer-close",
@@ -542,6 +552,8 @@ async fn workflow_plan_and_validation_tools_are_model_visible() -> Result<()> {
     assert!(developer_text.contains("\"class\":\"simple_answer\""));
     assert!(developer_text.contains("\"selected\":[]"));
     assert!(developer_text.contains("\"audit_files_written\":false"));
+    assert!(developer_text.contains("Any non-empty finding list blocks completion"));
+    assert!(developer_text.contains("Only verdict=pass with an empty finding list"));
 
     let body = request.body_json();
     let names = tool_names(&body);
@@ -1103,5 +1115,211 @@ async fn maximum_bounded_reviewer_contract_validates_child(ephemeral: bool) -> R
     let close_payload: Value = serde_json::from_str(&close_output)
         .unwrap_or_else(|error| panic!("invalid close_agent output {close_output:?}: {error}"));
     assert!(close_payload.get("previous_status").is_some());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn low_and_medium_findings_require_a_new_passing_reviewer_revision() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    const ROOT_PROMPT: &str = "What is HTTP?";
+    const CHANGE_SUMMARY: &str = "HTTP review resolution changes.";
+    const FOLLOWUP_MESSAGE: &str =
+        "Re-review the Low and Medium findings after their fixes or documented dispositions.";
+    const PLAN_CALL_ID: &str = "call-plan-low-medium-review";
+    const SPAWN_CALL_ID: &str = "call-spawn-low-medium-review";
+    const WAIT_INITIAL_CALL_ID: &str = "call-wait-low-medium-review";
+    const VALIDATE_INITIAL_CALL_ID: &str = "call-validate-low-medium-review";
+    const FOLLOWUP_CALL_ID: &str = "call-followup-low-medium-review";
+    const WAIT_RESOLVED_CALL_ID: &str = "call-wait-resolved-review";
+    const VALIDATE_RESOLVED_CALL_ID: &str = "call-validate-resolved-review";
+    const CLOSE_CALL_ID: &str = "call-close-resolved-review";
+    const INITIAL_REVIEW: &str = r#"{"subject":"HTTP reviewer task","verdict":"needs_changes","summary":"Low and Medium findings require resolution","findings":[{"severity":"Low","impact":"local","likelihood":"unlikely","recoverability":"easy","rationale":"a local diagnostic is incomplete","file":"codex-rs/core/src/extended_workflow.rs","symbol":"reviewer_completion_gate","recommended_fix":"complete the diagnostic","missing_tests":[]},{"severity":"Medium","impact":"material","likelihood":"plausible","recoverability":"easy","rationale":"the resolution gate lacks an integration assertion","file":"codex-rs/core/tests/suite/extended_workflow.rs","symbol":"low_and_medium_findings_require_a_new_passing_reviewer_revision","recommended_fix":"add the integration assertion","missing_tests":["post-resolution reviewer revision"]}],"evidence":[{"file":"codex-rs/core/src/extended_workflow.rs","symbol":"reviewer_completion_gate","explanation":"the completion gate owns reviewer resolution"}],"missing_tests":["post-resolution reviewer revision"]}"#;
+    const RESOLVED_REVIEW: &str = r#"{"subject":"HTTP reviewer task","verdict":"pass","summary":"The Low and Medium findings were fixed or dispositioned and the re-review passes","findings":[],"evidence":[{"file":"codex-rs/core/src/extended_workflow.rs","symbol":"reviewer_completion_gate","explanation":"the updated gate requires an empty finding list"},{"file":"codex-rs/core/tests/suite/extended_workflow.rs","symbol":"low_and_medium_findings_require_a_new_passing_reviewer_revision","explanation":"the integration path validates the newer reviewer revision"}],"missing_tests":[]}"#;
+
+    let server = start_mock_server().await;
+    let plan_args = json!({"change_summary": CHANGE_SUMMARY}).to_string();
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            request_header(request, "x-openai-subagent").is_none()
+                && request_body_contains(request, ROOT_PROMPT)
+        },
+        sse(vec![
+            ev_response_created("resp-plan-low-medium-review"),
+            ev_function_call(PLAN_CALL_ID, "plan_workflow_reviewers", &plan_args),
+            ev_completed("resp-plan-low-medium-review"),
+        ]),
+    )
+    .await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(BodyContains(PLAN_CALL_ID))
+        .respond_with(WorkflowReviewerSpawnResponder {
+            call_id: SPAWN_CALL_ID,
+        })
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            request_header(request, "x-openai-subagent") == Some("collab_spawn")
+                && request_body_contains(request, "<extended_workflow_result_contract>")
+        },
+        sse(vec![
+            ev_response_created("resp-low-medium-reviewer-initial"),
+            ev_assistant_message("msg-low-medium-reviewer-initial", INITIAL_REVIEW),
+            ev_completed("resp-low-medium-reviewer-initial"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| request_body_contains(request, SPAWN_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-wait-low-medium-review"),
+            ev_function_call_with_namespace(
+                WAIT_INITIAL_CALL_ID,
+                "collaboration",
+                "wait_agent",
+                &json!({"timeout_ms": 2_000}).to_string(),
+            ),
+            ev_completed("resp-wait-low-medium-review"),
+        ]),
+    )
+    .await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(BodyContains(WAIT_INITIAL_CALL_ID))
+        .respond_with(WorkflowReviewerFollowupResponder::Validate {
+            call_id: VALIDATE_INITIAL_CALL_ID,
+            result: INITIAL_REVIEW,
+        })
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(BodyContains(VALIDATE_INITIAL_CALL_ID))
+        .respond_with(WorkflowReviewerFollowupResponder::Followup {
+            call_id: FOLLOWUP_CALL_ID,
+            message: FOLLOWUP_MESSAGE,
+        })
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            request_header(request, "x-openai-subagent") == Some("collab_spawn")
+                && request_body_contains(request, FOLLOWUP_MESSAGE)
+        },
+        sse(vec![
+            ev_response_created("resp-low-medium-reviewer-resolved"),
+            ev_assistant_message("msg-low-medium-reviewer-resolved", RESOLVED_REVIEW),
+            ev_completed("resp-low-medium-reviewer-resolved"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| request_body_contains(request, FOLLOWUP_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-wait-resolved-review"),
+            ev_function_call_with_namespace(
+                WAIT_RESOLVED_CALL_ID,
+                "collaboration",
+                "wait_agent",
+                &json!({"timeout_ms": 2_000}).to_string(),
+            ),
+            ev_completed("resp-wait-resolved-review"),
+        ]),
+    )
+    .await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(BodyContains(WAIT_RESOLVED_CALL_ID))
+        .respond_with(WorkflowReviewerFollowupResponder::Validate {
+            call_id: VALIDATE_RESOLVED_CALL_ID,
+            result: RESOLVED_REVIEW,
+        })
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(BodyContains(VALIDATE_RESOLVED_CALL_ID))
+        .respond_with(WorkflowReviewerFollowupResponder::Close {
+            call_id: CLOSE_CALL_ID,
+        })
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| request_body_contains(request, CLOSE_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-low-medium-review-finished"),
+            ev_assistant_message(
+                "msg-low-medium-review-finished",
+                "Low and Medium findings resolved and re-reviewed",
+            ),
+            ev_completed("resp-low-medium-review-finished"),
+        ]),
+    )
+    .await;
+
+    let mut builder = test_codex().with_config(|config| {
+        config.ephemeral = false;
+        config.extended_workflow.enabled = true;
+        config.extended_workflow.experts.enabled = false;
+        config.extended_workflow.reviewers.min = 1;
+        config.extended_workflow.reviewers.max = 1;
+        config.multi_agent_v2.min_wait_timeout_ms = 10;
+        config.multi_agent_v2.default_wait_timeout_ms = 2_000;
+    });
+    let test = builder.build(&server).await?;
+    let completion = test.submit_turn_and_return_complete(ROOT_PROMPT).await?;
+    assert_eq!(
+        completion.last_agent_message.as_deref(),
+        Some("Low and Medium findings resolved and re-reviewed")
+    );
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("responses requests should be recorded");
+    let output_for = |call_id: &str| {
+        requests
+            .iter()
+            .filter_map(request_body_json)
+            .filter_map(|body| body.get("input").and_then(Value::as_array).cloned())
+            .flatten()
+            .find(|item| {
+                item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                    && item.get("call_id").and_then(Value::as_str) == Some(call_id)
+            })
+            .and_then(|item| {
+                item.get("output")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| panic!("missing function output for {call_id}"))
+    };
+    let initial_payload: Value = serde_json::from_str(&output_for(VALIDATE_INITIAL_CALL_ID))?;
+    assert_eq!(
+        (
+            initial_payload["accepted"].as_bool(),
+            initial_payload["review_cycle_allowed"].as_bool(),
+            initial_payload["has_unresolved_findings"].as_bool(),
+            initial_payload["has_high_or_critical"].as_bool(),
+        ),
+        (Some(true), Some(true), Some(true), Some(false))
+    );
+    let resolved_payload: Value = serde_json::from_str(&output_for(VALIDATE_RESOLVED_CALL_ID))?;
+    assert_eq!(
+        (
+            resolved_payload["accepted"].as_bool(),
+            resolved_payload["review_cycle_allowed"].as_bool(),
+            resolved_payload["has_unresolved_findings"].as_bool(),
+            resolved_payload["has_high_or_critical"].as_bool(),
+        ),
+        (Some(true), Some(false), Some(false), Some(false))
+    );
     Ok(())
 }

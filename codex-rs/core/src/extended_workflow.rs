@@ -170,7 +170,7 @@ fn workflow_contract_message(kind: WorkflowAgentKind, task: &str) -> String {
             r#"{"subject":"non-empty string matching the assigned task","summary":"non-empty string","findings":["at least one finding"],"recommendations":["at least one recommendation"],"evidence":[{"file":"repository-relative file","symbol":"function, type, or module","explanation":"how this evidence supports the result"}],"uncertainties":["open question, or an explicit none statement"]}"#
         }
         WorkflowAgentKind::Reviewer => {
-            r#"{"subject":"non-empty string matching the assigned task","verdict":"pass | needs_changes | blocked","summary":"non-empty string","findings":[{"severity":"Low | Medium | High | Critical","impact":"local | material | system_wide","likelihood":"unlikely | plausible | expected","recoverability":"easy | costly | irreversible","rationale":"non-empty string","file":"repository-relative file","symbol":"function, type, or module","recommended_fix":"non-empty string","missing_tests":["specific missing test, if any"]}],"evidence":[{"file":"repository-relative file","symbol":"function, type, or module","explanation":"how this evidence supports the verdict"}],"missing_tests":["specific missing test, if any"]}"#
+            r#"{"subject":"non-empty string matching the assigned task","verdict":"pass | needs_changes | blocked; pass only when findings is empty","summary":"non-empty string","findings":[{"severity":"Low | Medium | High | Critical","impact":"local | material | system_wide","likelihood":"unlikely | plausible | expected","recoverability":"easy | costly | irreversible","rationale":"non-empty string","file":"repository-relative file","symbol":"function, type, or module","recommended_fix":"non-empty string","missing_tests":["specific missing test, if any"]}],"evidence":[{"file":"repository-relative file","symbol":"function, type, or module","explanation":"how this evidence supports the verdict, including accepted dispositions from an earlier review revision"}],"missing_tests":["specific missing test, if any"]}"#
         }
     };
     format!(
@@ -679,13 +679,24 @@ fn reviewer_completion_gate(
         return WorkflowCompletionGate::Satisfied;
     }
 
-    let details = if validations.iter().any(|validation| {
+    let has_unresolved_high_or_critical = validations.iter().any(|validation| {
+        validation.result_kind == "reviewer"
+            && validation.accepted
+            && validation.has_high_or_critical
+    });
+    let has_unresolved_review = validations.iter().any(|validation| {
         validation.result_kind == "reviewer"
             && validation.accepted
             && (!validation.reviewer_pass || validation.has_high_or_critical)
-    }) {
+    });
+    let details = if has_unresolved_review {
+        let severity = if has_unresolved_high_or_critical {
+            "including High or Critical"
+        } else {
+            "including Low or Medium"
+        };
         format!(
-            "reviewer validation has not passed: {}/{required} distinct passing agents and {}/{required} distinct passing roles; address the findings, request a new output revision, and validate it",
+            "reviewer validation has unresolved findings of any severity ({severity}): {}/{required} distinct passing agents and {}/{required} distinct passing roles; fix each finding or provide a concrete disposition, request a new output revision from the same reviewer, and validate it",
             passing_agents.len(),
             passing_roles.len()
         )
@@ -696,6 +707,16 @@ fn reviewer_completion_gate(
             passing_roles.len()
         )
     };
+    if validations.iter().any(|validation| {
+        validation.result_kind == "reviewer"
+            && validation.accepted
+            && !validation.reviewer_pass
+            && validation.review_cycles >= 2
+    }) {
+        return WorkflowCompletionGate::Blocked(format!(
+            "Extended workflow reviewer resolution gate exhausted after the initial review and one re-review: {details}. Ask the user whether to revise the implementation or scope, explicitly accept a documented residual risk, or abandon the workflow; do not report completion."
+        ));
+    }
     let exhausted = validations.iter().any(|validation| {
         validation.result_kind == "reviewer" && !validation.accepted && validation.submissions >= 2
     });

@@ -310,6 +310,7 @@ async fn handle_validate_result(
                     "review_cycle_allowed": false,
                     "attempts": submissions,
                     "errors": [],
+                    "has_unresolved_findings": false,
                     "has_high_or_critical": false,
                     "result_bytes": encoded_result.len(),
                     "max_result_bytes": max_result_bytes,
@@ -418,10 +419,15 @@ async fn handle_validate_result(
         }
     };
 
+    let has_unresolved_findings = reviewer_result
+        .as_ref()
+        .is_some_and(|result| !result.findings.is_empty());
     let mut review_cycle_allowed = false;
     if validation.valid {
         let reviewer_pass = reviewer_result.as_ref().is_some_and(|result| {
-            result.verdict == ReviewVerdict::Pass && !validation.has_high_or_critical
+            result.verdict == ReviewVerdict::Pass
+                && !has_unresolved_findings
+                && !validation.has_high_or_critical
         });
         invocation
             .session
@@ -470,6 +476,7 @@ async fn handle_validate_result(
             "review_cycle_allowed": review_cycle_allowed,
             "attempts": submission,
             "errors": validation.errors,
+            "has_unresolved_findings": has_unresolved_findings,
             "has_high_or_critical": validation.has_high_or_critical,
             "result_bytes": encoded_result.len(),
             "max_result_bytes": max_result_bytes,
@@ -889,6 +896,7 @@ fn validation_rejected_output(
             "review_cycle_allowed": false,
             "attempts": submissions,
             "errors": [error],
+            "has_unresolved_findings": false,
             "has_high_or_critical": false,
             "result_bytes": result_bytes,
             "max_result_bytes": max_result_bytes,
