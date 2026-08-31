@@ -73,6 +73,24 @@ rules, repository preparation, and implementation references.
 
 ## Quickstart
 
+### Installing codex-extended-workflow on Windows
+
+Starting with releases produced by `extended-workflow-release.yml`, download
+the installer from the matching GitHub release and run it with the exact tag:
+
+```powershell
+$tag = "v0.147.1-alpha-6"
+$installer = Join-Path $env:TEMP "install-extended-workflow.ps1"
+Invoke-WebRequest "https://github.com/mikmann/own-codex/releases/download/$tag/install-extended-workflow.ps1" -OutFile $installer
+& $installer -Release $tag
+codex-extended-workflow --version
+```
+
+The installer verifies the release checksum, complete package layout, CLI
+version, and `codex-code-mode-host` before replacing the managed installation.
+Do not use `cargo install` as the end-user installation path: it installs the
+CLI crate but not the separate Code Mode host crate.
+
 ### Building and running this fork
 
 Build the Rust launcher locally with the repository's normal toolchain:

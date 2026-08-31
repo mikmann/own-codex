@@ -27,6 +27,16 @@ The workflows in this directory are split so that pull requests get fast, review
   - cross-platform `argument-comment-lint`
   - Linux remote-env tests
 
+## Extended Workflow Releases
+
+- `extended-workflow-release.yml` handles this fork's `v<version>` tags.
+- It requires the tag to match the Cargo workspace version, builds the Windows
+  x64 extended launcher and Code Mode host from the same commit, creates the
+  canonical package and checksum manifest, and installs that package into a
+  temporary location for smoke testing.
+- The GitHub release job cannot run unless every build, package, checksum,
+  installer, CLI, and host gate succeeds.
+
 ## Rule Of Thumb
 
 - If a build/test/clippy check can be expressed in Bazel, prefer putting the PR-time version in `bazel.yml`.

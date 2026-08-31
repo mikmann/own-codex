@@ -1,5 +1,6 @@
 """Supported package targets and default binary discovery."""
 
+import os
 import platform
 import stat
 from dataclasses import dataclass
@@ -52,6 +53,11 @@ PACKAGE_VARIANTS: dict[str, PackageVariant] = {
         name="codex",
         cargo_bin="codex",
         executable_stem="codex",
+    ),
+    "codex-extended-workflow": PackageVariant(
+        name="codex-extended-workflow",
+        cargo_bin="codex-extended-workflow",
+        executable_stem="codex-extended-workflow",
     ),
     "codex-app-server": PackageVariant(
         name="codex-app-server",
@@ -152,7 +158,9 @@ def resolve_input_path(
     raise RuntimeError(f"Must specify {flag_name} for {description}.")
 
 
-def is_executable(path: Path) -> bool:
+def is_executable(path: Path, *, platform_name: str = os.name) -> bool:
+    if platform_name == "nt":
+        return path.is_file()
     return bool(path.stat().st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
 
 

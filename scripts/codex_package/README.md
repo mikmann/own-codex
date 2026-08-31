@@ -31,8 +31,11 @@ artifacts; pass a GNU Linux target explicitly for native glibc local builds. If
 prints its path after the package is built.
 
 The `--variant` flag selects the package entrypoint. Supported variants are
-`codex` and `codex-app-server`. The `version` field in `codex-package.json` is
-read from `[workspace.package].version` in `codex-rs/Cargo.toml`.
+`codex`, `codex-extended-workflow`, and `codex-app-server`. Extended workflow
+releases must use `codex-extended-workflow` so the package contains the primary
+fork launcher rather than the compatibility `codex` binary. The `version` field
+in `codex-package.json` is read from `[workspace.package].version` in
+`codex-rs/Cargo.toml`.
 
 ## Source-built artifacts
 
@@ -54,6 +57,13 @@ binary instead of rebuilding it.
 
 Release jobs should likewise pass `--code-mode-host-bin` so the package contains
 the signed host executable beside the signed entrypoint.
+
+The fork's Windows release workflow uses the
+`codex-extended-workflow` variant and publishes
+`codex-extended-workflow-package-<target>.zip` together with
+`codex-extended-workflow-package_SHA256SUMS` and the fail-closed PowerShell
+installer. A `v<version>` tag is publishable only when it exactly matches the
+workspace version and the packaged CLI and host smoke tests both pass.
 
 Release jobs that already built package resource binaries should also pass the
 corresponding resource flags: `--bwrap-bin` for Linux packages, and

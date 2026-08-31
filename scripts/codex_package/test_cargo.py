@@ -11,9 +11,16 @@ from codex_package.cargo import build_source_binaries
 from codex_package.cargo import source_binaries_for_target
 from codex_package.targets import PACKAGE_VARIANTS
 from codex_package.targets import TARGET_SPECS
+from codex_package.targets import is_executable
 
 
 class SourceBinariesForTargetTest(unittest.TestCase):
+    def test_windows_executable_check_uses_file_presence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = touch_file(Path(temp_dir) / "tool.exe")
+
+            self.assertTrue(is_executable(executable, platform_name="nt"))
+
     def test_macos_package_with_prebuilt_entrypoint_builds_nothing(self) -> None:
         self.assertEqual(
             source_binaries_for_target(
@@ -86,6 +93,22 @@ class SourceBinariesForTargetTest(unittest.TestCase):
                 build_codex_windows_sandbox_setup=False,
             ),
             ["codex-code-mode-host"],
+        )
+
+    def test_extended_workflow_package_builds_matching_entrypoint_and_host(
+        self,
+    ) -> None:
+        self.assertEqual(
+            source_binaries_for_target(
+                TARGET_SPECS["x86_64-pc-windows-msvc"],
+                PACKAGE_VARIANTS["codex-extended-workflow"],
+                build_entrypoint=True,
+                build_code_mode_host=True,
+                build_bwrap=False,
+                build_codex_command_runner=False,
+                build_codex_windows_sandbox_setup=False,
+            ),
+            ["codex-extended-workflow", "codex-code-mode-host"],
         )
 
     def test_build_uses_prebuilt_windows_helpers_without_running_cargo(self) -> None:
