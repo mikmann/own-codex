@@ -353,7 +353,10 @@ impl ChatWidget {
                 reasoning_effort,
                 agents_states,
             }),
-            item @ ThreadItem::SubAgentActivity { .. } => self.on_sub_agent_activity(item),
+            // Sub-agent activity items are emitted as an immediate started/completed pair with
+            // identical display content. Render the completed item only so the transcript contains
+            // one durable workflow-status row per activity.
+            ThreadItem::SubAgentActivity { .. } => {}
             ThreadItem::EnteredReviewMode { review, .. } if !from_replay => {
                 self.enter_review_mode_with_hint(review, /*from_replay*/ false);
             }

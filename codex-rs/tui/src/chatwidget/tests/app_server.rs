@@ -501,6 +501,119 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
 }
 
 #[tokio::test]
+async fn workflow_activity_lifecycle_renders_once_and_close_uses_identity() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000000002").expect("valid thread id");
+    let reviewer_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b91781b41a8e").expect("valid thread id");
+    let activity = AppServerThreadItem::SubAgentActivity {
+        id: "workflow-validation-1".to_string(),
+        kind: codex_app_server_protocol::SubAgentActivityKind::Started,
+        agent_thread_id: reviewer_thread_id.to_string(),
+        agent_path: "/root/documentation".to_string(),
+        workflow_agent: Some(codex_app_server_protocol::WorkflowAgentDisplay {
+            name: "documentation".to_string(),
+            agent_type: "Reviewer".to_string(),
+            role: "Documentation and user experience".to_string(),
+            model: "gpt-5.6-sol".to_string(),
+            reasoning_effort: Some(ReasoningEffortConfig::High),
+            status: codex_app_server_protocol::WorkflowAgentDisplayStatus::Validated,
+        }),
+    };
+
+    chat.handle_server_notification(
+        ServerNotification::ItemStarted(ItemStartedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            started_at_ms: 0,
+            item: activity.clone(),
+        }),
+        /*replay_kind*/ None,
+    );
+    assert!(
+        drain_insert_history(&mut rx).is_empty(),
+        "workflow activity must wait for its completed notification"
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            completed_at_ms: 0,
+            item: activity,
+        }),
+        /*replay_kind*/ None,
+    );
+    let activity_cells = drain_insert_history(&mut rx);
+    assert_eq!(activity_cells.len(), 1);
+
+    chat.handle_server_notification(
+        ServerNotification::ItemStarted(ItemStartedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            started_at_ms: 0,
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "close-1".to_string(),
+                tool: AppServerCollabAgentTool::CloseAgent,
+                status: AppServerCollabAgentToolCallStatus::InProgress,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![reviewer_thread_id.to_string()],
+                prompt: None,
+                model: None,
+                reasoning_effort: None,
+                agents_states: HashMap::new(),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+    assert!(drain_insert_history(&mut rx).is_empty());
+
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            completed_at_ms: 0,
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "close-1".to_string(),
+                tool: AppServerCollabAgentTool::CloseAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![reviewer_thread_id.to_string()],
+                prompt: None,
+                model: None,
+                reasoning_effort: None,
+                agents_states: HashMap::from([(
+                    reviewer_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::Completed,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+    let close_cells = drain_insert_history(&mut rx);
+    assert_eq!(close_cells.len(), 1);
+
+    let rendered = activity_cells
+        .into_iter()
+        .chain(close_cells)
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let activity_text = "documentation: Reviewer | Documentation and user experience | gpt-5.6-sol | high | Validated";
+    assert_eq!(rendered.matches(activity_text).count(), 1);
+    assert!(rendered.contains("Closed documentation [Reviewer]"));
+    assert!(!rendered.contains(&reviewer_thread_id.to_string()));
+    assert_chatwidget_snapshot!(
+        "workflow_activity_lifecycle_renders_once_and_close_uses_identity",
+        rendered
+    );
+}
+
+#[tokio::test]
 async fn live_app_server_user_message_item_completed_does_not_duplicate_rendered_prompt() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());

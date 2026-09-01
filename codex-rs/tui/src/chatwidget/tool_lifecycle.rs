@@ -146,6 +146,20 @@ impl ChatWidget {
     }
 
     pub(super) fn on_sub_agent_activity(&mut self, item: ThreadItem) {
+        if let ThreadItem::SubAgentActivity {
+            agent_thread_id,
+            workflow_agent: Some(workflow_agent),
+            ..
+        } = &item
+            && matches!(workflow_agent.agent_type.as_str(), "Expert" | "Reviewer")
+            && let Ok(thread_id) = ThreadId::from_string(agent_thread_id)
+        {
+            self.set_collab_agent_metadata(
+                thread_id,
+                Some(workflow_agent.name.clone()),
+                Some(workflow_agent.agent_type.clone()),
+            );
+        }
         if let Some(cell) = multi_agents::sub_agent_activity_history_cell(&item) {
             self.on_collab_event(cell);
         }

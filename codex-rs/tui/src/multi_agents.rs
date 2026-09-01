@@ -332,14 +332,35 @@ fn workflow_agent_activity_title(
         .as_ref()
         .map(ToString::to_string)
         .unwrap_or_else(|| "default".to_string());
-    let identity = format!(
-        "{}: {} | {} | {} | {}",
-        agent.name, agent.agent_type, agent.role, agent.model, reasoning
-    );
     let status = match agent.status {
         WorkflowAgentDisplayStatus::Running => "Running",
         WorkflowAgentDisplayStatus::Validated => "Validated",
         WorkflowAgentDisplayStatus::Rejected => "Rejected",
+    };
+    let name = if color_enabled {
+        Span::from(agent.name.clone()).cyan().bold()
+    } else {
+        Span::from(agent.name.clone())
+    };
+    let agent_type = if color_enabled {
+        Span::from(agent.agent_type.clone()).magenta().bold()
+    } else {
+        Span::from(agent.agent_type.clone())
+    };
+    let role = if color_enabled {
+        Span::from(agent.role.clone()).blue()
+    } else {
+        Span::from(agent.role.clone())
+    };
+    let model = if color_enabled {
+        Span::from(agent.model.clone()).cyan()
+    } else {
+        Span::from(agent.model.clone())
+    };
+    let reasoning = if color_enabled {
+        Span::from(reasoning).magenta()
+    } else {
+        Span::from(reasoning)
     };
     let status_span = match (agent.status, color_enabled) {
         (WorkflowAgentDisplayStatus::Validated, true) => Span::from(status).green().bold(),
@@ -348,7 +369,15 @@ fn workflow_agent_activity_title(
         (_, false) => Span::from(status),
     };
     title_spans_line(vec![
-        blue_if_supported(Span::from(identity), color_enabled),
+        name,
+        Span::from(": ").dim(),
+        agent_type,
+        Span::from(" | ").dim(),
+        role,
+        Span::from(" | ").dim(),
+        model,
+        Span::from(" | ").dim(),
+        reasoning,
         Span::from(" | ").dim(),
         status_span,
     ])
@@ -1007,11 +1036,11 @@ mod tests {
             id: "activity-workflow".to_string(),
             kind: SubAgentActivityKind::Started,
             agent_thread_id: ThreadId::new().to_string(),
-            agent_path: "/root/architecture".to_string(),
+            agent_path: "/root/documentation".to_string(),
             workflow_agent: Some(WorkflowAgentDisplay {
-                name: "eulenmann".to_string(),
-                agent_type: "Expert".to_string(),
-                role: "Architecture".to_string(),
+                name: "documentation".to_string(),
+                agent_type: "Reviewer".to_string(),
+                role: "Documentation and user experience".to_string(),
                 model: "gpt-5.6-sol".to_string(),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
                 status: WorkflowAgentDisplayStatus::Validated,
@@ -1022,24 +1051,50 @@ mod tests {
         assert_snapshot!("v2_workflow_activity", cell_to_text(&cell));
         let title = &cell.display_lines(/*width*/ 200)[0];
         assert_eq!(
-            title.spans[1].content.as_ref(),
-            "eulenmann: Expert | Architecture | gpt-5.6-sol | high"
+            title,
+            &Line::from(vec![
+                Span::from("• ").dim(),
+                Span::from("documentation").cyan().bold(),
+                Span::from(": ").dim(),
+                Span::from("Reviewer").magenta().bold(),
+                Span::from(" | ").dim(),
+                Span::from("Documentation and user experience").blue(),
+                Span::from(" | ").dim(),
+                Span::from("gpt-5.6-sol").cyan(),
+                Span::from(" | ").dim(),
+                Span::from("high").magenta(),
+                Span::from(" | ").dim(),
+                Span::from("Validated").green().bold(),
+            ])
         );
-        assert_eq!(title.spans[1].style.fg, Some(Color::Blue));
-        assert_eq!(title.spans[3].content.as_ref(), "Validated");
-        assert_eq!(title.spans[3].style.fg, Some(Color::Green));
 
         let no_color =
             workflow_agent_activity_title(item_workflow_agent(&item), /*color_enabled*/ false);
-        assert_eq!(no_color.spans[1].style.fg, None);
-        assert_eq!(no_color.spans[3].content.as_ref(), "Validated");
-        assert_eq!(no_color.spans[3].style.fg, None);
+        assert_eq!(
+            no_color,
+            Line::from(vec![
+                Span::from("• ").dim(),
+                Span::from("documentation"),
+                Span::from(": ").dim(),
+                Span::from("Reviewer"),
+                Span::from(" | ").dim(),
+                Span::from("Documentation and user experience"),
+                Span::from(" | ").dim(),
+                Span::from("gpt-5.6-sol"),
+                Span::from(" | ").dim(),
+                Span::from("high"),
+                Span::from(" | ").dim(),
+                Span::from("Validated"),
+            ])
+        );
 
         let mut rejected = item_workflow_agent(&item).clone();
         rejected.status = WorkflowAgentDisplayStatus::Rejected;
         let rejected_title = workflow_agent_activity_title(&rejected, /*color_enabled*/ true);
-        assert_eq!(rejected_title.spans[3].content.as_ref(), "Rejected");
-        assert_eq!(rejected_title.spans[3].style.fg, Some(Color::Red));
+        assert_eq!(
+            rejected_title.spans.last(),
+            Some(&Span::from("Rejected").red().bold())
+        );
     }
 
     fn item_workflow_agent(item: &ThreadItem) -> &WorkflowAgentDisplay {
