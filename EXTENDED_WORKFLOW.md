@@ -5,7 +5,7 @@ second agent runtime or a repository-specific ticket format. The fork is based
 on the official `rust-v0.147.0` tag at
 `be6e8eac029b183056b7e4402879f15d2c85f61b`. The requested upstream spelling
 `v0.147.0` was absent and the use of `rust-v0.147.0` was explicitly approved.
-The distribution and local release tag use `v0.147.1-alpha-6`.
+The distribution and local release tag use `v0.147.1-alpha-7`.
 
 ## Architecture
 
@@ -492,7 +492,7 @@ the extended defaults while `bin/codex.js` remains the disabled-by-default
 compatibility entry point. Rust crate names and other public interfaces remain
 stable. App-server, foreground remote control, MCP tool sessions, and the
 TypeScript SDK propagate the same one-shot product default; an explicit
-configuration value still wins. Both launchers report `v0.147.1-alpha-6`.
+configuration value still wins. Both launchers report `v0.147.1-alpha-7`.
 
 The official app-server updater and update prompt are hard-disabled when the
 extended product mode is active, preventing a managed daemon from replacing
