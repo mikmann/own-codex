@@ -4566,6 +4566,87 @@ pub enum WorkflowAgentDisplayStatus {
     Rejected,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum WorkflowValidationFormalStatus {
+    Valid,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum WorkflowReviewerVerdict {
+    Pass,
+    NeedsChanges,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum WorkflowValidationGateStatus {
+    Eligible,
+    NeedsResolution,
+    Excluded,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum WorkflowValidationErrorCode {
+    TaskBindingMismatch,
+    SchemaConsistency,
+    InvalidReportFormat,
+    MissingEvidence,
+    SizeLimitExceeded,
+    TerminalOutputMismatch,
+    ContractViolation,
+    CorrectionExhausted,
+    ChangeDigestMismatch,
+    TechnicalFailure,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub enum WorkflowFindingSeverity {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct WorkflowAgentValidationDisplay {
+    pub formal_status: WorkflowValidationFormalStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reviewer_verdict: Option<WorkflowReviewerVerdict>,
+    pub gate_status: WorkflowValidationGateStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error_code: Option<WorkflowValidationErrorCode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub message: Option<String>,
+    pub submission: u8,
+    pub max_submissions: u8,
+    pub retry_allowed: bool,
+    pub finding_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub max_severity: Option<WorkflowFindingSeverity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub change_digest_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub passing_reviewers: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub required_reviewers: Option<u32>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 pub struct WorkflowAgentDisplay {
     pub name: String,
@@ -4576,6 +4657,9 @@ pub struct WorkflowAgentDisplay {
     #[ts(optional)]
     pub reasoning_effort: Option<ReasoningEffortConfig>,
     pub status: WorkflowAgentDisplayStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub validation: Option<WorkflowAgentValidationDisplay>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]

@@ -4,6 +4,7 @@ mod current_time;
 mod dynamic;
 pub(crate) mod extended_workflow;
 pub(crate) mod extended_workflow_spec;
+mod extended_workflow_validation;
 pub(crate) mod extension_tools;
 mod get_context_remaining;
 pub(crate) mod get_context_remaining_spec;

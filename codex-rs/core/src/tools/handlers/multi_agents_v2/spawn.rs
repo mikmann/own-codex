@@ -373,6 +373,7 @@ async fn handle_spawn_agent(
                         .as_ref()
                         .and_then(|snapshot| snapshot.reasoning_effort.clone()),
                     status: WorkflowAgentDisplayStatus::Running,
+                    validation: None,
                 }),
         },
     )

@@ -75,7 +75,8 @@ pub(crate) fn create_validate_workflow_result_tool() -> ToolSpec {
         (
             "expected_subject".to_string(),
             JsonSchema::string(Some(
-                "Compact subject that the result must address.".to_string(),
+                "Deprecated compatibility field. The server derives the authoritative subject binding; callers may omit this value."
+                    .to_string(),
             ))
             .with_max_length(crate::extended_workflow::MAX_WORKFLOW_EXPECTED_SUBJECT_BYTES),
         ),
@@ -102,7 +103,6 @@ pub(crate) fn create_validate_workflow_result_tool() -> ToolSpec {
             Some(vec![
                 "kind".to_string(),
                 "result_id".to_string(),
-                "expected_subject".to_string(),
                 "result".to_string(),
             ]),
             Some(false.into()),
@@ -118,6 +118,15 @@ pub(crate) fn create_validate_workflow_result_tool() -> ToolSpec {
                 "errors": { "type": "array", "items": { "type": "string" } },
                 "has_unresolved_findings": { "type": "boolean" },
                 "has_high_or_critical": { "type": "boolean" },
+                "formal_status": { "type": "string", "enum": ["valid", "invalid"] },
+                "reviewer_verdict": { "type": ["string", "null"], "enum": ["pass", "needs_changes", "blocked", null] },
+                "gate_status": { "type": "string", "enum": ["eligible", "needs_resolution", "excluded"] },
+                "error_code": { "type": ["string", "null"] },
+                "finding_count": { "type": "integer" },
+                "max_severity": { "type": ["string", "null"], "enum": ["Low", "Medium", "High", "Critical", null] },
+                "change_digest_sha256": { "type": ["string", "null"] },
+                "passing_reviewers": { "type": ["integer", "null"] },
+                "required_reviewers": { "type": ["integer", "null"] },
                 "result_bytes": { "type": "integer" },
                 "max_result_bytes": { "type": "integer" },
                 "validation_key": { "type": "string" },
@@ -131,6 +140,15 @@ pub(crate) fn create_validate_workflow_result_tool() -> ToolSpec {
                 "errors",
                 "has_unresolved_findings",
                 "has_high_or_critical",
+                "formal_status",
+                "reviewer_verdict",
+                "gate_status",
+                "error_code",
+                "finding_count",
+                "max_severity",
+                "change_digest_sha256",
+                "passing_reviewers",
+                "required_reviewers",
                 "result_bytes",
                 "max_result_bytes",
                 "validation_key",
@@ -238,7 +256,7 @@ fn concept_schema() -> JsonSchema {
 }
 
 fn reviewer_finding_schema() -> JsonSchema {
-    required_object(BTreeMap::from([
+    let properties = BTreeMap::from([
         (
             "severity".to_string(),
             JsonSchema::string_enum(
@@ -280,7 +298,21 @@ fn reviewer_finding_schema() -> JsonSchema {
             "missing_tests".to_string(),
             string_array("Missing tests; use an empty array when none are missing."),
         ),
-    ]))
+    ]);
+    JsonSchema::object(
+        properties,
+        Some(vec![
+            "impact".to_string(),
+            "likelihood".to_string(),
+            "recoverability".to_string(),
+            "rationale".to_string(),
+            "file".to_string(),
+            "symbol".to_string(),
+            "recommended_fix".to_string(),
+            "missing_tests".to_string(),
+        ]),
+        Some(false.into()),
+    )
 }
 
 fn reviewer_result_schema() -> JsonSchema {

@@ -28,6 +28,7 @@ use codex_protocol::protocol::SubAgentActivityKind;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::protocol::WorkflowAgentDisplay;
 use codex_protocol::protocol::WorkflowAgentDisplayStatus;
+use codex_protocol::protocol::WorkflowAgentValidationDisplay;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 use serde::Deserialize;
@@ -65,7 +66,7 @@ impl ResultKind {
 struct ValidateResultArgs {
     kind: ResultKind,
     result_id: String,
-    expected_subject: String,
+    expected_subject: Option<String>,
     agent_task: Option<String>,
     selected: Option<bool>,
     result: JsonValue,
@@ -163,13 +164,15 @@ impl ToolExecutor<ToolInvocation> for PlanWorkflowReviewersHandler {
                     return Err(FunctionCallError::RespondToModel(message));
                 }
             }
-            let plan = plan_reviewers(
+            let change_digest_sha256 = working_tree_change_digest(&invocation).await?;
+            let mut plan = plan_reviewers(
                 &planning_input,
                 &invocation.turn.sub_id,
                 &invocation.turn.config.extended_workflow,
             );
+            plan.change_digest_sha256 = Some(change_digest_sha256.clone());
             runtime
-                .install_reviewers(&plan, &args.change_summary)
+                .install_reviewers(&plan, &args.change_summary, &change_digest_sha256)
                 .map_err(FunctionCallError::RespondToModel)?;
             Ok(boxed_tool_output(WorkflowToolOutput::new(true, plan)))
         })
@@ -229,17 +232,14 @@ async fn handle_validate_result(
         crate::extended_workflow::MAX_WORKFLOW_RESULT_ID_BYTES,
     )
     .map_err(FunctionCallError::RespondToModel)?;
-    if args.expected_subject.trim().is_empty() {
-        return Err(FunctionCallError::RespondToModel(
-            "expected_subject must not be empty".to_string(),
-        ));
+    if let Some(expected_subject) = args.expected_subject.as_deref() {
+        crate::extended_workflow::require_bounded_workflow_text(
+            "expected_subject",
+            expected_subject,
+            crate::extended_workflow::MAX_WORKFLOW_EXPECTED_SUBJECT_BYTES,
+        )
+        .map_err(FunctionCallError::RespondToModel)?;
     }
-    crate::extended_workflow::require_bounded_workflow_text(
-        "expected_subject",
-        &args.expected_subject,
-        crate::extended_workflow::MAX_WORKFLOW_EXPECTED_SUBJECT_BYTES,
-    )
-    .map_err(FunctionCallError::RespondToModel)?;
     if let Some(agent_task) = args.agent_task.as_deref() {
         crate::extended_workflow::require_bounded_workflow_text(
             "agent_task",
@@ -254,6 +254,27 @@ async fn handle_validate_result(
     })?;
     let max_result_bytes = invocation.turn.config.extended_workflow.max_result_bytes;
     let target = validation_target(&invocation, &args).await?;
+    let (change_digest_sha256, change_digest_error) = if args.kind == ResultKind::Reviewer {
+        let current_digest = working_tree_change_digest(&invocation).await?;
+        let expected_digest = invocation
+            .turn
+            .extension_data
+            .get::<WorkflowTurnRuntimeState>()
+            .and_then(|runtime| runtime.reviewer_change_digest_sha256());
+        let error = match expected_digest {
+            Some(expected_digest) if expected_digest != current_digest => Some(format!(
+                "actual working-tree change digest {current_digest} does not match the reviewer round digest {expected_digest}; plan a new reviewer round for the changed diff"
+            )),
+            Some(_) => None,
+            None => Some(
+                "reviewer result is not bound to an installed working-tree change digest"
+                    .to_string(),
+            ),
+        };
+        (Some(current_digest), error)
+    } else {
+        (None, None)
+    };
     let key = target.key.clone();
     let (output_revision, output_sha256, requires_higher_revision, agent_thread_id, agent_role) =
         target.agent.as_ref().map_or_else(
@@ -300,7 +321,6 @@ async fn handle_validate_result(
         {
             ensure_accepted_validation_matches(&invocation, &key, &output_sha256).await?;
             select_accepted_ticket(&invocation, result_id, &output_sha256).await?;
-            emit_validation_status(&invocation, &args, &target, true).await;
             return Ok(boxed_tool_output(WorkflowToolOutput::new(
                 true,
                 serde_json::json!({
@@ -312,6 +332,15 @@ async fn handle_validate_result(
                     "errors": [],
                     "has_unresolved_findings": false,
                     "has_high_or_critical": false,
+                    "formal_status": "valid",
+                    "reviewer_verdict": null,
+                    "gate_status": "eligible",
+                    "error_code": null,
+                    "finding_count": 0,
+                    "max_severity": null,
+                    "change_digest_sha256": null,
+                    "passing_reviewers": null,
+                    "required_reviewers": null,
                     "result_bytes": encoded_result.len(),
                     "max_result_bytes": max_result_bytes,
                     "validation_key": key,
@@ -356,36 +385,40 @@ async fn handle_validate_result(
     };
 
     let mut reviewer_result = None;
-    let validation = if let Some(error) = target
+    let reviewer_contract_validation = if args.kind == ResultKind::Reviewer {
+        Some(
+            match serde_json::from_value::<ReviewerResult>(args.result.clone()) {
+                Ok(result) => {
+                    let validation = validate_reviewer_result(&result, &target.expected_subject);
+                    reviewer_result = Some(result);
+                    validation
+                }
+                Err(error) => invalid_contract("ReviewerResult", error),
+            },
+        )
+    } else {
+        None
+    };
+    let mut validation = if let Some(error) = target
         .agent
         .as_ref()
         .and_then(|agent| agent.terminal_error.as_ref())
     {
-        crate::extended_workflow::ContractValidation {
-            valid: false,
-            errors: vec![error.clone()],
-            has_high_or_critical: false,
-        }
+        invalid_validation(error.clone())
     } else if let Some(agent) = target.agent.as_ref()
         && agent.terminal_result.as_ref() != Some(&args.result)
     {
-        crate::extended_workflow::ContractValidation {
-            valid: false,
-            errors: vec![
+        invalid_validation(
                 "submitted result does not exactly match the completed workflow agent's terminal JSON response"
                     .to_string(),
-            ],
-            has_high_or_critical: false,
-        }
+        )
+    } else if let Some(error) = change_digest_error {
+        invalid_validation(error)
     } else if encoded_result.len() > max_result_bytes {
-        crate::extended_workflow::ContractValidation {
-            valid: false,
-            errors: vec![format!(
-                "structured result is {} bytes; the configured hard limit is {max_result_bytes} bytes",
-                encoded_result.len()
-            )],
-            has_high_or_critical: false,
-        }
+        invalid_validation(format!(
+            "structured result is {} bytes; the configured hard limit is {max_result_bytes} bytes",
+            encoded_result.len()
+        ))
     } else {
         match args.kind {
             ResultKind::Expert => match serde_json::from_value::<ExpertResult>(args.result.clone())
@@ -393,17 +426,14 @@ async fn handle_validate_result(
                 Ok(result) => validate_expert_result(&result, &target.expected_subject),
                 Err(error) => invalid_contract("ExpertResult", error),
             },
-            ResultKind::Reviewer => {
-                match serde_json::from_value::<ReviewerResult>(args.result.clone()) {
-                    Ok(result) => {
-                        let validation =
-                            validate_reviewer_result(&result, &target.expected_subject);
-                        reviewer_result = Some(result);
-                        validation
-                    }
-                    Err(error) => invalid_contract("ReviewerResult", error),
-                }
-            }
+            ResultKind::Reviewer => reviewer_contract_validation
+                .clone()
+                .unwrap_or_else(|| {
+                    invalid_validation(
+                        "internal workflow validation failure: reviewer contract validation was not initialized"
+                            .to_string(),
+                    )
+                }),
             ResultKind::Ticket => {
                 match serde_json::from_value::<WorkflowTicket>(args.result.clone()) {
                     Ok(result) => validate_ticket(&result, &target.expected_subject),
@@ -418,33 +448,85 @@ async fn handle_validate_result(
             }
         }
     };
+    if let Some(reviewer_validation) = reviewer_contract_validation.as_ref() {
+        validation.has_high_or_critical = reviewer_validation.has_high_or_critical;
+        validation.finding_count = reviewer_validation.finding_count;
+        validation.max_severity = reviewer_validation.max_severity;
+        if validation.errors != reviewer_validation.errors && !reviewer_validation.errors.is_empty()
+        {
+            validation.errors.extend(reviewer_validation.errors.clone());
+        }
+    }
 
     let has_unresolved_findings = reviewer_result
         .as_ref()
         .is_some_and(|result| !result.findings.is_empty());
-    let mut review_cycle_allowed = false;
-    if validation.valid {
-        let reviewer_pass = reviewer_result.as_ref().is_some_and(|result| {
+    let reviewer_verdict = reviewer_result.as_ref().map(|result| result.verdict);
+    let reviewer_pass = validation.valid
+        && reviewer_result.as_ref().is_some_and(|result| {
             result.verdict == ReviewVerdict::Pass
                 && !has_unresolved_findings
                 && !validation.has_high_or_critical
         });
-        invocation
-            .session
-            .services
-            .agent_control
-            .complete_workflow_validation(codex_agent_graph_store::WorkflowValidationCompletion {
-                root_thread_id: invocation.session.thread_id,
-                turn_id: invocation.turn.sub_id.clone(),
-                validation_key: key.clone(),
-                submission,
-                output_revision,
-                output_sha256: output_sha256.clone(),
+    let retry_allowed = !validation.valid && submission == 1;
+    let (passing_reviewers, required_reviewers) =
+        if let Some(change_digest_sha256) = change_digest_sha256.as_deref() {
+            let validations = invocation
+                .session
+                .services
+                .agent_control
+                .list_workflow_validations(invocation.session.thread_id, &invocation.turn.sub_id)
+                .await
+                .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+            let required = invocation
+                .turn
+                .extension_data
+                .get::<WorkflowTurnRuntimeState>()
+                .map_or(0, |runtime| runtime.reviewer_required_count());
+            let (passing, required) = reviewer_round_counts(
+                &validations,
+                &key,
                 reviewer_pass,
-                has_high_or_critical: validation.has_high_or_critical,
-            })
-            .await
-            .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+                change_digest_sha256,
+                required,
+            );
+            (Some(passing), Some(required))
+        } else {
+            (None, None)
+        };
+    let presentation =
+        crate::tools::handlers::extended_workflow_validation::validation_presentation(
+            crate::tools::handlers::extended_workflow_validation::WorkflowValidationPresentationArgs {
+                validation: &validation,
+                reviewer_verdict,
+                submission,
+                retry_allowed,
+                change_digest_sha256: change_digest_sha256.clone(),
+                passing_reviewers,
+                required_reviewers,
+            },
+        );
+    invocation
+        .session
+        .services
+        .agent_control
+        .complete_workflow_validation(codex_agent_graph_store::WorkflowValidationCompletion {
+            root_thread_id: invocation.session.thread_id,
+            turn_id: invocation.turn.sub_id.clone(),
+            validation_key: key.clone(),
+            submission,
+            output_revision,
+            output_sha256: output_sha256.clone(),
+            accepted: validation.valid,
+            reviewer_pass,
+            has_high_or_critical: validation.has_high_or_critical,
+            details: presentation.stored,
+        })
+        .await
+        .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+
+    let mut review_cycle_allowed = false;
+    if validation.valid {
         if args.kind == ResultKind::Reviewer && !reviewer_pass {
             review_cycle_allowed = invocation
                 .session
@@ -465,9 +547,15 @@ async fn handle_validate_result(
         }
     }
 
-    emit_validation_status(&invocation, &args, &target, validation.valid).await;
+    emit_validation_status(
+        &invocation,
+        &args,
+        &target,
+        validation.valid,
+        presentation.display.clone(),
+    )
+    .await;
 
-    let retry_allowed = !validation.valid && submission == 1;
     Ok(boxed_tool_output(WorkflowToolOutput::new(
         validation.valid,
         serde_json::json!({
@@ -478,6 +566,15 @@ async fn handle_validate_result(
             "errors": validation.errors,
             "has_unresolved_findings": has_unresolved_findings,
             "has_high_or_critical": validation.has_high_or_critical,
+            "formal_status": presentation.display.formal_status,
+            "reviewer_verdict": presentation.display.reviewer_verdict,
+            "gate_status": presentation.display.gate_status,
+            "error_code": presentation.display.error_code,
+            "finding_count": presentation.display.finding_count,
+            "max_severity": presentation.display.max_severity,
+            "change_digest_sha256": presentation.display.change_digest_sha256,
+            "passing_reviewers": presentation.display.passing_reviewers,
+            "required_reviewers": presentation.display.required_reviewers,
             "result_bytes": encoded_result.len(),
             "max_result_bytes": max_result_bytes,
             "validation_key": key,
@@ -560,8 +657,13 @@ async fn select_accepted_ticket(
             submission,
             output_revision: 1,
             output_sha256: selection_sha256,
+            accepted: true,
             reviewer_pass: false,
             has_high_or_critical: false,
+            details: codex_agent_graph_store::WorkflowValidationDetails {
+                gate_status: "eligible".to_string(),
+                ..Default::default()
+            },
         })
         .await
         .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))
@@ -621,6 +723,54 @@ async fn verified_workflow_validations(
         validation.reviewer_pass &= validation.accepted;
     }
     Ok(validations)
+}
+
+async fn working_tree_change_digest(
+    invocation: &ToolInvocation,
+) -> Result<String, FunctionCallError> {
+    let cwd = invocation
+        .turn
+        .environments
+        .single_local_environment_cwd()
+        .ok_or_else(|| {
+            FunctionCallError::RespondToModel(
+                "reviewer diff binding requires exactly one ready local turn environment"
+                    .to_string(),
+            )
+        })?;
+    let diff = codex_git_utils::working_tree_diff(cwd.as_path())
+        .await
+        .ok_or_else(|| {
+            FunctionCallError::RespondToModel(
+                "the actual working-tree diff could not be read; reviewer planning and validation fail closed until Git is available in a valid worktree"
+                    .to_string(),
+            )
+        })?;
+    Ok(crate::extended_workflow::sha256_bytes(diff.as_bytes()))
+}
+
+fn reviewer_round_counts(
+    validations: &[codex_agent_graph_store::WorkflowValidationRecord],
+    validation_key: &str,
+    current_reviewer_pass: bool,
+    change_digest_sha256: &str,
+    required_reviewers: usize,
+) -> (u32, u32) {
+    let passing = validations
+        .iter()
+        .filter(|record| {
+            record.validation_key != validation_key
+                && record.result_kind == "reviewer"
+                && record.accepted
+                && record.reviewer_pass
+                && record.details.change_digest_sha256.as_deref() == Some(change_digest_sha256)
+        })
+        .count()
+        + usize::from(current_reviewer_pass);
+    (
+        u32::try_from(passing).unwrap_or(u32::MAX),
+        u32::try_from(required_reviewers).unwrap_or(u32::MAX),
+    )
 }
 
 struct ValidationTarget {
@@ -812,6 +962,7 @@ async fn validation_target(
                         model: completed.model.unwrap_or_else(|| "unknown".to_string()),
                         reasoning_effort: completed.reasoning_effort,
                         status: WorkflowAgentDisplayStatus::Running,
+                        validation: None,
                     },
                     output_revision: completed.output_revision,
                     output_sha256: completed.output_sha256,
@@ -826,6 +977,7 @@ async fn emit_validation_status(
     args: &ValidateResultArgs,
     target: &ValidationTarget,
     accepted: bool,
+    validation: WorkflowAgentValidationDisplay,
 ) {
     let status = if accepted {
         WorkflowAgentDisplayStatus::Validated
@@ -855,6 +1007,7 @@ async fn emit_validation_status(
                         .unwrap_or_else(|| invocation.turn.model_info.slug.clone()),
                     reasoning_effort: invocation.turn.config.model_reasoning_effort.clone(),
                     status,
+                    validation: None,
                 },
             )
         },
@@ -867,6 +1020,7 @@ async fn emit_validation_status(
         },
     );
     display.status = status;
+    display.validation = Some(validation);
     crate::tools::handlers::multi_agents_v2::emit_sub_agent_activity(
         &invocation.session,
         &invocation.turn,
@@ -898,6 +1052,15 @@ fn validation_rejected_output(
             "errors": [error],
             "has_unresolved_findings": false,
             "has_high_or_critical": false,
+            "formal_status": "invalid",
+            "reviewer_verdict": null,
+            "gate_status": "excluded",
+            "error_code": "correction_exhausted",
+            "finding_count": 0,
+            "max_severity": null,
+            "change_digest_sha256": null,
+            "passing_reviewers": null,
+            "required_reviewers": null,
             "result_bytes": result_bytes,
             "max_result_bytes": max_result_bytes,
             "validation_key": validation_key,
@@ -914,6 +1077,18 @@ fn invalid_contract(
         valid: false,
         errors: vec![format!("result does not satisfy {contract}: {error}")],
         has_high_or_critical: false,
+        finding_count: 0,
+        max_severity: None,
+    }
+}
+
+fn invalid_validation(error: String) -> crate::extended_workflow::ContractValidation {
+    crate::extended_workflow::ContractValidation {
+        valid: false,
+        errors: vec![error],
+        has_high_or_critical: false,
+        finding_count: 0,
+        max_severity: None,
     }
 }
 
@@ -921,7 +1096,7 @@ async fn emit_reviewer_findings(invocation: &ToolInvocation, result: &ReviewerRe
     for finding in &result.findings {
         let message = format!(
             "[{:?}] {}::{} — {} Recommended correction: {}{}",
-            finding.severity,
+            finding.effective_severity(),
             finding.file,
             finding.symbol,
             finding.rationale,

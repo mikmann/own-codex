@@ -10,6 +10,7 @@ use crate::ThreadSpawnSubtreeClose;
 use crate::WorkflowReviewerValidation;
 use crate::WorkflowValidationCompletion;
 use crate::WorkflowValidationDecision;
+use crate::WorkflowValidationDetails;
 use crate::WorkflowValidationRecord;
 use crate::WorkflowValidationSubmission;
 
@@ -291,6 +292,15 @@ impl AgentGraphStore for LocalAgentGraphStore {
                             output_sha256: record.output_sha256,
                             reviewer_pass: record.reviewer_pass,
                             has_high_or_critical: record.has_high_or_critical,
+                            details: WorkflowValidationDetails {
+                                reviewer_verdict: record.details.reviewer_verdict,
+                                gate_status: record.details.gate_status,
+                                validation_error_code: record.details.validation_error_code,
+                                validation_message: record.details.validation_message,
+                                finding_count: record.details.finding_count,
+                                max_severity: record.details.max_severity,
+                                change_digest_sha256: record.details.change_digest_sha256,
+                            },
                         })
                         .collect()
                 })
@@ -347,8 +357,18 @@ fn to_state_completion(
         submission: completion.submission,
         output_revision: completion.output_revision,
         output_sha256: completion.output_sha256,
+        accepted: completion.accepted,
         reviewer_pass: completion.reviewer_pass,
         has_high_or_critical: completion.has_high_or_critical,
+        details: codex_state::WorkflowValidationDetails {
+            reviewer_verdict: completion.details.reviewer_verdict,
+            gate_status: completion.details.gate_status,
+            validation_error_code: completion.details.validation_error_code,
+            validation_message: completion.details.validation_message,
+            finding_count: completion.details.finding_count,
+            max_severity: completion.details.max_severity,
+            change_digest_sha256: completion.details.change_digest_sha256,
+        },
     }
 }
 
@@ -841,6 +861,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_workflow_validation_persists_structured_diagnostics() {
+        let fixture = state_runtime().await;
+        let store = LocalAgentGraphStore::new(fixture.state_db);
+        let root = thread_id(/*suffix*/ 905);
+        let output_sha256 = "9".repeat(64);
+        assert_eq!(
+            store
+                .begin_workflow_validation(validation_submission(
+                    root,
+                    "turn-invalid",
+                    "reviewer:security",
+                    /*output_revision*/ 1,
+                    &output_sha256,
+                ))
+                .await
+                .expect("invalid review should reserve"),
+            WorkflowValidationDecision::Attempt(1)
+        );
+        let details = WorkflowValidationDetails {
+            reviewer_verdict: Some("pass".to_string()),
+            gate_status: "excluded".to_string(),
+            validation_error_code: Some("task_binding_mismatch".to_string()),
+            validation_message: Some("report did not match the bound task".to_string()),
+            finding_count: 1,
+            max_severity: Some("Low".to_string()),
+            change_digest_sha256: Some("a".repeat(64)),
+        };
+        assert!(
+            store
+                .complete_workflow_validation(WorkflowValidationCompletion {
+                    root_thread_id: root,
+                    turn_id: "turn-invalid".to_string(),
+                    validation_key: "reviewer:security".to_string(),
+                    submission: 1,
+                    output_revision: 1,
+                    output_sha256: output_sha256.clone(),
+                    accepted: false,
+                    reviewer_pass: false,
+                    has_high_or_critical: false,
+                    details: details.clone(),
+                })
+                .await
+                .expect("invalid diagnostics should persist")
+        );
+
+        assert_eq!(
+            store
+                .list_workflow_validations(root, "turn-invalid")
+                .await
+                .expect("invalid validation should reload"),
+            vec![WorkflowValidationRecord {
+                validation_key: "reviewer:security".to_string(),
+                result_kind: "reviewer".to_string(),
+                agent_thread_id: Some(thread_id(/*suffix*/ 902)),
+                agent_role: Some("Security".to_string()),
+                submissions: 1,
+                accepted: false,
+                review_cycles: 0,
+                output_revision: 1,
+                output_sha256,
+                reviewer_pass: false,
+                has_high_or_critical: false,
+                details,
+            }]
+        );
+    }
+
+    #[tokio::test]
     async fn reviewer_evidence_records_distinct_pass_and_allows_one_fix_cycle() {
         let fixture = state_runtime().await;
         let store = LocalAgentGraphStore::new(fixture.state_db);
@@ -864,8 +952,10 @@ mod tests {
                     submission: 1,
                     output_revision: 1,
                     output_sha256: "c".repeat(64),
+                    accepted: true,
                     reviewer_pass: false,
                     has_high_or_critical: true,
+                    details: WorkflowValidationDetails::default(),
                 })
                 .await
                 .expect("review completion should persist")
@@ -892,8 +982,10 @@ mod tests {
                     submission: 1,
                     output_revision: 2,
                     output_sha256: "d".repeat(64),
+                    accepted: true,
                     reviewer_pass: true,
                     has_high_or_critical: false,
+                    details: WorkflowValidationDetails::default(),
                 })
                 .await
                 .expect("fixed review completion should persist")
@@ -942,8 +1034,10 @@ mod tests {
             submission: 1,
             output_revision: 1,
             output_sha256: output_sha256.clone(),
+            accepted: true,
             reviewer_pass: true,
             has_high_or_critical: false,
+            details: WorkflowValidationDetails::default(),
         };
         let (first, second) = tokio::join!(
             store.complete_workflow_validation(completion.clone()),
@@ -972,6 +1066,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_invalid_workflow_validation_completion_is_persisted_exactly_once() {
+        let fixture = state_runtime().await;
+        let store = LocalAgentGraphStore::new(fixture.state_db);
+        let root = thread_id(/*suffix*/ 917);
+        let output_sha256 = "8".repeat(64);
+        assert_eq!(
+            store
+                .begin_workflow_validation(validation_submission(
+                    root,
+                    "turn-concurrent-invalid",
+                    "reviewer:security",
+                    /*output_revision*/ 1,
+                    &output_sha256,
+                ))
+                .await
+                .expect("invalid review should reserve"),
+            WorkflowValidationDecision::Attempt(1)
+        );
+
+        let completion = WorkflowValidationCompletion {
+            root_thread_id: root,
+            turn_id: "turn-concurrent-invalid".to_string(),
+            validation_key: "reviewer:security".to_string(),
+            submission: 1,
+            output_revision: 1,
+            output_sha256,
+            accepted: false,
+            reviewer_pass: false,
+            has_high_or_critical: false,
+            details: WorkflowValidationDetails {
+                reviewer_verdict: Some("pass".to_string()),
+                gate_status: "excluded".to_string(),
+                validation_error_code: Some("schema_consistency".to_string()),
+                validation_message: Some(
+                    "a pass verdict requires an empty findings array".to_string(),
+                ),
+                finding_count: 1,
+                max_severity: Some("Low".to_string()),
+                change_digest_sha256: Some("b".repeat(64)),
+            },
+        };
+        let (first, second) = tokio::join!(
+            store.complete_workflow_validation(completion.clone()),
+            store.complete_workflow_validation(completion),
+        );
+        let mut persisted = [
+            first.expect("first invalid completion should finish"),
+            second.expect("second invalid completion should finish"),
+        ];
+        persisted.sort_unstable();
+        assert_eq!(persisted, [false, true]);
+    }
+
+    #[tokio::test]
     async fn newer_reviewer_output_invalidates_an_accepted_pass() {
         let fixture = state_runtime().await;
         let store = LocalAgentGraphStore::new(fixture.state_db);
@@ -994,8 +1142,10 @@ mod tests {
                     submission: 1,
                     output_revision: 1,
                     output_sha256: "e".repeat(64),
+                    accepted: true,
                     reviewer_pass: true,
                     has_high_or_critical: false,
+                    details: WorkflowValidationDetails::default(),
                 })
                 .await
                 .expect("first review completion should persist")
@@ -1026,8 +1176,10 @@ mod tests {
                     submission: 1,
                     output_revision: 2,
                     output_sha256: "f".repeat(64),
+                    accepted: true,
                     reviewer_pass: true,
                     has_high_or_critical: false,
+                    details: WorkflowValidationDetails::default(),
                 })
                 .await
                 .expect("second review completion should persist")

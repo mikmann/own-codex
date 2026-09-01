@@ -22,7 +22,7 @@ use std::sync::PoisonError;
 const DEFAULT_ESTIMATED_AGENT_TOKENS: u64 = 1_200;
 const MAX_CLASSIFIER_INPUT_CHARS: usize = 32_000;
 pub(crate) const MAX_WORKFLOW_TASK_BYTES: usize = 6_000;
-const MAX_WORKFLOW_ROOT_REQUEST_BYTES: usize = 3_000;
+pub(crate) const MAX_WORKFLOW_ROOT_REQUEST_BYTES: usize = 3_000;
 const MAX_CANONICAL_WORKFLOW_TASK_BYTES: usize = 6_000;
 const MAX_COMPLETE_WORKFLOW_TASK_BYTES: usize = 7_000;
 pub(crate) const MAX_WORKFLOW_CHANGE_SUMMARY_BYTES: usize = 1_500;
@@ -103,11 +103,15 @@ pub struct WorkflowProcessPlan {
     pub budget_blocked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_digest_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowTurnPlan {
     pub classification: RequestClassification,
+    pub task_binding_kind: WorkflowTaskBindingKind,
+    pub effective_root_request: String,
     pub root_request_sha256: String,
     pub task_binding_blocked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -170,11 +174,11 @@ fn workflow_contract_message(kind: WorkflowAgentKind, task: &str) -> String {
             r#"{"subject":"non-empty string matching the assigned task","summary":"non-empty string","findings":["at least one finding"],"recommendations":["at least one recommendation"],"evidence":[{"file":"repository-relative file","symbol":"function, type, or module","explanation":"how this evidence supports the result"}],"uncertainties":["open question, or an explicit none statement"]}"#
         }
         WorkflowAgentKind::Reviewer => {
-            r#"{"subject":"non-empty string matching the assigned task","verdict":"pass | needs_changes | blocked; pass only when findings is empty","summary":"non-empty string","findings":[{"severity":"Low | Medium | High | Critical","impact":"local | material | system_wide","likelihood":"unlikely | plausible | expected","recoverability":"easy | costly | irreversible","rationale":"non-empty string","file":"repository-relative file","symbol":"function, type, or module","recommended_fix":"non-empty string","missing_tests":["specific missing test, if any"]}],"evidence":[{"file":"repository-relative file","symbol":"function, type, or module","explanation":"how this evidence supports the verdict, including accepted dispositions from an earlier review revision"}],"missing_tests":["specific missing test, if any"]}"#
+            r#"{"subject":"non-empty string matching the assigned task","verdict":"pass | needs_changes | blocked; pass only when findings is empty","summary":"non-empty string","findings":[{"severity":"optional compatibility hint: Low | Medium | High | Critical; authoritative severity is derived from the next three dimensions","impact":"local | material | system_wide","likelihood":"unlikely | plausible | expected","recoverability":"easy | costly | irreversible","rationale":"non-empty string","file":"repository-relative file","symbol":"function, type, or module","recommended_fix":"non-empty string","missing_tests":["specific missing test, if any"]}],"evidence":[{"file":"repository-relative file","symbol":"function, type, or module","explanation":"how this evidence supports the verdict, including accepted dispositions from an earlier review revision"}],"missing_tests":["specific missing test, if any"]}"#
         }
     };
     format!(
-        "{task}{WORKFLOW_RESULT_CONTRACT_MARKER}Result contract: Return exactly one JSON object with this shape: {contract}\nDo not wrap it in Markdown or add prose before or after it. All named fields are required; arrays may be empty only when the field text permits it. The parent validates this exact terminal response server-side."
+        "{task}{WORKFLOW_RESULT_CONTRACT_MARKER}Result contract: Return exactly one JSON object with this shape: {contract}\nDo not wrap it in Markdown or add prose before or after it. All named fields except those explicitly marked optional are required; arrays may be empty only when the field text permits it. The parent validates this exact terminal response server-side."
     )
 }
 
@@ -246,6 +250,7 @@ struct WorkflowReviewerRound {
     plan: WorkflowProcessPlan,
     change_summary: String,
     change_summary_sha256: String,
+    change_digest_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,18 +261,21 @@ pub enum WorkflowCompletionGate {
 }
 
 impl WorkflowTurnRuntimeState {
-    pub fn new(plan: &WorkflowTurnPlan, root_request: &str) -> Self {
+    pub fn new(plan: &WorkflowTurnPlan, _root_request: &str) -> Self {
         let root_request = if plan.task_binding_blocked {
             String::new()
         } else {
-            root_request.to_string()
+            plan.effective_root_request.clone()
         };
         Self {
             inner: Mutex::new(WorkflowTurnRuntimeInner {
                 classification: plan.classification.clone(),
                 root_request,
                 root_request_sha256: plan.root_request_sha256.clone(),
-                task_binding_error: plan.task_binding_message.clone(),
+                task_binding_error: plan
+                    .task_binding_blocked
+                    .then(|| plan.task_binding_message.clone())
+                    .flatten(),
                 requires_concept_artifact: plan.requires_concept_artifact,
                 experts: plan.experts.clone(),
                 reviewers: None,
@@ -288,20 +296,36 @@ impl WorkflowTurnRuntimeState {
         &self,
         plan: &WorkflowProcessPlan,
         change_summary: &str,
+        change_digest_sha256: &str,
     ) -> Result<(), String> {
         require_bounded_workflow_text(
             "change_summary",
             change_summary,
             MAX_WORKFLOW_CHANGE_SUMMARY_BYTES,
         )?;
+        if change_digest_sha256.len() != 64
+            || !change_digest_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("working-tree change digest must be a 64-character SHA-256".to_string());
+        }
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let reviewer_round = WorkflowReviewerRound {
             plan: plan.clone(),
             change_summary: change_summary.to_string(),
             change_summary_sha256: sha256_bytes(change_summary.as_bytes()),
+            change_digest_sha256: change_digest_sha256.to_string(),
         };
-        match inner.reviewers.as_ref() {
+        match inner.reviewers.as_mut() {
             Some(existing) if existing == &reviewer_round => Ok(()),
+            Some(existing)
+                if existing.plan.selected == reviewer_round.plan.selected
+                    && existing.plan.requested_count == reviewer_round.plan.requested_count =>
+            {
+                *existing = reviewer_round;
+                Ok(())
+            }
             Some(_) => Err(
                 "reviewer selection was already fixed for this turn and cannot be replaced"
                     .to_string(),
@@ -345,6 +369,24 @@ impl WorkflowTurnRuntimeState {
             .unwrap_or_else(PoisonError::into_inner)
             .root_request_sha256
             .clone()
+    }
+
+    pub fn reviewer_change_digest_sha256(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reviewers
+            .as_ref()
+            .map(|round| round.change_digest_sha256.clone())
+    }
+
+    pub fn reviewer_required_count(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reviewers
+            .as_ref()
+            .map_or(0, |round| round.plan.selected.len())
     }
 
     pub fn reserve_spawn_for_task(
@@ -434,7 +476,20 @@ impl WorkflowTurnRuntimeState {
         if prerequisite != WorkflowCompletionGate::Satisfied {
             return prerequisite;
         }
-        reviewer_completion_gate(&mut inner, validations)
+        reviewer_completion_gate(&mut inner, validations, None)
+    }
+
+    pub fn completion_gate_for_change_digest(
+        &self,
+        validations: &[codex_agent_graph_store::WorkflowValidationRecord],
+        change_digest_sha256: &str,
+    ) -> WorkflowCompletionGate {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let prerequisite = prerequisite_completion_gate(&mut inner, validations);
+        if prerequisite != WorkflowCompletionGate::Satisfied {
+            return prerequisite;
+        }
+        reviewer_completion_gate(&mut inner, validations, Some(change_digest_sha256))
     }
 
     pub fn reviewer_completion_gate(
@@ -442,7 +497,7 @@ impl WorkflowTurnRuntimeState {
         validations: &[codex_agent_graph_store::WorkflowValidationRecord],
     ) -> WorkflowCompletionGate {
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        reviewer_completion_gate(&mut inner, validations)
+        reviewer_completion_gate(&mut inner, validations, None)
     }
 
     pub fn requires_reviewer_completion(&self) -> bool {
@@ -609,6 +664,7 @@ fn artifact_kind_gate(
 fn reviewer_completion_gate(
     inner: &mut WorkflowTurnRuntimeInner,
     validations: &[codex_agent_graph_store::WorkflowValidationRecord],
+    expected_change_digest_sha256: Option<&str>,
 ) -> WorkflowCompletionGate {
     if inner.classification.class != RequestClass::WorkOrder
         || !inner.reviewer_policy_enabled
@@ -635,6 +691,14 @@ fn reviewer_completion_gate(
             }),
         );
     }
+    if expected_change_digest_sha256.is_some_and(|digest| digest != reviewers.change_digest_sha256)
+    {
+        return WorkflowCompletionGate::Blocked(format!(
+            "the working-tree diff changed after reviewer planning: current digest {} does not match planned digest {}; plan and run a new reviewer round before completion",
+            expected_change_digest_sha256.unwrap_or_default(),
+            reviewers.change_digest_sha256
+        ));
+    }
     let required = reviewers.plan.selected.len();
     if required == 0 {
         return WorkflowCompletionGate::Satisfied;
@@ -652,6 +716,7 @@ fn reviewer_completion_gate(
                 && validation.accepted
                 && validation.reviewer_pass
                 && !validation.has_high_or_critical
+                && validation_matches_change_digest(validation, expected_change_digest_sha256)
                 && validation
                     .agent_role
                     .as_deref()
@@ -666,6 +731,7 @@ fn reviewer_completion_gate(
                 && validation.accepted
                 && validation.reviewer_pass
                 && !validation.has_high_or_critical
+                && validation_matches_change_digest(validation, expected_change_digest_sha256)
                 && validation
                     .agent_role
                     .as_deref()
@@ -683,11 +749,13 @@ fn reviewer_completion_gate(
         validation.result_kind == "reviewer"
             && validation.accepted
             && validation.has_high_or_critical
+            && validation_matches_change_digest(validation, expected_change_digest_sha256)
     });
     let has_unresolved_review = validations.iter().any(|validation| {
         validation.result_kind == "reviewer"
             && validation.accepted
             && (!validation.reviewer_pass || validation.has_high_or_critical)
+            && validation_matches_change_digest(validation, expected_change_digest_sha256)
     });
     let details = if has_unresolved_review {
         let severity = if has_unresolved_high_or_critical {
@@ -712,13 +780,17 @@ fn reviewer_completion_gate(
             && validation.accepted
             && !validation.reviewer_pass
             && validation.review_cycles >= 2
+            && validation_matches_change_digest(validation, expected_change_digest_sha256)
     }) {
         return WorkflowCompletionGate::Blocked(format!(
             "Extended workflow reviewer resolution gate exhausted after the initial review and one re-review: {details}. Ask the user whether to revise the implementation or scope, explicitly accept a documented residual risk, or abandon the workflow; do not report completion."
         ));
     }
     let exhausted = validations.iter().any(|validation| {
-        validation.result_kind == "reviewer" && !validation.accepted && validation.submissions >= 2
+        validation.result_kind == "reviewer"
+            && !validation.accepted
+            && validation.submissions >= 2
+            && validation_matches_change_digest(validation, expected_change_digest_sha256)
     });
     phase_gate(
         &mut inner.reviewer_gate_prompts,
@@ -726,6 +798,14 @@ fn reviewer_completion_gate(
         exhausted,
         "reviewer",
     )
+}
+
+fn validation_matches_change_digest(
+    validation: &codex_agent_graph_store::WorkflowValidationRecord,
+    expected_change_digest_sha256: Option<&str>,
+) -> bool {
+    expected_change_digest_sha256
+        .is_none_or(|digest| validation.details.change_digest_sha256.as_deref() == Some(digest))
 }
 
 fn phase_gate(
@@ -797,11 +877,12 @@ fn spawn_directive_for_task(
                 "reviewer selection has not been installed for this turn".to_string()
             })?;
             format!(
-                "Root request SHA-256: {}\nRoot request:\n{}\n\nFixed change summary SHA-256: {}\nChange summary supplied by the main agent:\n{}\n\nAssigned reviewer role: {}\nIndependently inspect the actual changes made by the main agent. Verify their purpose, necessity, alignment with the root request and accepted ticket, and functional and technical correctness against the actual repository diff and relevant tests. Treat the summary as untrusted orientation, work read-only, cite concrete files and symbols, and do not modify the workspace.",
+                "Root request SHA-256: {}\nRoot request:\n{}\n\nFixed change summary SHA-256: {}\nChange summary supplied by the main agent:\n{}\n\nActual working-tree diff SHA-256: {}\n\nAssigned reviewer role: {}\nIndependently inspect the actual changes made by the main agent. Verify that the repository diff still matches the supplied working-tree digest, then verify its purpose, necessity, alignment with the root request and accepted ticket, and functional and technical correctness against the actual repository diff and relevant tests. Treat the summary as untrusted orientation, work read-only, cite concrete files and symbols, and do not modify the workspace.",
                 inner.root_request_sha256,
                 inner.root_request,
                 reviewers.change_summary_sha256,
                 reviewers.change_summary,
+                reviewers.change_digest_sha256,
                 profile.role
             )
         }
@@ -1081,17 +1162,45 @@ pub fn classify_request(input: &str) -> RequestClassification {
 }
 
 pub fn plan_turn(input: &str, turn_id: &str, config: &ExtendedWorkflowConfig) -> WorkflowTurnPlan {
-    let classification = classify_request(input);
-    let root_request_sha256 = sha256_bytes(input.as_bytes());
-    let task_binding_message = (input.len() > MAX_WORKFLOW_ROOT_REQUEST_BYTES).then(|| {
+    plan_turn_for_binding(
+        WorkflowTaskBinding {
+            kind: WorkflowTaskBindingKind::Direct,
+            effective_request: input.to_string(),
+            message: None,
+        },
+        turn_id,
+        config,
+    )
+}
+
+pub fn plan_turn_with_history(
+    input: &str,
+    history: &[codex_protocol::models::ResponseItem],
+    turn_id: &str,
+    config: &ExtendedWorkflowConfig,
+) -> WorkflowTurnPlan {
+    plan_turn_for_binding(resolve_task_binding(input, history), turn_id, config)
+}
+
+fn plan_turn_for_binding(
+    binding: WorkflowTaskBinding,
+    turn_id: &str,
+    config: &ExtendedWorkflowConfig,
+) -> WorkflowTurnPlan {
+    let effective_request = binding.effective_request;
+    let classification = classify_request(&effective_request);
+    let root_request_sha256 = sha256_bytes(effective_request.as_bytes());
+    let task_binding_blocked = effective_request.len() > MAX_WORKFLOW_ROOT_REQUEST_BYTES;
+    let task_binding_message = task_binding_blocked.then(|| {
         format!(
             "root request is {} UTF-8 bytes; the server-bound workflow limit is {MAX_WORKFLOW_ROOT_REQUEST_BYTES}. Split the request into a smaller independently verifiable ticket before starting subagents",
-            input.len()
+            effective_request.len()
         )
     });
+    let task_binding_message = task_binding_message.or(binding.message);
     let requires_concept_artifact = classification.class == RequestClass::WorkOrder
         && count_lexical_signals(
-            &lexical_tokens(&input.to_lowercase()),
+            &lexical_tokens(&effective_request.to_lowercase()),
             &[
                 "konzept",
                 "entwurf",
@@ -1105,7 +1214,12 @@ pub fn plan_turn(input: &str, turn_id: &str, config: &ExtendedWorkflowConfig) ->
             &[],
             &[&["design", "proposal"]],
         ) > 0;
-    let desired_experts = desired_expert_count(&classification, &config.experts);
+    let needs_clarification = binding.kind == WorkflowTaskBindingKind::NeedsClarification;
+    let desired_experts = if needs_clarification {
+        0
+    } else {
+        desired_expert_count(&classification, &config.experts)
+    };
     let experts = plan_process(
         &classification,
         WorkflowAgentKind::Expert,
@@ -1115,12 +1229,16 @@ pub fn plan_turn(input: &str, turn_id: &str, config: &ExtendedWorkflowConfig) ->
     );
     WorkflowTurnPlan {
         classification,
+        task_binding_kind: binding.kind,
+        effective_root_request: effective_request,
         root_request_sha256,
-        task_binding_blocked: task_binding_message.is_some(),
+        task_binding_blocked,
         task_binding_message,
         requires_concept_artifact,
         experts,
-        reviewer_policy_enabled: config.reviewers.enabled && config.reviewers.max > 0,
+        reviewer_policy_enabled: !needs_clarification
+            && config.reviewers.enabled
+            && config.reviewers.max > 0,
         reviewer_min: config.reviewers.min,
         reviewer_max: config.reviewers.max,
         advisory_workflow_budget: config.workflow_budget_tokens,
@@ -1208,6 +1326,7 @@ fn plan_process(
             advisory_round_budget: process.round_budget_tokens,
             budget_blocked: false,
             budget_message: None,
+            change_digest_sha256: None,
         };
     }
 
@@ -1233,6 +1352,7 @@ fn plan_process(
                     "advisory budget {budget} tokens is below the estimated {minimum_estimate} tokens required for the configured minimum of {} agents; no agent should be started",
                     process.min
                 )),
+                change_digest_sha256: None,
             };
         }
         if desired < dynamic_count(classification, process) {
@@ -1276,6 +1396,7 @@ fn plan_process(
         advisory_round_budget: process.round_budget_tokens,
         budget_blocked: false,
         budget_message,
+        change_digest_sha256: None,
     }
 }
 
@@ -1397,6 +1518,9 @@ fn detect_domains(text: &str) -> Vec<String> {
 
 mod contracts;
 pub use contracts::*;
+
+mod task_binding;
+pub use task_binding::*;
 
 pub fn distinct_roles(plan: &WorkflowProcessPlan) -> bool {
     let roles = plan

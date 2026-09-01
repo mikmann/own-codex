@@ -46,5 +46,6 @@ pub use info::git_diff_to_remote;
 pub use info::local_git_branches;
 pub use info::recent_commits;
 pub use info::resolve_root_git_project_for_trust;
+pub use info::working_tree_diff;
 pub use platform::create_symlink;
 pub use status::get_has_changes_in_repo;

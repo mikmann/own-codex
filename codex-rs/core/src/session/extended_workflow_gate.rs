@@ -50,5 +50,22 @@ pub(super) async fn completion_gate(
             && completed.output_sha256 == validation.output_sha256;
         validation.reviewer_pass &= validation.accepted;
     }
-    runtime.completion_gate(&validations)
+    if runtime.requires_reviewer_completion() {
+        let Some(cwd) = turn_context.environments.single_local_environment_cwd() else {
+            return WorkflowCompletionGate::Blocked(
+                "Extended workflow final review digest requires exactly one ready local turn environment"
+                    .to_string(),
+            );
+        };
+        let Some(diff) = codex_git_utils::working_tree_diff(cwd.as_path()).await else {
+            return WorkflowCompletionGate::Blocked(
+                "Extended workflow final review digest could not be read from Git; completion fails closed until the repository worktree is available"
+                    .to_string(),
+            );
+        };
+        let digest = crate::extended_workflow::sha256_bytes(diff.as_bytes());
+        runtime.completion_gate_for_change_digest(&validations, &digest)
+    } else {
+        runtime.completion_gate(&validations)
+    }
 }

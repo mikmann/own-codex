@@ -1,6 +1,7 @@
 use super::*;
 
 const TEST_TURN_ID: &str = "turn-test-1";
+const TEST_CHANGE_DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 #[test]
 fn simple_answer_uses_no_experts_by_default() {
@@ -354,13 +355,13 @@ fn contracts_reject_unknown_fields() {
 }
 
 #[test]
-fn mismatched_reviewer_severity_is_rejected() {
+fn redundant_reviewer_severity_is_ignored_and_derived_from_dimensions() {
     let result = ReviewerResult {
         subject: "change".to_string(),
         verdict: ReviewVerdict::NeedsChanges,
         summary: "one issue".to_string(),
         findings: vec![ReviewerFinding {
-            severity: FindingSeverity::Low,
+            severity: Some(FindingSeverity::Low),
             impact: FindingImpact::SystemWide,
             likelihood: FindingLikelihood::Expected,
             recoverability: FindingRecoverability::Irreversible,
@@ -378,27 +379,23 @@ fn mismatched_reviewer_severity_is_rejected() {
         missing_tests: vec!["regression".to_string()],
     };
     let validation = validate_reviewer_result(&result, "change");
-    assert!(!validation.valid);
-    assert!(
-        validation
-            .errors
-            .iter()
-            .any(|error| error.contains("severity"))
-    );
+    assert!(validation.valid);
+    assert_eq!(validation.max_severity, Some(FindingSeverity::Critical));
+    assert!(validation.has_high_or_critical);
 }
 
 #[test]
-fn pass_verdict_rejects_high_or_critical_findings() {
+fn pass_verdict_rejects_even_low_findings() {
     let result = ReviewerResult {
         subject: "security change".to_string(),
         verdict: ReviewVerdict::Pass,
         summary: "reviewed security change".to_string(),
         findings: vec![ReviewerFinding {
-            severity: FindingSeverity::High,
-            impact: FindingImpact::SystemWide,
-            likelihood: FindingLikelihood::Plausible,
-            recoverability: FindingRecoverability::Costly,
-            rationale: "material security risk".to_string(),
+            severity: Some(FindingSeverity::Low),
+            impact: FindingImpact::Local,
+            likelihood: FindingLikelihood::Unlikely,
+            recoverability: FindingRecoverability::Easy,
+            rationale: "minor local issue".to_string(),
             file: "src/lib.rs".to_string(),
             symbol: "run".to_string(),
             recommended_fix: "fail closed".to_string(),
@@ -482,7 +479,11 @@ fn runtime_ledger_rejects_unselected_duplicate_and_premature_reviewer_spawns() {
             .contains("no selected workflow profile")
     );
     runtime
-        .install_reviewers(&reviewer_plan, "security and CLI changes")
+        .install_reviewers(
+            &reviewer_plan,
+            "security and CLI changes",
+            TEST_CHANGE_DIGEST,
+        )
         .expect("install reviewers");
     let remaining_expert = turn_plan
         .experts
@@ -530,15 +531,20 @@ fn workflow_spawn_task_is_root_bound_and_context_budgeted() {
     let change_summary = "Updated the CLI parser and added resume coverage.";
     let reviewer_plan = plan_reviewers(change_summary, TEST_TURN_ID, &config);
     runtime
-        .install_reviewers(&reviewer_plan, change_summary)
+        .install_reviewers(&reviewer_plan, change_summary, TEST_CHANGE_DIGEST)
         .expect("reviewer round should install");
     let reviewer = reviewer_plan.selected.first().expect("selected reviewer");
     let reviewer_directive = runtime
         .spawn_directive_for_task(&reviewer.task_name)
         .expect("server-bound reviewer task");
     assert!(reviewer_directive.canonical_task.contains(
-        "Verify their purpose, necessity, alignment with the root request and accepted ticket, and functional and technical correctness"
+        "verify its purpose, necessity, alignment with the root request and accepted ticket, and functional and technical correctness"
     ));
+    assert!(
+        reviewer_directive
+            .canonical_task
+            .contains("Actual working-tree diff SHA-256")
+    );
     assert!(reviewer_directive.canonical_task.contains("work read-only"));
     assert!(
         reviewer_directive
@@ -602,7 +608,7 @@ fn maximum_bounded_reviewer_task_is_spawnable_and_context_budget_counts_contract
     assert!(planning_input.len() <= MAX_WORKFLOW_TASK_BYTES);
     let reviewer_plan = plan_reviewers(&change_summary, TEST_TURN_ID, &config);
     runtime
-        .install_reviewers(&reviewer_plan, &change_summary)
+        .install_reviewers(&reviewer_plan, &change_summary, TEST_CHANGE_DIGEST)
         .expect("maximum bounded reviewer round should install");
     let reviewer = reviewer_plan.selected.first().expect("selected reviewer");
     let directive = runtime
@@ -625,7 +631,11 @@ fn maximum_bounded_reviewer_task_is_spawnable_and_context_budget_counts_contract
     let constrained_runtime = WorkflowTurnRuntimeState::new(&constrained_turn_plan, &root_request);
     let constrained_reviewer_plan = plan_reviewers(&change_summary, TEST_TURN_ID, &config);
     constrained_runtime
-        .install_reviewers(&constrained_reviewer_plan, &change_summary)
+        .install_reviewers(
+            &constrained_reviewer_plan,
+            &change_summary,
+            TEST_CHANGE_DIGEST,
+        )
         .expect("constrained reviewer round should install");
     let constrained_reviewer = constrained_reviewer_plan
         .selected
@@ -656,7 +666,7 @@ fn oversized_reviewer_summary_is_rejected_before_the_round_is_fixed() {
     );
     assert!(
         runtime
-            .install_reviewers(&oversized_plan, &oversized_summary)
+            .install_reviewers(&oversized_plan, &oversized_summary, TEST_CHANGE_DIGEST)
             .expect_err("oversized reviewer round")
             .contains("hard limit is 1500")
     );
@@ -664,7 +674,7 @@ fn oversized_reviewer_summary_is_rejected_before_the_round_is_fixed() {
     let compact_summary = "CLI workflow and test changes.";
     let compact_plan = plan_reviewers(compact_summary, TEST_TURN_ID, &config);
     runtime
-        .install_reviewers(&compact_plan, compact_summary)
+        .install_reviewers(&compact_plan, compact_summary, TEST_CHANGE_DIGEST)
         .expect("a failed oversized attempt must not fix the reviewer round");
 }
 
@@ -706,7 +716,11 @@ fn work_order_reviewer_gate_requires_distinct_passing_agents_and_roles() {
     assert!(runtime.requires_reviewer_completion());
     let reviewer_plan = plan_reviewers("security and CLI changes", TEST_TURN_ID, &config);
     runtime
-        .install_reviewers(&reviewer_plan, "security and CLI changes")
+        .install_reviewers(
+            &reviewer_plan,
+            "security and CLI changes",
+            TEST_CHANGE_DIGEST,
+        )
         .expect("reviewer plan should install");
     let required = reviewer_plan.selected.len();
     let unselected = (0..required)
@@ -722,6 +736,7 @@ fn work_order_reviewer_gate_requires_distinct_passing_agents_and_roles() {
             output_sha256: format!("unselected-{index}"),
             reviewer_pass: true,
             has_high_or_critical: false,
+            details: codex_agent_graph_store::WorkflowValidationDetails::default(),
         })
         .collect::<Vec<_>>();
     assert!(matches!(
@@ -745,6 +760,7 @@ fn work_order_reviewer_gate_requires_distinct_passing_agents_and_roles() {
                 output_sha256: format!("reviewer-{index}"),
                 reviewer_pass: index + 1 < required,
                 has_high_or_critical: index + 1 == required,
+                details: codex_agent_graph_store::WorkflowValidationDetails::default(),
             },
         )
         .collect::<Vec<_>>();
@@ -785,7 +801,11 @@ fn reviewer_gate_requires_low_and_medium_findings_to_complete_a_bounded_re_revie
         &config,
     );
     runtime
-        .install_reviewers(&reviewer_plan, "Low and Medium review resolution changes")
+        .install_reviewers(
+            &reviewer_plan,
+            "Low and Medium review resolution changes",
+            TEST_CHANGE_DIGEST,
+        )
         .expect("reviewer plan should install");
     let reviewer = reviewer_plan.selected.first().expect("selected reviewer");
     let reviewer_thread_id = codex_protocol::ThreadId::new();
@@ -801,6 +821,7 @@ fn reviewer_gate_requires_low_and_medium_findings_to_complete_a_bounded_re_revie
         output_sha256: "initial-low-medium-review".to_string(),
         reviewer_pass: false,
         has_high_or_critical: false,
+        details: codex_agent_graph_store::WorkflowValidationDetails::default(),
     };
 
     let WorkflowCompletionGate::Continue(message) =
@@ -833,6 +854,66 @@ fn reviewer_gate_requires_low_and_medium_findings_to_complete_a_bounded_re_revie
         runtime.reviewer_completion_gate(&[resolved]),
         WorkflowCompletionGate::Satisfied
     );
+}
+
+#[test]
+fn reviewer_gate_ignores_exhausted_evidence_from_a_previous_diff_digest() {
+    let mut config = ExtendedWorkflowConfig::default();
+    config.experts.enabled = false;
+    config.reviewers.min = 1;
+    config.reviewers.max = 1;
+    let root_request = "Implementiere die digestgebundene Review-Korrektur.";
+    let runtime = WorkflowTurnRuntimeState::new(
+        &plan_turn(root_request, TEST_TURN_ID, &config),
+        root_request,
+    );
+    let reviewer_plan = plan_reviewers("digest-bound review", TEST_TURN_ID, &config);
+    runtime
+        .install_reviewers(&reviewer_plan, "digest-bound review", TEST_CHANGE_DIGEST)
+        .expect("reviewer plan should install");
+    let reviewer = reviewer_plan.selected.first().expect("selected reviewer");
+    let validations = vec![
+        codex_agent_graph_store::WorkflowValidationRecord {
+            validation_key: "ticket:current".to_string(),
+            result_kind: "ticket".to_string(),
+            agent_thread_id: None,
+            agent_role: None,
+            submissions: 1,
+            accepted: true,
+            review_cycles: 0,
+            output_revision: 1,
+            output_sha256: "accepted-ticket".to_string(),
+            reviewer_pass: false,
+            has_high_or_critical: false,
+            details: codex_agent_graph_store::WorkflowValidationDetails::default(),
+        },
+        codex_agent_graph_store::WorkflowValidationRecord {
+            validation_key: "reviewer:old-digest".to_string(),
+            result_kind: "reviewer".to_string(),
+            agent_thread_id: Some(codex_protocol::ThreadId::new()),
+            agent_role: Some(reviewer.role.clone()),
+            submissions: 2,
+            accepted: true,
+            review_cycles: 2,
+            output_revision: 2,
+            output_sha256: "old-review".to_string(),
+            reviewer_pass: false,
+            has_high_or_critical: true,
+            details: codex_agent_graph_store::WorkflowValidationDetails {
+                change_digest_sha256: Some("old-digest".to_string()),
+                ..Default::default()
+            },
+        },
+    ];
+
+    let WorkflowCompletionGate::Continue(message) =
+        runtime.completion_gate_for_change_digest(&validations, TEST_CHANGE_DIGEST)
+    else {
+        panic!("old-digest evidence must not exhaust the current review round")
+    };
+    assert!(message.contains("reviewer validation is incomplete"));
+    assert!(!message.contains("High or Critical"));
+    assert!(!message.contains("exhausted"));
 }
 
 #[test]

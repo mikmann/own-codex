@@ -7,6 +7,7 @@ use super::NetworkApprovalProtocol;
 use super::NetworkPolicyAmendment;
 use super::RequestPermissionProfile;
 use super::UserInput;
+use super::WorkflowAgentDisplay;
 use super::shared::v2_enum_from_core;
 use crate::JsonSchema;
 use crate::TS;
@@ -43,8 +44,6 @@ use codex_protocol::protocol::GuardianUserAuthorization as CoreGuardianUserAutho
 use codex_protocol::protocol::PatchApplyStatus as CorePatchApplyStatus;
 use codex_protocol::protocol::ReviewDecision as CoreReviewDecision;
 use codex_protocol::protocol::SubAgentActivityKind as CoreSubAgentActivityKind;
-use codex_protocol::protocol::WorkflowAgentDisplay as CoreWorkflowAgentDisplay;
-use codex_protocol::protocol::WorkflowAgentDisplayStatus as CoreWorkflowAgentDisplayStatus;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::LegacyAppPathString;
 use serde::Deserialize;
@@ -1175,50 +1174,6 @@ pub enum SubAgentActivityKind {
     Started,
     Interacted,
     Interrupted,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(rename_all = "camelCase", export_to = "v2/")]
-pub enum WorkflowAgentDisplayStatus {
-    Running,
-    Validated,
-    Rejected,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(rename_all = "camelCase", export_to = "v2/")]
-pub struct WorkflowAgentDisplay {
-    pub name: String,
-    pub agent_type: String,
-    pub role: String,
-    pub model: String,
-    pub reasoning_effort: Option<ReasoningEffort>,
-    pub status: WorkflowAgentDisplayStatus,
-}
-
-impl From<CoreWorkflowAgentDisplayStatus> for WorkflowAgentDisplayStatus {
-    fn from(value: CoreWorkflowAgentDisplayStatus) -> Self {
-        match value {
-            CoreWorkflowAgentDisplayStatus::Running => Self::Running,
-            CoreWorkflowAgentDisplayStatus::Validated => Self::Validated,
-            CoreWorkflowAgentDisplayStatus::Rejected => Self::Rejected,
-        }
-    }
-}
-
-impl From<CoreWorkflowAgentDisplay> for WorkflowAgentDisplay {
-    fn from(value: CoreWorkflowAgentDisplay) -> Self {
-        Self {
-            name: value.name,
-            agent_type: value.agent_type,
-            role: value.role,
-            model: value.model,
-            reasoning_effort: value.reasoning_effort,
-            status: value.status.into(),
-        }
-    }
 }
 
 impl From<CoreSubAgentActivityKind> for SubAgentActivityKind {

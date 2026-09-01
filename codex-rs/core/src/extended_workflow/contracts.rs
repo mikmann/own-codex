@@ -88,7 +88,10 @@ pub enum FindingRecoverability {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewerFinding {
-    pub severity: FindingSeverity,
+    /// Optional compatibility hint. The validator derives the authoritative severity from the
+    /// three dimensions below and never rejects a report because this redundant value differs.
+    #[serde(default)]
+    pub severity: Option<FindingSeverity>,
     pub impact: FindingImpact,
     pub likelihood: FindingLikelihood,
     pub recoverability: FindingRecoverability,
@@ -115,6 +118,14 @@ pub struct ContractValidation {
     pub valid: bool,
     pub errors: Vec<String>,
     pub has_high_or_critical: bool,
+    pub finding_count: usize,
+    pub max_severity: Option<FindingSeverity>,
+}
+
+impl ReviewerFinding {
+    pub fn effective_severity(&self) -> FindingSeverity {
+        severity_for_dimensions(self.impact, self.likelihood, self.recoverability)
+    }
 }
 
 pub fn severity_for_dimensions(
@@ -169,9 +180,12 @@ impl IntoSeverityScore for FindingRecoverability {
     }
 }
 
-pub fn validate_expert_result(result: &ExpertResult, expected_subject: &str) -> ContractValidation {
+pub fn validate_expert_result(
+    result: &ExpertResult,
+    _expected_subject: &str,
+) -> ContractValidation {
     let mut errors = Vec::new();
-    validate_subject(&mut errors, &result.subject, expected_subject);
+    validate_agent_subject(&mut errors, &result.subject);
     require_text(&mut errors, "summary", &result.summary);
     require_text_items(&mut errors, "findings", &result.findings);
     require_text_items(&mut errors, "recommendations", &result.recommendations);
@@ -182,15 +196,17 @@ pub fn validate_expert_result(result: &ExpertResult, expected_subject: &str) -> 
         valid: errors.is_empty(),
         errors,
         has_high_or_critical: false,
+        finding_count: result.findings.len(),
+        max_severity: None,
     }
 }
 
 pub fn validate_reviewer_result(
     result: &ReviewerResult,
-    expected_subject: &str,
+    _expected_subject: &str,
 ) -> ContractValidation {
     let mut errors = Vec::new();
-    validate_subject(&mut errors, &result.subject, expected_subject);
+    validate_agent_subject(&mut errors, &result.subject);
     require_text(&mut errors, "summary", &result.summary);
     if result.findings.is_empty() && result.verdict != ReviewVerdict::Pass {
         errors.push("a non-pass verdict must contain at least one finding".to_string());
@@ -221,13 +237,6 @@ pub fn validate_reviewer_result(
             &format!("findings[{index}].missing_tests"),
             &finding.missing_tests,
         );
-        let expected =
-            severity_for_dimensions(finding.impact, finding.likelihood, finding.recoverability);
-        if finding.severity != expected {
-            errors.push(format!(
-                "findings[{index}].severity must be {expected:?} for the supplied impact, likelihood, and recoverability dimensions"
-            ));
-        }
     }
     require_evidence(&mut errors, &result.evidence);
     validate_optional_text_items(&mut errors, "missing_tests", &result.missing_tests);
@@ -240,13 +249,16 @@ pub fn validate_reviewer_result(
             .map(|finding| finding.rationale.clone())
             .collect::<Vec<_>>(),
     );
-    let has_high_or_critical = result
+    let max_severity = result
         .findings
         .iter()
-        .any(|finding| finding.severity >= FindingSeverity::High);
-    if result.verdict == ReviewVerdict::Pass && has_high_or_critical {
+        .map(ReviewerFinding::effective_severity)
+        .max();
+    let has_high_or_critical =
+        max_severity.is_some_and(|severity| severity >= FindingSeverity::High);
+    if result.verdict == ReviewVerdict::Pass && !result.findings.is_empty() {
         errors.push(
-            "a pass verdict cannot contain High or Critical findings; use needs_changes or blocked"
+            "a pass verdict requires an empty findings array; use needs_changes or blocked when any finding remains"
                 .to_string(),
         );
     }
@@ -254,6 +266,8 @@ pub fn validate_reviewer_result(
         valid: errors.is_empty(),
         errors,
         has_high_or_critical,
+        finding_count: result.findings.len(),
+        max_severity,
     }
 }
 
@@ -288,6 +302,8 @@ pub fn validate_ticket(ticket: &WorkflowTicket, expected_subject: &str) -> Contr
         valid: errors.is_empty(),
         errors,
         has_high_or_critical: false,
+        finding_count: 0,
+        max_severity: None,
     }
 }
 
@@ -321,6 +337,15 @@ pub fn validate_concept(concept: &WorkflowConcept, expected_subject: &str) -> Co
         valid: errors.is_empty(),
         errors,
         has_high_or_critical: false,
+        finding_count: 0,
+        max_severity: None,
+    }
+}
+
+fn validate_agent_subject(errors: &mut Vec<String>, subject: &str) {
+    require_text(errors, "subject", subject);
+    if !subject.trim().is_empty() && subject.trim().chars().count() < 3 {
+        errors.push("subject must contain at least three characters".to_string());
     }
 }
 

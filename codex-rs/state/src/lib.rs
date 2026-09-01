@@ -58,6 +58,7 @@ pub use model::ThreadsPage;
 pub use model::WorkflowReviewerValidation;
 pub use model::WorkflowValidationCompletion;
 pub use model::WorkflowValidationDecision;
+pub use model::WorkflowValidationDetails;
 pub use model::WorkflowValidationRecord;
 pub use model::WorkflowValidationSubmission;
 pub use runtime::ExternalAgentConfigImportDetailsRecord;

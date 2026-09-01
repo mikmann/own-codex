@@ -1,0 +1,13 @@
+---
+source: tui/src/multi_agents.rs
+expression: cell_to_text(&cell)
+---
+• documentation: Reviewer | Documentation and user experience | gpt-5.6-sol | high | Report invalid
+  └ Formal validation: invalid
+    Reviewer verdict: PASS
+    Gate: EXCLUDED
+    Findings: 1 | max severity: Low
+    Review round: BLOCKED — 1/2 passing
+    Reason: schema_consistency — a pass verdict requires an empty findings array
+    Correction: available (1/2 submissions used)
+    Diff digest: abcdef012345

@@ -2574,6 +2574,16 @@
         },
         "status": {
           "$ref": "#/definitions/WorkflowAgentDisplayStatus"
+        },
+        "validation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WorkflowAgentValidationDisplay"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -2590,6 +2600,148 @@
         "running",
         "validated",
         "rejected"
+      ],
+      "type": "string"
+    },
+    "WorkflowAgentValidationDisplay": {
+      "properties": {
+        "changeDigestSha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errorCode": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WorkflowValidationErrorCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "findingCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "formalStatus": {
+          "$ref": "#/definitions/WorkflowValidationFormalStatus"
+        },
+        "gateStatus": {
+          "$ref": "#/definitions/WorkflowValidationGateStatus"
+        },
+        "maxSeverity": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WorkflowFindingSeverity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "maxSubmissions": {
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "passingReviewers": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "requiredReviewers": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retryAllowed": {
+          "type": "boolean"
+        },
+        "reviewerVerdict": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WorkflowReviewerVerdict"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "submission": {
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "findingCount",
+        "formalStatus",
+        "gateStatus",
+        "maxSubmissions",
+        "retryAllowed",
+        "submission"
+      ],
+      "type": "object"
+    },
+    "WorkflowFindingSeverity": {
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ],
+      "type": "string"
+    },
+    "WorkflowReviewerVerdict": {
+      "enum": [
+        "pass",
+        "needsChanges",
+        "blocked"
+      ],
+      "type": "string"
+    },
+    "WorkflowValidationErrorCode": {
+      "enum": [
+        "taskBindingMismatch",
+        "schemaConsistency",
+        "invalidReportFormat",
+        "missingEvidence",
+        "sizeLimitExceeded",
+        "terminalOutputMismatch",
+        "contractViolation",
+        "correctionExhausted",
+        "changeDigestMismatch",
+        "technicalFailure"
+      ],
+      "type": "string"
+    },
+    "WorkflowValidationFormalStatus": {
+      "enum": [
+        "valid",
+        "invalid"
+      ],
+      "type": "string"
+    },
+    "WorkflowValidationGateStatus": {
+      "enum": [
+        "eligible",
+        "needsResolution",
+        "excluded"
       ],
       "type": "string"
     }

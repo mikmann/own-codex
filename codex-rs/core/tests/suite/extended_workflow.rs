@@ -462,7 +462,6 @@ impl wiremock::Respond for WorkflowReviewerFollowupResponder {
                 json!({
                     "kind": "reviewer",
                     "result_id": "ephemeral-reviewer-result",
-                    "expected_subject": "ignored server-side",
                     "agent_task": task_name,
                     "result": serde_json::from_str::<Value>(result)
                         .expect("reviewer result fixture should be valid JSON")
@@ -559,6 +558,19 @@ async fn workflow_plan_and_validation_tools_are_model_visible() -> Result<()> {
     let names = tool_names(&body);
     assert!(names.contains(&"plan_workflow_reviewers"));
     assert!(names.contains(&"validate_workflow_result"));
+    let validation_tool = find_tool(&body, "validate_workflow_result")
+        .expect("validate_workflow_result should be directly or namespace-visible");
+    let required = validation_tool
+        .pointer("/parameters/required")
+        .and_then(Value::as_array)
+        .expect("validation tool should declare required fields");
+    assert!(!required.iter().any(|field| field == "expected_subject"));
+    assert!(
+        validation_tool
+            .pointer("/parameters/properties/expected_subject")
+            .is_some(),
+        "the deprecated field remains additively accepted"
+    );
     let spawn_properties = find_tool(&body, "spawn_agent")
         .and_then(|tool| tool.pointer("/parameters/properties"))
         .and_then(Value::as_object)
@@ -577,6 +589,51 @@ async fn workflow_plan_and_validation_tools_are_model_visible() -> Result<()> {
         ]
     );
     assert!(!test.cwd_path().join(".codex").exists());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn short_continuation_is_bound_to_the_previous_user_assistant_exchange() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let requests = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-options"),
+                ev_assistant_message(
+                    "msg-options",
+                    "Option 1: Implementiere die additive Validator- und Anzeige-Korrektur.",
+                ),
+                ev_completed("resp-options"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-selection"),
+                ev_assistant_message("msg-selection", "Option 1 wird umgesetzt."),
+                ev_completed("resp-selection"),
+            ]),
+        ],
+    )
+    .await;
+    let mut builder = test_codex().with_config(|config| {
+        config.extended_workflow.enabled = true;
+        config.extended_workflow.experts.enabled = false;
+        config.extended_workflow.reviewers.enabled = false;
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+
+    test.submit_turn("Welche der beschriebenen Korrekturen soll umgesetzt werden?")
+        .await?;
+    test.submit_turn("1").await?;
+
+    let requests = requests.requests();
+    assert_eq!(requests.len(), 2);
+    let developer_text = requests[1].message_input_texts("developer").join("\n");
+    assert!(developer_text.contains("\"task_binding_kind\":\"resolved_continuation\""));
+    assert!(developer_text.contains("Previous user request"));
+    assert!(developer_text.contains("additive Validator- und Anzeige-Korrektur"));
+    assert!(developer_text.contains("User continuation:\\n1"));
+
     Ok(())
 }
 
@@ -649,14 +706,12 @@ async fn ticket_validation_allows_exactly_one_changed_correction() -> Result<()>
     let invalid_args = json!({
         "kind": "ticket",
         "result_id": "ticket-validation",
-        "expected_subject": "workflow ticket validation",
         "result": invalid_result
     })
     .to_string();
     let valid_args = json!({
         "kind": "ticket",
         "result_id": "ticket-validation",
-        "expected_subject": "workflow ticket validation",
         "result": valid_result
     })
     .to_string();

@@ -664,7 +664,9 @@ WHERE root_thread_id = ? AND turn_id = ? AND validation_key = ?
 UPDATE extended_workflow_validations
 SET submissions = 1, accepted = 0, result_kind = ?, agent_thread_id = ?,
     reviewer_role = ?, output_revision = ?, output_sha256 = ?, reviewer_pass = 0,
-    has_high_or_critical = 0
+    has_high_or_critical = 0, reviewer_verdict = NULL, gate_status = 'excluded',
+    validation_error_code = NULL, validation_message = NULL, finding_count = 0,
+    max_severity = NULL, change_digest_sha256 = NULL
 WHERE root_thread_id = ? AND turn_id = ? AND validation_key = ? AND accepted = 1
                         "#,
                     )
@@ -700,7 +702,9 @@ WHERE root_thread_id = ? AND turn_id = ? AND validation_key = ? AND accepted = 1
 UPDATE extended_workflow_validations
 SET submissions = 1, accepted = 0, result_kind = ?, agent_thread_id = ?,
     reviewer_role = ?, output_revision = ?, output_sha256 = ?, reviewer_pass = 0,
-    has_high_or_critical = 0
+    has_high_or_critical = 0, reviewer_verdict = NULL, gate_status = 'excluded',
+    validation_error_code = NULL, validation_message = NULL, finding_count = 0,
+    max_severity = NULL, change_digest_sha256 = NULL
 WHERE root_thread_id = ? AND turn_id = ? AND validation_key = ? AND accepted = 1
                     "#,
                 )
@@ -745,7 +749,9 @@ WHERE root_thread_id = ? AND turn_id = ? AND validation_key = ? AND submissions 
                     r#"
 UPDATE extended_workflow_validations
 SET submissions = ?, result_kind = ?, agent_thread_id = ?, reviewer_role = ?,
-    output_revision = ?, output_sha256 = ?
+    output_revision = ?, output_sha256 = ?, reviewer_verdict = NULL,
+    gate_status = 'excluded', validation_error_code = NULL, validation_message = NULL,
+    finding_count = 0, max_severity = NULL, change_digest_sha256 = NULL
 WHERE root_thread_id = ? AND turn_id = ? AND validation_key = ? AND accepted = 0
                     "#,
                 )
@@ -809,20 +815,28 @@ INSERT INTO extended_workflow_validations (
         Ok(decision)
     }
 
-    /// Mark the exact reserved submission as accepted.
+    /// Persist the structured outcome for the exact reserved submission.
     pub async fn complete_workflow_validation(
         &self,
         completion: crate::WorkflowValidationCompletion,
     ) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            completion.accepted || completion.details.validation_error_code.is_some(),
+            "a rejected workflow validation requires a persisted error code"
+        );
         let result = sqlx::query(
             r#"
 UPDATE extended_workflow_validations
-SET accepted = 1, reviewer_pass = ?, has_high_or_critical = ?,
-    review_cycles = review_cycles + CASE WHEN result_kind = 'reviewer' THEN 1 ELSE 0 END
+SET accepted = ?, reviewer_pass = ?, has_high_or_critical = ?,
+    review_cycles = review_cycles + CASE WHEN ? = 1 AND result_kind = 'reviewer' THEN 1 ELSE 0 END,
+    reviewer_verdict = ?, gate_status = ?, validation_error_code = ?,
+    validation_message = ?, finding_count = ?, max_severity = ?, change_digest_sha256 = ?
 WHERE root_thread_id = ? AND turn_id = ? AND validation_key = ?
   AND submissions = ? AND output_revision = ? AND output_sha256 = ? AND accepted = 0
+  AND validation_error_code IS NULL
             "#,
         )
+        .bind(if completion.accepted { 1_i64 } else { 0_i64 })
         .bind(if completion.reviewer_pass {
             1_i64
         } else {
@@ -833,6 +847,14 @@ WHERE root_thread_id = ? AND turn_id = ? AND validation_key = ?
         } else {
             0_i64
         })
+        .bind(if completion.accepted { 1_i64 } else { 0_i64 })
+        .bind(completion.details.reviewer_verdict)
+        .bind(completion.details.gate_status)
+        .bind(completion.details.validation_error_code)
+        .bind(completion.details.validation_message)
+        .bind(i64::from(completion.details.finding_count))
+        .bind(completion.details.max_severity)
+        .bind(completion.details.change_digest_sha256)
         .bind(completion.root_thread_id.to_string())
         .bind(completion.turn_id)
         .bind(completion.validation_key)
@@ -889,7 +911,8 @@ ORDER BY reviewer_role, agent_thread_id
             r#"
 SELECT validation_key, result_kind, agent_thread_id, reviewer_role, submissions,
        accepted, review_cycles, output_revision, output_sha256, reviewer_pass,
-       has_high_or_critical
+       has_high_or_critical, reviewer_verdict, gate_status, validation_error_code,
+       validation_message, finding_count, max_severity, change_digest_sha256
 FROM extended_workflow_validations
 WHERE root_thread_id = ? AND turn_id = ?
 ORDER BY validation_key
@@ -917,6 +940,15 @@ ORDER BY validation_key
                     output_sha256: row.try_get("output_sha256")?,
                     reviewer_pass: row.try_get::<i64, _>("reviewer_pass")? != 0,
                     has_high_or_critical: row.try_get::<i64, _>("has_high_or_critical")? != 0,
+                    details: crate::WorkflowValidationDetails {
+                        reviewer_verdict: row.try_get("reviewer_verdict")?,
+                        gate_status: row.try_get("gate_status")?,
+                        validation_error_code: row.try_get("validation_error_code")?,
+                        validation_message: row.try_get("validation_message")?,
+                        finding_count: u32::try_from(row.try_get::<i64, _>("finding_count")?)?,
+                        max_severity: row.try_get("max_severity")?,
+                        change_digest_sha256: row.try_get("change_digest_sha256")?,
+                    },
                 })
             })
             .collect()

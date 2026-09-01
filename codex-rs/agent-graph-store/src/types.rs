@@ -33,7 +33,33 @@ pub enum WorkflowValidationDecision {
     ResultLimitReached,
 }
 
-/// State recorded only after the reserved result has passed its native contract validation.
+/// Structured validation diagnostics persisted for display, audit, and same-digest review gates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowValidationDetails {
+    pub reviewer_verdict: Option<String>,
+    pub gate_status: String,
+    pub validation_error_code: Option<String>,
+    pub validation_message: Option<String>,
+    pub finding_count: u32,
+    pub max_severity: Option<String>,
+    pub change_digest_sha256: Option<String>,
+}
+
+impl Default for WorkflowValidationDetails {
+    fn default() -> Self {
+        Self {
+            reviewer_verdict: None,
+            gate_status: "excluded".to_string(),
+            validation_error_code: None,
+            validation_message: None,
+            finding_count: 0,
+            max_severity: None,
+            change_digest_sha256: None,
+        }
+    }
+}
+
+/// Formal validation and gate state recorded for one exact reserved submission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkflowValidationCompletion {
     pub root_thread_id: ThreadId,
@@ -42,8 +68,10 @@ pub struct WorkflowValidationCompletion {
     pub submission: u8,
     pub output_revision: u32,
     pub output_sha256: String,
+    pub accepted: bool,
     pub reviewer_pass: bool,
     pub has_high_or_critical: bool,
+    pub details: WorkflowValidationDetails,
 }
 
 /// Accepted reviewer evidence used by the root turn's completion gate.
@@ -71,6 +99,7 @@ pub struct WorkflowValidationRecord {
     pub output_sha256: String,
     pub reviewer_pass: bool,
     pub has_high_or_critical: bool,
+    pub details: WorkflowValidationDetails,
 }
 
 /// Lifecycle status attached to a directional thread-spawn edge.

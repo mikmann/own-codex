@@ -929,8 +929,10 @@ async fn build_skills_and_plugins(
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let plan = crate::extended_workflow::plan_turn(
+        let history = sess.clone_history().await;
+        let plan = crate::extended_workflow::plan_turn_with_history(
             &request_text,
+            history.raw_items(),
             &turn_context.sub_id,
             &turn_context.config.extended_workflow,
         );

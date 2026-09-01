@@ -530,8 +530,10 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
             submission: 1,
             output_revision: 1,
             output_sha256,
+            accepted: true,
             reviewer_pass: false,
             has_high_or_critical: false,
+            details: codex_agent_graph_store::WorkflowValidationDetails::default(),
         })
         .await
         .expect("expert validation should complete");

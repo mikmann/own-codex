@@ -34,6 +34,31 @@ pub enum WorkflowValidationDecision {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowValidationDetails {
+    pub reviewer_verdict: Option<String>,
+    pub gate_status: String,
+    pub validation_error_code: Option<String>,
+    pub validation_message: Option<String>,
+    pub finding_count: u32,
+    pub max_severity: Option<String>,
+    pub change_digest_sha256: Option<String>,
+}
+
+impl Default for WorkflowValidationDetails {
+    fn default() -> Self {
+        Self {
+            reviewer_verdict: None,
+            gate_status: "excluded".to_string(),
+            validation_error_code: None,
+            validation_message: None,
+            finding_count: 0,
+            max_severity: None,
+            change_digest_sha256: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowValidationCompletion {
     pub root_thread_id: codex_protocol::ThreadId,
     pub turn_id: String,
@@ -41,8 +66,10 @@ pub struct WorkflowValidationCompletion {
     pub submission: u8,
     pub output_revision: u32,
     pub output_sha256: String,
+    pub accepted: bool,
     pub reviewer_pass: bool,
     pub has_high_or_critical: bool,
+    pub details: WorkflowValidationDetails,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,4 +95,5 @@ pub struct WorkflowValidationRecord {
     pub output_sha256: String,
     pub reviewer_pass: bool,
     pub has_high_or_critical: bool,
+    pub details: WorkflowValidationDetails,
 }

@@ -14,7 +14,20 @@ use codex_app_server_protocol::CollabAgentToolCallStatus;
 use codex_app_server_protocol::SubAgentActivityKind;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::WorkflowAgentDisplay;
+#[cfg(test)]
 use codex_app_server_protocol::WorkflowAgentDisplayStatus;
+#[cfg(test)]
+use codex_app_server_protocol::WorkflowAgentValidationDisplay;
+#[cfg(test)]
+use codex_app_server_protocol::WorkflowFindingSeverity;
+#[cfg(test)]
+use codex_app_server_protocol::WorkflowReviewerVerdict;
+#[cfg(test)]
+use codex_app_server_protocol::WorkflowValidationErrorCode;
+#[cfg(test)]
+use codex_app_server_protocol::WorkflowValidationFormalStatus;
+#[cfg(test)]
+use codex_app_server_protocol::WorkflowValidationGateStatus;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use crossterm::event::KeyCode;
@@ -29,6 +42,11 @@ use ratatui::text::Span;
 use std::collections::HashSet;
 #[cfg(not(test))]
 use supports_color::Stream;
+
+mod workflow_validation;
+
+use workflow_validation::workflow_agent_status_span;
+use workflow_validation::workflow_agent_validation_details;
 
 const COLLAB_PROMPT_PREVIEW_GRAPHEMES: usize = 160;
 const COLLAB_AGENT_ERROR_PREVIEW_GRAPHEMES: usize = 160;
@@ -320,7 +338,11 @@ pub(crate) fn sub_agent_activity_history_cell(item: &ThreadItem) -> Option<Plain
             workflow_agent_activity_title(workflow_agent, workflow_agent_color_enabled())
         },
     );
-    Some(collab_event(title, Vec::new()))
+    let details = workflow_agent
+        .as_ref()
+        .and_then(|agent| agent.validation.as_ref())
+        .map_or_else(Vec::new, workflow_agent_validation_details);
+    Some(collab_event(title, details))
 }
 
 fn workflow_agent_activity_title(
@@ -332,11 +354,6 @@ fn workflow_agent_activity_title(
         .as_ref()
         .map(ToString::to_string)
         .unwrap_or_else(|| "default".to_string());
-    let status = match agent.status {
-        WorkflowAgentDisplayStatus::Running => "Running",
-        WorkflowAgentDisplayStatus::Validated => "Validated",
-        WorkflowAgentDisplayStatus::Rejected => "Rejected",
-    };
     let name = if color_enabled {
         Span::from(agent.name.clone()).cyan().bold()
     } else {
@@ -362,12 +379,7 @@ fn workflow_agent_activity_title(
     } else {
         Span::from(reasoning)
     };
-    let status_span = match (agent.status, color_enabled) {
-        (WorkflowAgentDisplayStatus::Validated, true) => Span::from(status).green().bold(),
-        (WorkflowAgentDisplayStatus::Rejected, true) => Span::from(status).red().bold(),
-        (_, true) => Span::from(status).blue(),
-        (_, false) => Span::from(status),
-    };
+    let status_span = workflow_agent_status_span(agent, color_enabled);
     title_spans_line(vec![
         name,
         Span::from(": ").dim(),
@@ -1044,6 +1056,7 @@ mod tests {
                 model: "gpt-5.6-sol".to_string(),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
                 status: WorkflowAgentDisplayStatus::Validated,
+                validation: None,
             }),
         };
 
@@ -1106,6 +1119,74 @@ mod tests {
             panic!("expected workflow agent metadata");
         };
         agent
+    }
+
+    #[test]
+    fn v2_workflow_activity_renders_structured_validation_and_round_summary() {
+        let item = ThreadItem::SubAgentActivity {
+            id: "activity-workflow-validation".to_string(),
+            kind: SubAgentActivityKind::Interacted,
+            agent_thread_id: ThreadId::new().to_string(),
+            agent_path: "/root/documentation".to_string(),
+            workflow_agent: Some(WorkflowAgentDisplay {
+                name: "documentation".to_string(),
+                agent_type: "Reviewer".to_string(),
+                role: "Documentation and user experience".to_string(),
+                model: "gpt-5.6-sol".to_string(),
+                reasoning_effort: Some(ReasoningEffortConfig::High),
+                status: WorkflowAgentDisplayStatus::Rejected,
+                validation: Some(WorkflowAgentValidationDisplay {
+                    formal_status: WorkflowValidationFormalStatus::Invalid,
+                    reviewer_verdict: Some(WorkflowReviewerVerdict::Pass),
+                    gate_status: WorkflowValidationGateStatus::Excluded,
+                    error_code: Some(WorkflowValidationErrorCode::SchemaConsistency),
+                    message: Some("a pass verdict requires an empty findings array".to_string()),
+                    submission: 1,
+                    max_submissions: 2,
+                    retry_allowed: true,
+                    finding_count: 1,
+                    max_severity: Some(WorkflowFindingSeverity::Low),
+                    change_digest_sha256: Some("abcdef0123456789".repeat(4)),
+                    passing_reviewers: Some(1),
+                    required_reviewers: Some(2),
+                }),
+            }),
+        };
+
+        let cell = sub_agent_activity_history_cell(&item).expect("workflow activity renders");
+
+        let validation = item_workflow_agent(&item)
+            .validation
+            .as_ref()
+            .expect("structured validation metadata");
+        let details = workflow_agent_validation_details(validation);
+        assert_eq!(
+            vec![
+                details[0].spans[1].clone(),
+                details[1].spans[1].clone(),
+                details[2].spans[1].clone(),
+                details[3].spans[3].clone(),
+                details[4].spans[1].clone(),
+                details[5].spans[1].clone(),
+                details[6].spans[1].clone(),
+                details[7].spans[1].clone(),
+            ],
+            vec![
+                Span::from("invalid").red().bold(),
+                Span::from("PASS").green().bold(),
+                Span::from("EXCLUDED").red().bold(),
+                Span::from("Low").dim(),
+                Span::from("BLOCKED").red().bold(),
+                Span::from("schema_consistency").red(),
+                Span::from("available (1/2 submissions used)").cyan(),
+                Span::from("abcdef012345").cyan(),
+            ]
+        );
+
+        assert_snapshot!(
+            "v2_workflow_activity_validation_details",
+            cell_to_text(&cell)
+        );
     }
 
     #[test]

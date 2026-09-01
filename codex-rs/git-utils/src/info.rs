@@ -357,7 +357,7 @@ pub async fn git_diff_to_remote(cwd: &Path) -> Option<GitDiffToRemote> {
     let remotes = get_git_remotes(cwd).await?;
     let branches = branch_ancestry(cwd).await?;
     let base_sha = find_closest_sha(cwd, &branches, &remotes).await?;
-    let diff = diff_against_sha(cwd, &base_sha).await?;
+    let diff = diff_against_sha(cwd, &base_sha, UntrackedDiffPolicy::BestEffort).await?;
 
     Some(GitDiffToRemote {
         sha: base_sha,
@@ -702,12 +702,22 @@ async fn find_closest_sha(cwd: &Path, branches: &[String], remotes: &[String]) -
     closest_sha.map(|(sha, _)| sha)
 }
 
-async fn diff_against_sha(cwd: &Path, sha: &GitSha) -> Option<String> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UntrackedDiffPolicy {
+    BestEffort,
+    Required,
+}
+
+async fn diff_against_sha(
+    cwd: &Path,
+    sha: &GitSha,
+    untracked_policy: UntrackedDiffPolicy,
+) -> Option<String> {
     let git = Path::new("git");
     let fsmonitor = detect_local_fsmonitor_override(git, cwd).await;
-    let output = run_git_command_with_timeout_from(
+    let mut output = run_git_command_with_timeout_from(
         git,
-        &["diff", "--no-textconv", "--no-ext-diff", &sha.0],
+        &["diff", "--no-textconv", "--no-ext-diff", "--binary", &sha.0],
         cwd,
         fsmonitor,
     )
@@ -716,56 +726,125 @@ async fn diff_against_sha(cwd: &Path, sha: &GitSha) -> Option<String> {
     // 1 is success but there is a diff.
     let exit_ok = output.status.code().is_some_and(|c| c == 0 || c == 1);
     if !exit_ok {
-        return None;
+        let symbolic_head = if sha.0 == "HEAD" {
+            run_git_command_with_timeout_from(git, &["symbolic-ref", "-q", "HEAD"], cwd, fsmonitor)
+                .await
+        } else {
+            None
+        };
+        if !symbolic_head.is_some_and(|head| head.status.success()) {
+            return None;
+        }
+        output = run_git_command_with_timeout_from(
+            git,
+            &[
+                "diff",
+                "--cached",
+                "--no-textconv",
+                "--no-ext-diff",
+                "--binary",
+            ],
+            cwd,
+            fsmonitor,
+        )
+        .await?;
+        if !output
+            .status
+            .code()
+            .is_some_and(|code| code == 0 || code == 1)
+        {
+            return None;
+        }
+        let unstaged = run_git_command_with_timeout_from(
+            git,
+            &["diff", "--no-textconv", "--no-ext-diff", "--binary"],
+            cwd,
+            fsmonitor,
+        )
+        .await?;
+        if !unstaged
+            .status
+            .code()
+            .is_some_and(|code| code == 0 || code == 1)
+        {
+            return None;
+        }
+        output.stdout.extend(unstaged.stdout);
     }
     let mut diff = String::from_utf8(output.stdout).ok()?;
 
-    if let Some(untracked_output) = run_git_command_with_timeout_from(
+    let untracked_output = run_git_command_with_timeout_from(
         git,
-        &["ls-files", "--others", "--exclude-standard"],
+        &["ls-files", "--others", "--exclude-standard", "-z"],
         cwd,
         fsmonitor,
     )
-    .await
-        && untracked_output.status.success()
-    {
-        let untracked: Vec<String> = String::from_utf8(untracked_output.stdout)
-            .ok()?
-            .lines()
-            .map(str::to_string)
-            .filter(|s| !s.is_empty())
-            .collect();
+    .await;
+    let untracked_output = match untracked_output {
+        Some(output) if output.status.success() => output,
+        _ if untracked_policy == UntrackedDiffPolicy::Required => return None,
+        _ => return Some(diff),
+    };
+    let untracked: Vec<String> = String::from_utf8(untracked_output.stdout)
+        .ok()?
+        .split('\0')
+        .map(str::to_string)
+        .filter(|path| !path.is_empty())
+        .collect();
 
-        if !untracked.is_empty() {
-            // Use platform-appropriate null device and guard paths with `--`.
-            let null_device: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
-            let futures_iter = untracked.into_iter().map(|file| async move {
-                let file_owned = file;
-                let args_vec: Vec<&str> = vec![
-                    "diff",
-                    "--no-textconv",
-                    "--no-ext-diff",
-                    "--binary",
-                    "--no-index",
-                    // -- ensures that filenames that start with - are not treated as options.
-                    "--",
-                    null_device,
-                    &file_owned,
-                ];
-                run_git_command_with_timeout_from(git, &args_vec, cwd, fsmonitor).await
-            });
-            let results = join_all(futures_iter).await;
-            for extra in results.into_iter().flatten() {
-                if extra.status.code().is_some_and(|c| c == 0 || c == 1)
-                    && let Ok(s) = String::from_utf8(extra.stdout)
+    if !untracked.is_empty() {
+        // Use platform-appropriate null device and guard paths with `--`.
+        let null_device: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        let futures_iter = untracked.into_iter().map(|file| async move {
+            let file_owned = file;
+            let args_vec: Vec<&str> = vec![
+                "diff",
+                "--no-textconv",
+                "--no-ext-diff",
+                "--binary",
+                "--no-index",
+                // -- ensures that filenames that start with - are not treated as options.
+                "--",
+                null_device,
+                &file_owned,
+            ];
+            run_git_command_with_timeout_from(git, &args_vec, cwd, fsmonitor).await
+        });
+        let results = join_all(futures_iter).await;
+        for result in results {
+            match result {
+                Some(extra)
+                    if extra
+                        .status
+                        .code()
+                        .is_some_and(|code| code == 0 || code == 1) =>
                 {
-                    diff.push_str(&s);
+                    match String::from_utf8(extra.stdout) {
+                        Ok(extra_diff) => diff.push_str(&extra_diff),
+                        Err(_) if untracked_policy == UntrackedDiffPolicy::Required => return None,
+                        Err(_) => {}
+                    }
                 }
+                _ if untracked_policy == UntrackedDiffPolicy::Required => return None,
+                _ => {}
             }
         }
     }
 
     Some(diff)
+}
+
+/// Return a stable, binary-aware patch for every tracked and untracked working-tree change.
+///
+/// `None` means the directory is not a usable Git worktree or Git could not produce a complete
+/// diff. Callers that use this as a review binding should fail closed in that case.
+pub async fn working_tree_diff(cwd: &Path) -> Option<String> {
+    diff_against_sha(
+        cwd,
+        &GitSha("HEAD".to_string()),
+        UntrackedDiffPolicy::Required,
+    )
+    .await
 }
 
 /// Resolve the path that should be used for trust checks. Similar to
@@ -889,6 +968,95 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::process::Stdio;
+
+    #[tokio::test]
+    async fn working_tree_diff_includes_tracked_and_untracked_changes() {
+        let repo = tempfile::tempdir().expect("create temp repository");
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "workflow@example.invalid"]);
+        run(&["config", "user.name", "Workflow Test"]);
+        std::fs::write(repo.path().join("tracked.txt"), "before\n").expect("write tracked");
+        run(&["add", "tracked.txt"]);
+        run(&["commit", "-qm", "initial"]);
+        std::fs::write(repo.path().join("tracked.txt"), "after\n").expect("modify tracked");
+        std::fs::write(repo.path().join("untracked.txt"), "new\n").expect("write untracked");
+
+        let diff = working_tree_diff(repo.path())
+            .await
+            .expect("working-tree diff");
+
+        assert!(diff.contains("tracked.txt"));
+        assert!(diff.contains("untracked.txt"));
+        assert!(diff.contains("+after"));
+        assert!(diff.contains("+new"));
+    }
+
+    #[tokio::test]
+    async fn working_tree_diff_supports_an_unborn_repository() {
+        let repo = tempfile::tempdir().expect("create temp repository");
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        std::fs::write(repo.path().join("staged.txt"), "staged\n").expect("write staged file");
+        run(&["add", "staged.txt"]);
+        std::fs::write(repo.path().join("staged.txt"), "staged and changed\n")
+            .expect("change staged file");
+        std::fs::write(repo.path().join("untracked.txt"), "untracked\n")
+            .expect("write untracked file");
+
+        let diff = working_tree_diff(repo.path())
+            .await
+            .expect("unborn working-tree diff");
+
+        assert!(diff.contains("staged.txt"));
+        assert!(diff.contains("+staged"));
+        assert!(diff.contains("+staged and changed"));
+        assert!(diff.contains("untracked.txt"));
+        assert!(diff.contains("+untracked"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn working_tree_diff_supports_newlines_in_untracked_paths() {
+        let repo = tempfile::tempdir().expect("create temp repository");
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "workflow@example.invalid"]);
+        run(&["config", "user.name", "Workflow Test"]);
+        std::fs::write(repo.path().join("tracked.txt"), "tracked\n").expect("write tracked");
+        run(&["add", "tracked.txt"]);
+        run(&["commit", "-qm", "initial"]);
+        std::fs::write(repo.path().join("line\nbreak.txt"), "untracked\n")
+            .expect("write untracked path containing newline");
+
+        let diff = working_tree_diff(repo.path())
+            .await
+            .expect("working-tree diff");
+
+        assert!(diff.contains("line\\nbreak.txt"));
+        assert!(diff.contains("+untracked"));
+    }
 
     #[tokio::test]
     async fn git_metadata_commands_do_not_inherit_stdin() {

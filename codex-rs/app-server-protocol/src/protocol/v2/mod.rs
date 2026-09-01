@@ -27,6 +27,7 @@ mod thread;
 mod thread_data;
 mod turn;
 mod windows_sandbox;
+mod workflow_validation;
 
 pub use account::*;
 pub use apps::*;
@@ -56,6 +57,7 @@ pub use thread::*;
 pub use thread_data::*;
 pub use turn::*;
 pub use windows_sandbox::*;
+pub use workflow_validation::*;
 
 #[cfg(test)]
 mod tests;

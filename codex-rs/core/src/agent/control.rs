@@ -122,6 +122,7 @@ struct InMemoryWorkflowValidation {
     reviewer_pass: bool,
     review_cycles: u8,
     has_high_or_critical: bool,
+    details: codex_agent_graph_store::WorkflowValidationDetails,
 }
 
 type InMemoryWorkflowValidations = HashMap<(ThreadId, String, String), InMemoryWorkflowValidation>;
@@ -268,6 +269,7 @@ impl AgentControl {
                 existing.output_sha256 = submission.output_sha256;
                 existing.reviewer_pass = false;
                 existing.has_high_or_critical = false;
+                existing.details = codex_agent_graph_store::WorkflowValidationDetails::default();
                 return Ok(codex_agent_graph_store::WorkflowValidationDecision::Attempt(1));
             }
             if existing.accepted
@@ -301,6 +303,7 @@ impl AgentControl {
                 existing.output_sha256 = submission.output_sha256;
                 existing.reviewer_pass = false;
                 existing.has_high_or_critical = false;
+                existing.details = codex_agent_graph_store::WorkflowValidationDetails::default();
                 return Ok(codex_agent_graph_store::WorkflowValidationDecision::Attempt(1));
             }
             if existing.submissions >= 2 {
@@ -326,6 +329,7 @@ impl AgentControl {
             existing.reviewer_role = submission.reviewer_role;
             existing.output_revision = submission.output_revision;
             existing.output_sha256 = submission.output_sha256;
+            existing.details = codex_agent_graph_store::WorkflowValidationDetails::default();
             return Ok(
                 codex_agent_graph_store::WorkflowValidationDecision::Attempt(existing.submissions),
             );
@@ -352,6 +356,7 @@ impl AgentControl {
                 reviewer_pass: false,
                 review_cycles: 0,
                 has_high_or_critical: false,
+                details: codex_agent_graph_store::WorkflowValidationDetails::default(),
             },
         );
         Ok(codex_agent_graph_store::WorkflowValidationDecision::Attempt(1))
@@ -368,12 +373,13 @@ impl AgentControl {
                 .await
                 .map_err(|error| {
                     CodexErr::Fatal(format!(
-                        "failed to persist accepted workflow validation: {error}"
+                        "failed to persist workflow validation outcome: {error}"
                     ))
                 })?;
             if !completed {
                 return Err(CodexErr::Fatal(
-                    "workflow validation reservation changed before acceptance".to_string(),
+                    "workflow validation reservation changed before outcome persistence"
+                        .to_string(),
                 ));
             }
             return Ok(());
@@ -399,15 +405,16 @@ impl AgentControl {
             || existing.output_sha256 != completion.output_sha256
         {
             return Err(CodexErr::Fatal(
-                "workflow validation reservation changed before acceptance".to_string(),
+                "workflow validation reservation changed before outcome persistence".to_string(),
             ));
         }
-        existing.accepted = true;
+        existing.accepted = completion.accepted;
         existing.reviewer_pass = completion.reviewer_pass;
-        if existing.result_kind == "reviewer" {
+        if completion.accepted && existing.result_kind == "reviewer" {
             existing.review_cycles = existing.review_cycles.saturating_add(1).min(2);
         }
         existing.has_high_or_critical = completion.has_high_or_critical;
+        existing.details = completion.details;
         Ok(())
     }
 
@@ -452,6 +459,7 @@ impl AgentControl {
                         output_sha256: validation.output_sha256.clone(),
                         reviewer_pass: validation.reviewer_pass,
                         has_high_or_critical: validation.has_high_or_critical,
+                        details: validation.details.clone(),
                     }
                 },
             )

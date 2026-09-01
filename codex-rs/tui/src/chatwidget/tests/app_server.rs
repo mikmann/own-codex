@@ -519,6 +519,7 @@ async fn workflow_activity_lifecycle_renders_once_and_close_uses_identity() {
             model: "gpt-5.6-sol".to_string(),
             reasoning_effort: Some(ReasoningEffortConfig::High),
             status: codex_app_server_protocol::WorkflowAgentDisplayStatus::Validated,
+            validation: None,
         }),
     };
 

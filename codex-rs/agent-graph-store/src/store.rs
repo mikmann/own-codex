@@ -125,7 +125,7 @@ pub trait AgentGraphStore: Send + Sync {
         submission: WorkflowValidationSubmission,
     ) -> AgentGraphStoreFuture<'_, WorkflowValidationDecision>;
 
-    /// Mark the exact reserved submission as accepted after native contract validation succeeds.
+    /// Persist the formal validation and gate details for the exact reserved submission.
     fn complete_workflow_validation(
         &self,
         completion: WorkflowValidationCompletion,

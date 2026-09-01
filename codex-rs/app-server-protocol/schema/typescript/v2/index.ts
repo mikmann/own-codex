@@ -550,8 +550,14 @@ export type { WindowsSandboxSetupStartResponse } from "./WindowsSandboxSetupStar
 export type { WindowsWorldWritableWarningNotification } from "./WindowsWorldWritableWarningNotification";
 export type { WorkflowAgentDisplay } from "./WorkflowAgentDisplay";
 export type { WorkflowAgentDisplayStatus } from "./WorkflowAgentDisplayStatus";
+export type { WorkflowAgentValidationDisplay } from "./WorkflowAgentValidationDisplay";
+export type { WorkflowFindingSeverity } from "./WorkflowFindingSeverity";
+export type { WorkflowReviewerVerdict } from "./WorkflowReviewerVerdict";
 export type { WorkflowTokenBudgetAction } from "./WorkflowTokenBudgetAction";
 export type { WorkflowTokenBudgetStatus } from "./WorkflowTokenBudgetStatus";
+export type { WorkflowValidationErrorCode } from "./WorkflowValidationErrorCode";
+export type { WorkflowValidationFormalStatus } from "./WorkflowValidationFormalStatus";
+export type { WorkflowValidationGateStatus } from "./WorkflowValidationGateStatus";
 export type { WorkspaceMessage } from "./WorkspaceMessage";
 export type { WorkspaceMessageType } from "./WorkspaceMessageType";
 export type { WriteStatus } from "./WriteStatus";

@@ -3106,6 +3106,21 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             model: "gpt-test".to_string(),
             reasoning_effort: None,
             status: WorkflowAgentDisplayStatus::Validated,
+            validation: Some(WorkflowAgentValidationDisplay {
+                formal_status: WorkflowValidationFormalStatus::Valid,
+                reviewer_verdict: Some(WorkflowReviewerVerdict::NeedsChanges),
+                gate_status: WorkflowValidationGateStatus::NeedsResolution,
+                error_code: None,
+                message: None,
+                submission: 1,
+                max_submissions: 2,
+                retry_allowed: false,
+                finding_count: 1,
+                max_severity: Some(WorkflowFindingSeverity::Low),
+                change_digest_sha256: Some("a".repeat(64)),
+                passing_reviewers: Some(1),
+                required_reviewers: Some(2),
+            }),
         })
         .expect("workflow display should serialize"),
         json!({
@@ -3115,6 +3130,21 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             "model": "gpt-test",
             "reasoningEffort": null,
             "status": "validated",
+            "validation": {
+                "formalStatus": "valid",
+                "reviewerVerdict": "needsChanges",
+                "gateStatus": "needsResolution",
+                "errorCode": null,
+                "message": null,
+                "submission": 1,
+                "maxSubmissions": 2,
+                "retryAllowed": false,
+                "findingCount": 1,
+                "maxSeverity": "low",
+                "changeDigestSha256": "a".repeat(64),
+                "passingReviewers": 1,
+                "requiredReviewers": 2,
+            },
         })
     );
 
