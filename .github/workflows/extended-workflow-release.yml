@@ -65,6 +65,24 @@ jobs:
         with:
           target: ${{ env.RELEASE_TARGET }}
 
+      - name: Require LF-only SQLx migration bytes
+        shell: pwsh
+        run: |
+          $migrationFiles = @(Get-ChildItem codex-rs/state -Directory |
+            Where-Object { $_.Name -eq "migrations" -or $_.Name.EndsWith("_migrations") } |
+            ForEach-Object { Get-ChildItem $_.FullName -Filter *.sql -File })
+          if ($migrationFiles.Count -eq 0) {
+            throw "No SQLx migration files were found."
+          }
+
+          $invalidFiles = @($migrationFiles | Where-Object {
+            [IO.File]::ReadAllBytes($_.FullName) -contains [byte]13
+          })
+          if ($invalidFiles.Count -gt 0) {
+            $invalidFiles | ForEach-Object { Write-Host "CR byte found in $($_.FullName)" }
+            throw "SQLx migration files must use LF-only line endings."
+          }
+
       - name: Build matching release binaries
         shell: pwsh
         run: |
