@@ -8,7 +8,7 @@ SHA-256 manifest, validates the complete package contract, runs CLI and Code
 Mode host smoke tests, and only then replaces the managed installation.
 
 .EXAMPLE
-.\install-extended-workflow.ps1 -Release v0.147.1-alpha-7
+.\install-extended-workflow.ps1 -Release v0.147.1-alpha-8
 
 .EXAMPLE
 .\install-extended-workflow.ps1 -ArchivePath .\package.zip -ChecksumPath .\SHA256SUMS -WhatIf

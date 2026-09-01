@@ -23,7 +23,7 @@ retained as a compatibility entry point. The primary launcher enables the
 extended workflow only when no CLI, repository, or global setting explicitly
 sets `extended_workflow.enabled`; the compatibility launcher preserves the
 upstream disabled default. The visible distribution version is
-`v0.147.1-alpha-7`. Automatic app-server updates are disabled in the extended
+`v0.147.1-alpha-8`. Automatic app-server updates are disabled in the extended
 product mode so this fork cannot silently replace itself with an official Codex
 package; the compatibility `codex` launcher retains upstream behavior.
 
@@ -79,7 +79,7 @@ Starting with releases produced by `extended-workflow-release.yml`, download
 the installer from the matching GitHub release and run it with the exact tag:
 
 ```powershell
-$tag = "v0.147.1-alpha-7"
+$tag = "v0.147.1-alpha-8"
 $installer = Join-Path $env:TEMP "install-extended-workflow.ps1"
 Invoke-WebRequest "https://github.com/mikmann/own-codex/releases/download/$tag/install-extended-workflow.ps1" -OutFile $installer
 & $installer -Release $tag

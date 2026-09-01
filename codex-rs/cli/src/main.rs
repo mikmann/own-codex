@@ -101,7 +101,7 @@ use codex_terminal_detection::TerminalName;
 #[clap(
     name = "codex-extended-workflow",
     author,
-    version = "v0.147.1-alpha-7",
+    version = "v0.147.1-alpha-8",
     // If a sub‑command is given, ignore requirements of the default args.
     subcommand_negates_reqs = true,
     // The executable is sometimes invoked via a platform‑specific name like
