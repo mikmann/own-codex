@@ -368,6 +368,7 @@ fn prepared_document() -> Result<String, PrepareWorkflowError> {
 
 [extended_workflow]
 enabled = true
+workflow_type = "auto"
 audit_mode = true
 # 0 means unlimited. A non-zero value covers the main agent, experts, reviewers, and compactions.
 workflow_budget_tokens = 0
@@ -378,27 +379,34 @@ enabled = true
 min = 2
 max = 4
 
+# `profiles` replaces the built-in expert catalog. Custom additions can instead use
+# `[[extended_workflow.experts.additional_profiles]]`. Selection keywords are compared locally;
+# matched terms may appear in diagnostics but never become role instructions.
 [[extended_workflow.experts.profiles]]
 name = "expert_1"
 role = "Architecture"
+selection_keywords = ["architecture", "architektur", "design", "module"]
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
 
 [[extended_workflow.experts.profiles]]
 name = "expert_2"
 role = "Orchestration and context"
+selection_keywords = ["workflow", "orchestration", "context", "kontext"]
 model = "gpt-5.6-terra"
 reasoning_effort = "xhigh"
 
 [[extended_workflow.experts.profiles]]
 name = "expert_3"
 role = "Security and permissions"
+selection_keywords = ["security", "sicherheit", "permission", "berechtigung"]
 model = "gpt-5.5"
 reasoning_effort = "high"
 
 [[extended_workflow.experts.profiles]]
 name = "expert_4"
 role = "Testing and compatibility"
+selection_keywords = ["test", "testing", "regression", "compatibility", "kompatibilität"]
 model = "gpt-5.6-sol"
 reasoning_effort = "max"
 
@@ -407,27 +415,33 @@ enabled = true
 min = 2
 max = 4
 
+# `profiles` replaces the built-in reviewer catalog. Custom additions can instead use
+# `[[extended_workflow.reviewers.additional_profiles]]`.
 [[extended_workflow.reviewers.profiles]]
 name = "reviewer_1"
 role = "Correctness and architecture"
+selection_keywords = ["correctness", "korrektheit", "architecture", "architektur"]
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
 
 [[extended_workflow.reviewers.profiles]]
 name = "reviewer_2"
 role = "Security and permissions"
+selection_keywords = ["security", "sicherheit", "permission", "berechtigung"]
 model = "gpt-5.6-terra"
 reasoning_effort = "xhigh"
 
 [[extended_workflow.reviewers.profiles]]
 name = "reviewer_3"
 role = "Testing and regression"
+selection_keywords = ["test", "testing", "regression", "quality", "qualität"]
 model = "gpt-5.5"
 reasoning_effort = "high"
 
 [[extended_workflow.reviewers.profiles]]
 name = "reviewer_4"
 role = "Product and workflow compatibility"
+selection_keywords = ["product", "produkt", "workflow", "compatibility", "kompatibilität"]
 model = "gpt-5.6-sol"
 reasoning_effort = "max"
 

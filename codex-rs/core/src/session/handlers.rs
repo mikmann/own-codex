@@ -105,14 +105,33 @@ pub async fn update_thread_settings(
     sub_id: String,
     thread_settings: ThreadSettingsOverrides,
 ) {
+    let persist_workflow_type = thread_settings.workflow_type.is_some();
+    if thread_settings.workflow_type.is_some()
+        && let Some(message) = workflow_type_update_blocker(sess).await
+    {
+        sess.send_event_raw(Event {
+            id: sub_id,
+            msg: EventMsg::Error(ErrorEvent {
+                message,
+                codex_error_info: Some(CodexErrorInfo::BadRequest),
+            }),
+        })
+        .await;
+        return;
+    }
     let updates = thread_settings_update(sess, thread_settings).await;
     match sess.update_settings(updates).await {
         Ok(()) => {
-            sess.send_event_raw_without_materializing_rollout(Event {
+            let event = Event {
                 id: sub_id,
                 msg: thread_settings_applied_event(sess).await,
-            })
-            .await;
+            };
+            if persist_workflow_type {
+                sess.send_event_raw(event).await;
+            } else {
+                sess.send_event_raw_without_materializing_rollout(event)
+                    .await;
+            }
         }
         Err(err) => {
             sess.send_event_raw(Event {
@@ -146,6 +165,7 @@ async fn thread_settings_update(
         service_tier,
         collaboration_mode,
         personality,
+        workflow_type,
     } = thread_settings;
     let collaboration_mode = match collaboration_mode {
         Some(collaboration_mode) => collaboration_mode,
@@ -172,8 +192,29 @@ async fn thread_settings_update(
         reasoning_summary: summary,
         service_tier,
         personality,
+        workflow_type,
         ..Default::default()
     }
+}
+
+async fn workflow_type_update_blocker(sess: &Session) -> Option<String> {
+    if sess.active_turn.lock().await.is_some() {
+        return Some(
+            "workflow type cannot be changed while a turn is running; wait for the turn to finish"
+                .to_string(),
+        );
+    }
+    if sess
+        .workflow_token_budget_status()
+        .await
+        .is_some_and(|status| status.active)
+    {
+        return Some(
+            "workflow type cannot be changed while a workflow generation is active; finish it or run /workflow-reset-budget first"
+                .to_string(),
+        );
+    }
+    None
 }
 
 pub(super) async fn thread_settings_applied_event(sess: &Session) -> EventMsg {

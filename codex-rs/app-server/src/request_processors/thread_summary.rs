@@ -193,6 +193,8 @@ pub(crate) fn thread_settings_from_config_snapshot(
         collaboration_mode: config_snapshot.collaboration_mode.clone(),
         multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
         personality: config_snapshot.personality,
+        workflow_type: config_snapshot.workflow_type.into(),
+        effective_request_class: config_snapshot.effective_request_class.map(Into::into),
     }
 }
 
@@ -211,6 +213,8 @@ pub(crate) fn thread_settings_from_core_snapshot(
         reasoning_effort,
         reasoning_summary,
         personality,
+        workflow_type,
+        effective_request_class,
         collaboration_mode,
     } = snapshot;
     let sandbox_policy = codex_sandboxing::compatibility_sandbox_policy_for_permission_profile(
@@ -234,6 +238,8 @@ pub(crate) fn thread_settings_from_core_snapshot(
         collaboration_mode,
         multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
         personality,
+        workflow_type: workflow_type.unwrap_or_default().into(),
+        effective_request_class: effective_request_class.map(Into::into),
     }
 }
 

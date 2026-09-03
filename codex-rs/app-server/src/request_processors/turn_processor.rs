@@ -136,6 +136,7 @@ struct ThreadSettingsBuildParams {
     summary: Option<ReasoningSummary>,
     collaboration_mode: Option<CollaborationMode>,
     personality: Option<Personality>,
+    workflow_type: Option<codex_app_server_protocol::WorkflowType>,
 }
 
 impl TurnRequestProcessor {
@@ -543,6 +544,7 @@ impl TurnRequestProcessor {
                     summary: params.summary,
                     collaboration_mode: params.collaboration_mode,
                     personality: params.personality,
+                    workflow_type: None,
                 },
             )
             .await?;
@@ -688,6 +690,7 @@ impl TurnRequestProcessor {
             summary,
             collaboration_mode,
             personality,
+            workflow_type,
         } = params;
 
         if sandbox_policy.is_some() && permissions.is_some() {
@@ -718,7 +721,8 @@ impl TurnRequestProcessor {
             || effort.is_some()
             || summary.is_some()
             || collaboration_mode.is_some()
-            || personality.is_some();
+            || personality.is_some()
+            || workflow_type.is_some();
 
         let approval_policy =
             approval_policy.map(codex_app_server_protocol::AskForApproval::to_core);
@@ -787,6 +791,8 @@ impl TurnRequestProcessor {
                     service_tier: service_tier.clone(),
                     collaboration_mode: collaboration_mode.clone(),
                     personality,
+                    workflow_type: workflow_type
+                        .map(codex_app_server_protocol::WorkflowType::to_core),
                 })
                 .await
                 .map_err(|err| {
@@ -809,6 +815,7 @@ impl TurnRequestProcessor {
             service_tier,
             collaboration_mode,
             personality,
+            workflow_type: workflow_type.map(codex_app_server_protocol::WorkflowType::to_core),
         })
     }
 
@@ -818,6 +825,11 @@ impl TurnRequestProcessor {
         params: ThreadSettingsUpdateParams,
     ) -> Result<ThreadSettingsUpdateResponse, JSONRPCErrorError> {
         let (_, thread) = self.load_thread(&params.thread_id).await?;
+        if params.workflow_type.is_some()
+            && let Some(message) = thread.workflow_type_update_blocker().await
+        {
+            return Err(invalid_request(message));
+        }
         let cwd = resolve_request_cwd(params.cwd)?;
         let environments = self
             .build_environment_override(
@@ -843,6 +855,7 @@ impl TurnRequestProcessor {
                     summary: params.summary,
                     collaboration_mode: params.collaboration_mode,
                     personality: params.personality,
+                    workflow_type: params.workflow_type,
                 },
             )
             .await?;

@@ -1039,6 +1039,8 @@ async fn bang_shell_enter_while_task_running_submits_run_user_shell_command() {
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
+        workflow_type: codex_protocol::config_types::WorkflowType::Auto,
+        effective_request_class: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),

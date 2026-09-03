@@ -7,6 +7,7 @@ use codex_config::extended_workflow::ExtendedWorkflowConfig;
 use codex_config::extended_workflow::WorkflowAgentProfileConfig;
 use codex_config::extended_workflow::WorkflowProcessConfig;
 use codex_protocol::ThreadId;
+pub use codex_protocol::config_types::WorkflowRequestClass as RequestClass;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::SessionSource;
 use serde::Deserialize;
@@ -18,6 +19,13 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Mutex;
 use std::sync::PoisonError;
+
+mod roles;
+mod workflow_type;
+
+pub(crate) use roles::apply_persisted_role_binding;
+pub(crate) use roles::apply_profile_role_binding;
+pub(crate) use roles::preflight_process_plan;
 
 const DEFAULT_ESTIMATED_AGENT_TOKENS: u64 = 1_200;
 const MAX_CLASSIFIER_INPUT_CHARS: usize = 32_000;
@@ -47,14 +55,6 @@ pub(crate) fn require_bounded_workflow_text(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RequestClass {
-    SimpleAnswer,
-    WorkOrder,
-    Concept,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestRisk {
@@ -81,6 +81,18 @@ pub struct WorkflowAgentPlan {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
+    pub profile_source: String,
+    pub selection_reason: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matched_selection_keywords: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_fingerprint: Option<String>,
+    pub role_preflight: WorkflowRolePreflightStatus,
+    pub role_instruction_tokens: u64,
+    #[serde(skip)]
+    pub(crate) role_fingerprint_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,6 +102,15 @@ pub struct WorkflowAgentPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_budget: Option<u64>,
     pub read_only: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowRolePreflightStatus {
+    #[default]
+    Pending,
+    Validated,
+    ManualReviewRecommended,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -317,6 +338,17 @@ impl WorkflowTurnRuntimeState {
             change_summary_sha256: sha256_bytes(change_summary.as_bytes()),
             change_digest_sha256: change_digest_sha256.to_string(),
         };
+        if let Some(error) = inner.task_binding_error.as_ref() {
+            return Err(error.clone());
+        }
+        for profile in &reviewer_round.plan.selected {
+            spawn_directive_for_profile(
+                &inner,
+                WorkflowAgentKind::Reviewer,
+                profile,
+                Some(&reviewer_round),
+            )?;
+        }
         match inner.reviewers.as_mut() {
             Some(existing) if existing == &reviewer_round => Ok(()),
             Some(existing)
@@ -409,6 +441,17 @@ impl WorkflowTurnRuntimeState {
     ) -> Result<WorkflowSpawnDirective, String> {
         let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         spawn_directive_for_task(&inner, task_name)
+    }
+
+    pub fn preflight_expert_spawn_directives(&self) -> Result<(), String> {
+        let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(error) = inner.task_binding_error.as_ref() {
+            return Err(error.clone());
+        }
+        for profile in &inner.experts.selected {
+            spawn_directive_for_profile(&inner, WorkflowAgentKind::Expert, profile, None)?;
+        }
+        Ok(())
     }
 
     pub fn selected_profile_for_task(
@@ -867,13 +910,22 @@ fn spawn_directive_for_task(
         return Err(error.clone());
     }
     let (kind, profile) = selected_profile_for_task(inner, task_name)?;
+    spawn_directive_for_profile(inner, kind, &profile, None)
+}
+
+fn spawn_directive_for_profile(
+    inner: &WorkflowTurnRuntimeInner,
+    kind: WorkflowAgentKind,
+    profile: &WorkflowAgentPlan,
+    reviewer_round: Option<&WorkflowReviewerRound>,
+) -> Result<WorkflowSpawnDirective, String> {
     let canonical_assignment = match kind {
         WorkflowAgentKind::Expert => format!(
             "Root request SHA-256: {}\nRoot request:\n{}\n\nAssigned expert role: {}\nAnalyze this exact root request from the assigned role. Support the main agent in creating concepts, making decisions, or creating tickets with specialist findings, alternatives, risks, evidence, and recommendations. Work read-only, cite concrete files and symbols, state uncertainties, do not implement changes, and do not present your contribution as the final decision, concept, or ticket.",
             inner.root_request_sha256, inner.root_request, profile.role
         ),
         WorkflowAgentKind::Reviewer => {
-            let reviewers = inner.reviewers.as_ref().ok_or_else(|| {
+            let reviewers = reviewer_round.or(inner.reviewers.as_ref()).ok_or_else(|| {
                 "reviewer selection has not been installed for this turn".to_string()
             })?;
             format!(
@@ -898,18 +950,20 @@ fn spawn_directive_for_task(
         &canonical_task,
         MAX_COMPLETE_WORKFLOW_TASK_BYTES,
     )?;
-    let estimated_task_tokens = u64::try_from(canonical_task.len().div_ceil(4)).unwrap_or(u64::MAX);
+    let estimated_task_tokens = u64::try_from(canonical_task.len().div_ceil(4))
+        .unwrap_or(u64::MAX)
+        .saturating_add(profile.role_instruction_tokens);
     if let Some(context_budget) = profile.context_budget
         && estimated_task_tokens > context_budget
     {
         return Err(format!(
-            "workflow profile `{}` has a hard local context ceiling of {context_budget} tokens, but the complete server-bound task contract is conservatively estimated at {estimated_task_tokens} tokens; no agent was started",
+            "workflow profile `{}` has a hard local context ceiling of {context_budget} tokens, but the complete server-bound task contract and resolved role instructions are conservatively estimated at {estimated_task_tokens} tokens; no agent was started",
             profile.name
         ));
     }
     Ok(WorkflowSpawnDirective {
         kind,
-        profile,
+        profile: profile.clone(),
         canonical_task,
         root_request_sha256: inner.root_request_sha256.clone(),
     })
@@ -1188,7 +1242,10 @@ fn plan_turn_for_binding(
     config: &ExtendedWorkflowConfig,
 ) -> WorkflowTurnPlan {
     let effective_request = binding.effective_request;
-    let classification = classify_request(&effective_request);
+    let classification = workflow_type::apply_to_classification(
+        classify_request(&effective_request),
+        config.workflow_type,
+    );
     let root_request_sha256 = sha256_bytes(effective_request.as_bytes());
     let task_binding_blocked = effective_request.len() > MAX_WORKFLOW_ROOT_REQUEST_BYTES;
     let task_binding_message = task_binding_blocked.then(|| {
@@ -1222,6 +1279,7 @@ fn plan_turn_for_binding(
     };
     let experts = plan_process(
         &classification,
+        &effective_request,
         WorkflowAgentKind::Expert,
         turn_id,
         &config.experts,
@@ -1258,6 +1316,7 @@ pub fn plan_reviewers(
     let desired = desired_reviewer_count(&classification, &config.reviewers);
     plan_process(
         &classification,
+        change_summary,
         WorkflowAgentKind::Reviewer,
         turn_id,
         &config.reviewers,
@@ -1312,6 +1371,7 @@ fn dynamic_count(classification: &RequestClassification, process: &WorkflowProce
 
 fn plan_process(
     classification: &RequestClassification,
+    selection_text: &str,
     kind: WorkflowAgentKind,
     turn_id: &str,
     process: &WorkflowProcessConfig,
@@ -1334,12 +1394,21 @@ fn plan_process(
     let mut budget_message = None;
     if let Some(budget) = effective_budget {
         while desired > process.min
-            && estimated_tokens_for_selection(classification, &process.profiles, desired) > budget
+            && estimated_tokens_for_selection(
+                classification,
+                selection_text,
+                &process.profiles,
+                desired,
+            ) > budget
         {
             desired -= 1;
         }
-        let minimum_estimate =
-            estimated_tokens_for_selection(classification, &process.profiles, process.min);
+        let minimum_estimate = estimated_tokens_for_selection(
+            classification,
+            selection_text,
+            &process.profiles,
+            process.min,
+        );
         if minimum_estimate > budget {
             return WorkflowProcessPlan {
                 enabled: true,
@@ -1362,12 +1431,13 @@ fn plan_process(
         }
     }
 
-    let selected_profiles = select_profiles(classification, &process.profiles, desired);
+    let selected_profiles =
+        roles::select_profiles(classification, selection_text, &process.profiles, desired);
     let turn_key = sha256_bytes(turn_id.as_bytes());
     let turn_key = &turn_key[..12];
     let estimated_tokens = selected_profiles
         .iter()
-        .map(|profile| estimated_profile_tokens(profile))
+        .map(|selection| estimated_profile_tokens(selection.profile))
         .fold(0, u64::saturating_add);
     WorkflowProcessPlan {
         enabled: true,
@@ -1375,20 +1445,28 @@ fn plan_process(
         selected: selected_profiles
             .into_iter()
             .enumerate()
-            .map(|(index, profile)| WorkflowAgentPlan {
+            .map(|(index, selection)| WorkflowAgentPlan {
                 task_name: format!(
                     "workflow_{}_{}_{}",
                     turn_key,
                     kind.label().to_ascii_lowercase(),
                     index + 1
                 ),
-                name: profile.name.clone(),
-                role: profile.role.clone(),
-                agent_type: profile.agent_type.clone(),
-                model: profile.model.clone(),
-                reasoning_effort: profile.reasoning_effort.clone(),
-                token_budget: profile.token_budget,
-                context_budget: profile.context_budget,
+                name: selection.profile.name.clone(),
+                role: selection.profile.role.clone(),
+                agent_type: selection.profile.agent_type.clone(),
+                profile_source: selection.profile.source.label().to_string(),
+                selection_reason: selection.selection_reason,
+                matched_selection_keywords: selection.matched_keywords,
+                role_source: None,
+                role_fingerprint: None,
+                role_preflight: WorkflowRolePreflightStatus::Pending,
+                role_instruction_tokens: 0,
+                role_fingerprint_sha256: None,
+                model: selection.profile.model.clone(),
+                reasoning_effort: selection.profile.reasoning_effort.clone(),
+                token_budget: selection.profile.token_budget,
+                context_budget: selection.profile.context_budget,
                 read_only: true,
             })
             .collect(),
@@ -1398,39 +1476,6 @@ fn plan_process(
         budget_message,
         change_digest_sha256: None,
     }
-}
-
-fn select_profiles<'a>(
-    classification: &RequestClassification,
-    profiles: &'a [WorkflowAgentProfileConfig],
-    count: usize,
-) -> Vec<&'a WorkflowAgentProfileConfig> {
-    let mut ranked = profiles
-        .iter()
-        .enumerate()
-        .map(|(index, profile)| {
-            let text = format!("{} {}", profile.name, profile.role).to_lowercase();
-            let relevance = classification
-                .domains
-                .iter()
-                .filter(|domain| profile_matches_domain(&text, domain))
-                .count();
-            let risk_relevance = usize::from(
-                classification.risk != RequestRisk::Routine
-                    && (text.contains("security")
-                        || text.contains("sicherheit")
-                        || text.contains("reliability")
-                        || text.contains("zuverläss")),
-            );
-            (relevance + risk_relevance, index, profile)
-        })
-        .collect::<Vec<_>>();
-    ranked.sort_by_key(|(score, index, _)| (std::cmp::Reverse(*score), *index));
-    ranked
-        .into_iter()
-        .take(count)
-        .map(|(_, _, profile)| profile)
-        .collect()
 }
 
 fn profile_matches_domain(profile: &str, domain: &str) -> bool {
@@ -1455,12 +1500,13 @@ fn profile_matches_domain(profile: &str, domain: &str) -> bool {
 
 fn estimated_tokens_for_selection(
     classification: &RequestClassification,
+    selection_text: &str,
     profiles: &[WorkflowAgentProfileConfig],
     count: usize,
 ) -> u64 {
-    select_profiles(classification, profiles, count)
+    roles::select_profiles(classification, selection_text, profiles, count)
         .into_iter()
-        .map(estimated_profile_tokens)
+        .map(|selection| estimated_profile_tokens(selection.profile))
         .fold(0, u64::saturating_add)
 }
 

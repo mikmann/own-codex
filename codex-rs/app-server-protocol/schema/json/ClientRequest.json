@@ -5383,6 +5383,16 @@
           "type": "object"
         }
       ]
+    },
+    "WorkflowType": {
+      "description": "Extended-workflow selection applied to future root requests in a thread.",
+      "enum": [
+        "auto",
+        "inactive",
+        "concept",
+        "workOrder"
+      ],
+      "type": "string"
     }
   },
   "description": "Request from the client to the server.",

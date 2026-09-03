@@ -496,6 +496,10 @@ impl ChatWidget {
         self.set_approval_policy(settings.approval_policy);
         self.set_approvals_reviewer(settings.approvals_reviewer.to_core());
         self.config.personality = settings.personality;
+        self.config.extended_workflow.workflow_type = settings.workflow_type.to_core();
+        self.config.extended_workflow.effective_request_class = settings
+            .effective_request_class
+            .map(codex_app_server_protocol::WorkflowRequestClass::to_core);
 
         let permission_profile = PermissionProfile::from_legacy_sandbox_policy_for_cwd(
             &settings.sandbox_policy.to_core(),

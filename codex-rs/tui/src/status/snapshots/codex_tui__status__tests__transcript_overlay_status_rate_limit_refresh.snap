@@ -7,7 +7,7 @@ before:
 /status
 
 ╭──────────────────────────────────────────────────────────────────────────╮
-│  >_ codex-extended-workflow (v0.147.1-alpha-9)                           │
+│  >_ codex-extended-workflow (v0.147.1-alpha-10)                          │
 │                                                                          │
 │ Visit https://chatgpt.com/codex/settings/usage for up-to-date            │
 │ information on rate limits and credits                                   │
@@ -16,13 +16,13 @@ before:
 │  Directory: [[workspace]]                                                │
 │  Permissions:   Custom (workspace with network access, Ask for approval) │
 │  Agents.md:     <none>                                                   │
+│  Workflow type:             inactive                                     │
+│  Effective request class:   none                                         │
+│  Workflow budget:           inactive                                     │
 │                                                                          │
 │  Token usage:   0 total  (0 input + 0 output)                            │
 │  Limits:        refresh requested; run /status again shortly.            │
 ╰──────────────────────────────────────────────────────────────────────────╯
-~
-~
-~
 ~
 ~
 ~
@@ -39,7 +39,7 @@ after:
 /status
 
 ╭───────────────────────────────────────────────────────────────────────────╮
-│  >_ codex-extended-workflow (v0.147.1-alpha-9)                            │
+│  >_ codex-extended-workflow (v0.147.1-alpha-10)                           │
 │                                                                           │
 │ Visit https://chatgpt.com/codex/settings/usage for up-to-date             │
 │ information on rate limits and credits                                    │
@@ -48,6 +48,9 @@ after:
 │  Directory: [[workspace]]                                                 │
 │  Permissions:    Custom (workspace with network access, Ask for approval) │
 │  Agents.md:      <none>                                                   │
+│  Workflow type:             inactive                                      │
+│  Effective request class:   none                                          │
+│  Workflow budget:           inactive                                      │
 │                                                                           │
 │  Token usage:    0 total  (0 input + 0 output)                            │
 │  spark limit:                                                             │
@@ -56,9 +59,6 @@ after:
 ╰───────────────────────────────────────────────────────────────────────────╯
 
 next message
-~
-~
-~
 ~
 ~
 ───────────────────────────────────────────────────────────────────────── 100% ─

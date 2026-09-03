@@ -93,6 +93,7 @@ fn turn_context_is_bounded_json() {
 fn oversized_profile_configuration_is_rejected_at_the_context_boundary() {
     use codex_config::extended_workflow::EXTENDED_WORKFLOW_MAX_PROFILE_FIELD_BYTES;
     use codex_config::extended_workflow::WorkflowAgentProfileConfig;
+    use codex_config::extended_workflow::WorkflowProfileSource;
 
     let profile = |index: usize| WorkflowAgentProfileConfig {
         name: format!(
@@ -104,6 +105,8 @@ fn oversized_profile_configuration_is_rejected_at_the_context_boundary() {
             "r".repeat(EXTENDED_WORKFLOW_MAX_PROFILE_FIELD_BYTES - 2)
         ),
         agent_type: Some("a".repeat(EXTENDED_WORKFLOW_MAX_PROFILE_FIELD_BYTES)),
+        selection_keywords: Vec::new(),
+        source: WorkflowProfileSource::Profiles,
         model: Some("m".repeat(EXTENDED_WORKFLOW_MAX_PROFILE_FIELD_BYTES)),
         reasoning_effort: None,
         token_budget: Some(u64::MAX),

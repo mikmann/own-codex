@@ -1,4 +1,8 @@
 use anyhow::Result;
+use codex_config::extended_workflow::WorkflowAgentProfileConfig;
+use codex_config::extended_workflow::WorkflowProfileSource;
+use codex_core::config::AgentRoleConfig;
+use codex_protocol::config_types::WorkflowType;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
@@ -405,6 +409,82 @@ impl wiremock::Respond for WorkflowExpertSpawnResponder {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn default_workflow_role_persists_a_resumable_role_binding() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    const ROOT_PROMPT: &str =
+        "Create a concept for a database migration with authentication changes.";
+    const SPAWN_CALL_ID: &str = "call-spawn-default-workflow-role";
+
+    let server = start_mock_server().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(BodyContains(ROOT_PROMPT))
+        .respond_with(WorkflowExpertSpawnResponder {
+            child_task: "Inspect the requested migration concept.",
+            call_id: SPAWN_CALL_ID,
+        })
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            request_header(request, "x-openai-subagent") == Some("collab_spawn")
+        },
+        sse(vec![
+            ev_response_created("resp-default-workflow-role-child"),
+            ev_assistant_message(
+                "msg-default-workflow-role-child",
+                r#"{"subject":"migration concept","summary":"default role binding inspected","findings":[],"recommendations":[],"evidence":[],"uncertainties":[]}"#,
+            ),
+            ev_completed("resp-default-workflow-role-child"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| request_body_contains(request, SPAWN_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-default-workflow-role-root-finished"),
+            ev_assistant_message("msg-default-workflow-role-root-finished", "expert started"),
+            ev_completed("resp-default-workflow-role-root-finished"),
+        ]),
+    )
+    .await;
+
+    let mut builder = test_codex().with_config(|config| {
+        config.extended_workflow.enabled = true;
+        config.extended_workflow.workflow_type = WorkflowType::Concept;
+        config.extended_workflow.experts.min = 1;
+        config.extended_workflow.experts.max = 1;
+        config.extended_workflow.reviewers.enabled = false;
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+    let mut created_threads = test.thread_manager.subscribe_thread_created();
+    test.submit_turn(ROOT_PROMPT).await?;
+
+    let child_thread_id =
+        tokio::time::timeout(Duration::from_secs(10), created_threads.recv()).await??;
+    let child_source = test
+        .thread_manager
+        .get_thread(child_thread_id)
+        .await?
+        .config_snapshot()
+        .await
+        .session_source;
+    assert_eq!(
+        (
+            child_source.get_agent_role(),
+            child_source
+                .get_extended_workflow_role_fingerprint()
+                .map(|fingerprint| fingerprint.len()),
+            child_source.is_read_only_subagent(),
+        ),
+        (Some("default".to_string()), Some(64), true)
+    );
+    Ok(())
+}
+
 #[derive(Debug)]
 struct WorkflowReviewerSpawnResponder {
     call_id: &'static str,
@@ -680,6 +760,48 @@ async fn disabled_workflow_adds_no_prompt_fragments_or_workflow_tools() -> Resul
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inactive_workflow_type_uses_normal_codex_without_a_workflow_budget() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let request = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-inactive"),
+            ev_assistant_message("msg-inactive", "done"),
+            ev_completed("resp-inactive"),
+        ]),
+    )
+    .await;
+    let mut builder = test_codex().with_config(|config| {
+        config.extended_workflow.enabled = true;
+        config.extended_workflow.workflow_type = WorkflowType::Inactive;
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+    test.submit_turn("Implementiere eine Änderung.").await?;
+
+    let request = request.single_request();
+    let developer_text = request.message_input_texts("developer").join("\n");
+    assert!(!developer_text.contains("<extended_workflow_policy>"));
+    assert!(!developer_text.contains("<extended_workflow_turn>"));
+    let body = request.body_json();
+    let names = tool_names(&body);
+    assert!(!names.contains(&"plan_workflow_reviewers"));
+    assert!(!names.contains(&"validate_workflow_result"));
+    let state_db = StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(test.config.codex_home.clone()),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    assert_eq!(
+        state_db
+            .workflow_token_budget(test.session_configured.thread_id)
+            .await?,
+        None
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ticket_validation_allows_exactly_one_changed_correction() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let server = start_mock_server().await;
@@ -857,6 +979,7 @@ async fn workflow_expert_shell_reads_but_write_fails_closed_without_creating_a_f
     const READ_CALL_ID: &str = "call-read-read-only";
     const WRITE_CALL_ID: &str = "call-write-read-only";
     const READ_SENTINEL: &str = "workflow read access confirmed";
+    const ROLE_SENTINEL: &str = "CUSTOM_WORKFLOW_ROLE_INSTRUCTIONS_REACHED_CHILD";
 
     let server = start_mock_server().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
@@ -878,7 +1001,7 @@ async fn workflow_expert_shell_reads_but_write_fails_closed_without_creating_a_f
         "timeout_ms": 5_000
     })
     .to_string();
-    mount_sse_once_match(
+    let child_read = mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
             request_header(request, "x-openai-subagent") == Some("collab_spawn")
@@ -944,6 +1067,35 @@ async fn workflow_expert_shell_reads_but_write_fails_closed_without_creating_a_f
 
     let mut builder = test_codex().with_config(|config| {
         config.extended_workflow.enabled = true;
+        config.extended_workflow.experts.min = 1;
+        config.extended_workflow.experts.max = 1;
+        config.extended_workflow.experts.profiles = vec![WorkflowAgentProfileConfig {
+            name: "custom_security".to_string(),
+            role: "Custom security".to_string(),
+            agent_type: Some("custom_security".to_string()),
+            selection_keywords: vec!["security".to_string()],
+            source: WorkflowProfileSource::Profiles,
+            model: None,
+            reasoning_effort: None,
+            token_budget: None,
+            context_budget: None,
+        }];
+        let agents_dir = config.codex_home.join("agents");
+        std::fs::create_dir_all(&agents_dir).expect("create workflow role directory");
+        let role_path = agents_dir.join("custom-security.toml");
+        std::fs::write(
+            &role_path,
+            format!("developer_instructions = {ROLE_SENTINEL:?}"),
+        )
+        .expect("write workflow role");
+        config.agent_roles.insert(
+            "custom_security".to_string(),
+            AgentRoleConfig {
+                description: Some("Custom workflow security role".to_string()),
+                config_file: Some(role_path.as_path().to_path_buf()),
+                nickname_candidates: None,
+            },
+        );
         config.set_windows_sandbox_enabled(/*value*/ true);
     });
     let test = builder.build(&server).await?;
@@ -975,6 +1127,14 @@ async fn workflow_expert_shell_reads_but_write_fails_closed_without_creating_a_f
     .await?;
     assert!(!write_output.trim().is_empty());
     assert!(!marker.exists(), "read-only expert created {marker:?}");
+    assert!(
+        child_read
+            .single_request()
+            .message_input_texts("developer")
+            .join("\n")
+            .contains(ROLE_SENTINEL),
+        "resolved workflow role instructions did not reach the selected child"
+    );
     Ok(())
 }
 

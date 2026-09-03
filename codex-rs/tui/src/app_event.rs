@@ -55,6 +55,7 @@ use codex_features::Feature;
 use codex_plugin::PluginCapabilitySummary;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::config_types::Personality;
+use codex_protocol::config_types::WorkflowType;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
 
@@ -793,6 +794,9 @@ pub(crate) enum AppEvent {
 
     /// Update the current personality in the running app and widget.
     UpdatePersonality(Personality),
+
+    /// Update the extended-workflow selection for future root requests.
+    UpdateWorkflowType(WorkflowType),
 
     /// Finish a settings selection after its preceding update events have been applied.
     SettingsSelectionClosed,

@@ -1171,6 +1171,14 @@ impl App {
                 self.sync_active_thread_personality_setting(app_server, personality)
                     .await;
             }
+            AppEvent::UpdateWorkflowType(workflow_type) => {
+                if self
+                    .sync_active_thread_workflow_type_setting(app_server, workflow_type)
+                    .await
+                {
+                    self.chat_widget.set_workflow_type(workflow_type);
+                }
+            }
             AppEvent::SettingsSelectionClosed => {
                 self.app_event_tx.send(AppEvent::SettingsSelectionSettled);
             }

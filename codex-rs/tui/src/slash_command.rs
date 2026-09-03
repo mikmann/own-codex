@@ -38,6 +38,7 @@ pub enum SlashCommand {
     App,
     Init,
     PrepareExtendWorkflow,
+    WorkflowType,
     WorkflowResetBudget,
     Compact,
     Plan,
@@ -92,6 +93,9 @@ impl SlashCommand {
             }
             SlashCommand::WorkflowResetBudget => {
                 "abandon the active workflow and reset only its token counter"
+            }
+            SlashCommand::WorkflowType => {
+                "choose automatic, inactive, concept, or work-order workflow handling"
             }
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
             SlashCommand::Review => "review my current changes and find issues",
@@ -179,6 +183,7 @@ impl SlashCommand {
                 | SlashCommand::Resume
                 | SlashCommand::SandboxReadRoot
                 | SlashCommand::PrepareExtendWorkflow
+                | SlashCommand::WorkflowType
         )
     }
 
@@ -205,6 +210,7 @@ impl SlashCommand {
             | SlashCommand::Fork
             | SlashCommand::Init
             | SlashCommand::PrepareExtendWorkflow
+            | SlashCommand::WorkflowType
             | SlashCommand::WorkflowResetBudget
             | SlashCommand::Compact
             | SlashCommand::Keymap

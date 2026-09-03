@@ -3829,11 +3829,15 @@ impl Config {
                 .unwrap_or_default(),
         };
         let code_mode = resolve_code_mode_config(&cfg);
-        let extended_workflow = ExtendedWorkflowConfig::resolve_with_default(
+        let mut extended_workflow = ExtendedWorkflowConfig::resolve_with_default(
             cfg.extended_workflow.as_ref(),
             extended_workflow_default_enabled,
         )
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
+        extended_workflow.workflow_type_from_session_flags = config_layer_stack
+            .origins()
+            .get("extended_workflow.workflow_type")
+            .is_some_and(|origin| origin.name == ConfigLayerSource::SessionFlags);
         let multi_agent_v2 = resolve_multi_agent_v2_config_with_default(
             &cfg,
             extended_workflow_multi_agent_default(&extended_workflow),

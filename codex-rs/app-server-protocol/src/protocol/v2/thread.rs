@@ -48,6 +48,27 @@ pub enum ThreadStartSource {
     Clear,
 }
 
+v2_enum_from_core! {
+    /// Extended-workflow selection applied to future root requests in a thread.
+    #[derive(Default)]
+    pub enum WorkflowType from codex_protocol::config_types::WorkflowType {
+        #[default]
+        Auto,
+        Inactive,
+        Concept,
+        WorkOrder,
+    }
+}
+
+v2_enum_from_core! {
+    /// Effective request class used by the latest classified root turn.
+    pub enum WorkflowRequestClass from codex_protocol::config_types::WorkflowRequestClass {
+        SimpleAnswer,
+        WorkOrder,
+        Concept,
+    }
+}
+
 // === Threads, Turns, and Items ===
 // Thread APIs
 #[derive(
@@ -196,6 +217,12 @@ pub struct ThreadStartResponse {
     #[serde(default)]
     pub active_permission_profile: Option<ActivePermissionProfile>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Extended-workflow selection restored for this thread.
+    #[serde(default)]
+    pub workflow_type: WorkflowType,
+    /// Effective request class from the latest classified root turn, if any.
+    #[serde(default)]
+    pub effective_request_class: Option<WorkflowRequestClass>,
     /// @deprecated Always `explicitRequestOnly`. Use `reasoningEffort` for Ultra behavior.
     #[experimental("thread/start.multiAgentMode")]
     #[serde(default)]
@@ -267,6 +294,9 @@ pub struct ThreadSettingsUpdateParams {
     /// Override the personality for subsequent turns.
     #[ts(optional = nullable)]
     pub personality: Option<Personality>,
+    /// Override extended-workflow classification for subsequent root turns.
+    #[ts(optional = nullable)]
+    pub workflow_type: Option<WorkflowType>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -294,6 +324,10 @@ pub struct ThreadSettings {
     #[serde(default)]
     pub multi_agent_mode: MultiAgentMode,
     pub personality: Option<Personality>,
+    #[serde(default)]
+    pub workflow_type: WorkflowType,
+    #[serde(default)]
+    pub effective_request_class: Option<WorkflowRequestClass>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -429,6 +463,12 @@ pub struct ThreadResumeResponse {
     #[serde(default)]
     pub active_permission_profile: Option<ActivePermissionProfile>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Extended-workflow selection restored for this thread.
+    #[serde(default)]
+    pub workflow_type: WorkflowType,
+    /// Effective request class from the latest classified root turn, if any.
+    #[serde(default)]
+    pub effective_request_class: Option<WorkflowRequestClass>,
     /// @deprecated Always `explicitRequestOnly`. Use `reasoningEffort` for Ultra behavior.
     #[experimental("thread/resume.multiAgentMode")]
     #[serde(default)]
@@ -621,6 +661,12 @@ pub struct ThreadForkResponse {
     #[serde(default)]
     pub active_permission_profile: Option<ActivePermissionProfile>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Extended-workflow selection inherited by this fork.
+    #[serde(default)]
+    pub workflow_type: WorkflowType,
+    /// Effective request class inherited from the source thread, if any.
+    #[serde(default)]
+    pub effective_request_class: Option<WorkflowRequestClass>,
     /// @deprecated Always `explicitRequestOnly`. Use `reasoningEffort` for Ultra behavior.
     #[experimental("thread/fork.multiAgentMode")]
     #[serde(default)]

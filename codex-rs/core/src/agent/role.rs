@@ -21,12 +21,268 @@ use codex_exec_server::LOCAL_FS;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::LazyLock;
 use toml::Value as TomlValue;
 
 /// The role name used when a caller omits `agent_type`.
 pub const DEFAULT_ROLE_NAME: &str = "default";
 const AGENT_TYPE_UNAVAILABLE_ERROR: &str = "agent type is currently not available";
+
+/// Bounded, validated material used to bind an extended-workflow plan to one role revision.
+pub(crate) struct WorkflowRoleMaterial {
+    pub(crate) role_name: String,
+    pub(crate) source: &'static str,
+    pub(crate) canonical_path: Option<PathBuf>,
+    pub(crate) config_bytes: Vec<u8>,
+    pub(crate) instruction_tokens: u64,
+    role_layer_toml: TomlValue,
+}
+
+/// Resolves one workflow role without applying it to a child configuration.
+///
+/// Configured role files must remain inside the configuration layer that declared them (or its
+/// discovered `agents` directory), and workflow roles may contain only developer instructions or
+/// settings that monotonically reduce privileges. The returned bytes are suitable for a
+/// plan-to-spawn fingerprint; callers must resolve them again immediately before spawning.
+pub(crate) async fn load_workflow_role_material(
+    config: &Config,
+    role_name: &str,
+) -> Result<WorkflowRoleMaterial, String> {
+    let role = resolve_role_config(config, role_name)
+        .ok_or_else(|| format!("unknown agent_type '{role_name}'"))?;
+    let is_built_in = !config.agent_roles.contains_key(role_name);
+    let Some(config_file) = role.config_file.as_ref() else {
+        return Ok(WorkflowRoleMaterial {
+            role_name: role_name.to_string(),
+            source: if is_built_in {
+                "built-in"
+            } else {
+                "configured-inline"
+            },
+            canonical_path: None,
+            config_bytes: role
+                .description
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes()
+                .to_vec(),
+            instruction_tokens: 0,
+            role_layer_toml: TomlValue::Table(Default::default()),
+        });
+    };
+
+    let (source, canonical_path, contents, role_file_label, role_config_base) = if is_built_in {
+        let contents = built_in::config_file_contents(config_file)
+            .ok_or_else(|| format!("built-in agent_type '{role_name}' is unavailable"))?
+            .to_string();
+        (
+            "built-in",
+            None,
+            contents,
+            config_file.clone(),
+            config.codex_home.as_path().to_path_buf(),
+        )
+    } else {
+        let canonical_path = tokio::fs::canonicalize(config_file)
+            .await
+            .map_err(|error| {
+                format!(
+                    "agent_type '{role_name}' could not resolve role file {}: {error}",
+                    config_file.display()
+                )
+            })?;
+        validate_workflow_role_path(config, role_name, &canonical_path).await?;
+        let contents = tokio::fs::read_to_string(&canonical_path)
+            .await
+            .map_err(|error| {
+                format!(
+                    "agent_type '{role_name}' could not read role file {}: {error}",
+                    canonical_path.display()
+                )
+            })?;
+        let role_config_base = canonical_path
+            .parent()
+            .ok_or_else(|| format!("agent_type '{role_name}' has no trusted role directory"))?
+            .to_path_buf();
+        (
+            "configured-file",
+            Some(canonical_path.clone()),
+            contents,
+            canonical_path,
+            role_config_base,
+        )
+    };
+
+    let parsed = parse_agent_role_file_contents(
+        &contents,
+        &role_file_label,
+        &role_config_base,
+        Some(role_name),
+    )
+    .map_err(|_error| {
+        tracing::warn!(
+            role_name,
+            path = %role_file_label.display(),
+            "failed to parse extended-workflow role file"
+        );
+        format!(
+            "agent_type '{role_name}' role file {} is invalid or contains unsupported values",
+            role_file_label.display()
+        )
+    })?;
+    if !is_built_in {
+        validate_workflow_role_restrictions(role_name, &parsed.config)?;
+    }
+    let instruction_tokens = parsed
+        .config
+        .get("developer_instructions")
+        .and_then(TomlValue::as_str)
+        .map(|instructions| u64::try_from(instructions.len().div_ceil(4)).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    deserialize_config_toml_with_base(parsed.config.clone(), &role_config_base).map_err(
+        |_error| {
+            tracing::warn!(
+                role_name,
+                path = %role_file_label.display(),
+                "failed to validate extended-workflow role file"
+            );
+            format!(
+                "agent_type '{role_name}' role file {} is not a valid configuration layer",
+                role_file_label.display()
+            )
+        },
+    )?;
+    let role_layer_toml = resolve_relative_paths_in_config_toml(parsed.config, &role_config_base)
+        .map_err(|_error| {
+        tracing::warn!(
+            role_name,
+            path = %role_file_label.display(),
+            "failed to resolve extended-workflow role file paths"
+        );
+        format!(
+            "agent_type '{role_name}' role file {} contains invalid relative paths",
+            role_file_label.display()
+        )
+    })?;
+
+    Ok(WorkflowRoleMaterial {
+        role_name: role_name.to_string(),
+        source,
+        canonical_path,
+        config_bytes: contents.into_bytes(),
+        instruction_tokens,
+        role_layer_toml,
+    })
+}
+
+/// Applies exactly the already validated bytes represented by `material`.
+///
+/// This avoids a second path-based read between fingerprint validation and role application. The
+/// caller remains responsible for comparing the material fingerprint with its persisted or
+/// server-owned expected value before calling this function.
+pub(crate) async fn apply_workflow_role_material_to_config(
+    config: &mut Config,
+    material: &WorkflowRoleMaterial,
+) -> Result<(), String> {
+    if material
+        .role_layer_toml
+        .as_table()
+        .is_some_and(toml::map::Map::is_empty)
+    {
+        return Ok(());
+    }
+    let preserve_current_provider = material.role_layer_toml.get("model_provider").is_none();
+    let preserve_current_service_tier = material.role_layer_toml.get("service_tier").is_none();
+    *config = reload::build_next_config(
+        config,
+        material.role_layer_toml.clone(),
+        RoleDeveloperInstructions::PreserveCallerInstructions,
+        preserve_current_provider,
+        preserve_current_service_tier,
+    )
+    .await
+    .map_err(|_error| {
+        tracing::warn!(
+            role_name = %material.role_name,
+            "failed to apply validated extended-workflow role layer"
+        );
+        format!(
+            "agent_type '{}' could not apply its validated role layer",
+            material.role_name
+        )
+    })?;
+    Ok(())
+}
+
+async fn validate_workflow_role_path(
+    config: &Config,
+    role_name: &str,
+    canonical_path: &Path,
+) -> Result<(), String> {
+    let mut declaring_root = None;
+    let mut discovery_roots = Vec::new();
+    for layer in config.config_layer_stack.all_layers_low_to_high() {
+        let Some(config_folder) = layer.config_folder() else {
+            continue;
+        };
+        discovery_roots.push(config_folder.as_path().join("agents"));
+        if layer
+            .config
+            .get("agents")
+            .and_then(TomlValue::as_table)
+            .and_then(|agents| agents.get(role_name))
+            .and_then(TomlValue::as_table)
+            .is_some_and(|role| role.contains_key("config_file"))
+        {
+            declaring_root = Some(config_folder.as_path().to_path_buf());
+        }
+    }
+
+    let candidate_roots = declaring_root.map_or(discovery_roots, |root| vec![root]);
+    for root in candidate_roots {
+        let Ok(canonical_root) = tokio::fs::canonicalize(&root).await else {
+            continue;
+        };
+        if canonical_path.starts_with(&canonical_root) {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "agent_type '{role_name}' role file {} is outside its trusted configuration directory",
+        canonical_path.display()
+    ))
+}
+
+fn validate_workflow_role_restrictions(
+    role_name: &str,
+    role_config: &TomlValue,
+) -> Result<(), String> {
+    let Some(table) = role_config.as_table() else {
+        return Err(format!(
+            "agent_type '{role_name}' role configuration is not a table"
+        ));
+    };
+    for (key, value) in table {
+        let strictly_reduces_permissions = match key.as_str() {
+            "developer_instructions" => true,
+            "approval_policy" => value.as_str() == Some("never"),
+            "sandbox_mode" => value.as_str() == Some("read-only"),
+            "allow_login_shell"
+            | "include_apps_instructions"
+            | "include_collaboration_mode_instructions"
+            | "include_environment_context" => value.as_bool() == Some(false),
+            "web_search" => value.as_str() == Some("disabled"),
+            _ => false,
+        };
+        if !strictly_reduces_permissions {
+            return Err(format!(
+                "agent_type '{role_name}' role setting '{key}' is not permitted in an extended workflow because it could replace profile-owned behavior or widen child capabilities"
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Applies a named role layer to `config` while preserving caller-owned provider settings.
 ///

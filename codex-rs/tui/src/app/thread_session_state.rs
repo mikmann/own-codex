@@ -84,6 +84,8 @@ impl App {
                 // thread-scoped state from the currently active session.
                 session.collaboration_mode = None;
                 session.personality = None;
+                session.workflow_type = codex_protocol::config_types::WorkflowType::Auto;
+                session.effective_request_class = None;
             }
             session
         } else {
@@ -107,6 +109,8 @@ impl App {
                 reasoning_effort: self.chat_widget.current_reasoning_effort(),
                 collaboration_mode: None,
                 personality: None,
+                workflow_type: self.config.extended_workflow.workflow_type,
+                effective_request_class: None,
                 message_history: None,
                 network_proxy: None,
                 rollout_path: thread.path.clone(),
@@ -189,6 +193,8 @@ mod tests {
             reasoning_effort: None,
             collaboration_mode: None,
             personality: None,
+            workflow_type: codex_protocol::config_types::WorkflowType::Auto,
+            effective_request_class: None,
             message_history: None,
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),

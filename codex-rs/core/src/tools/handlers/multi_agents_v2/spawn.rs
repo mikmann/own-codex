@@ -127,7 +127,13 @@ async fn handle_spawn_agent(
         });
     let role_name = workflow_identity
         .as_ref()
-        .and_then(|identity| identity.profile.agent_type.as_deref())
+        .map(|identity| {
+            identity
+                .profile
+                .agent_type
+                .as_deref()
+                .unwrap_or(DEFAULT_ROLE_NAME)
+        })
         .or(args.agent_type.as_deref());
     let requested_model = workflow_identity
         .as_ref()
@@ -150,7 +156,16 @@ async fn handle_spawn_agent(
         reject_full_fork_agent_type_override(role_name)?;
     }
     if !is_full_history_fork {
-        apply_spawn_agent_role(&session, &mut config, role_name).await?;
+        if let Some(identity) = workflow_identity.as_ref() {
+            crate::tools::handlers::multi_agents_common::apply_workflow_spawn_agent_role(
+                &session,
+                &mut config,
+                &identity.profile,
+            )
+            .await?;
+        } else {
+            apply_spawn_agent_role(&session, &mut config, role_name).await?;
+        }
     }
     apply_requested_spawn_agent_model_overrides(
         &session,
@@ -228,6 +243,9 @@ async fn handle_spawn_agent(
             workflow_root_sha256: workflow_identity
                 .as_ref()
                 .map(|identity| identity.root_request_sha256.as_str()),
+            role_fingerprint_sha256: workflow_identity
+                .as_ref()
+                .and_then(|identity| identity.profile.role_fingerprint_sha256.as_deref()),
             context_budget: workflow_identity
                 .as_ref()
                 .and_then(|identity| identity.profile.context_budget),

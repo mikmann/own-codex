@@ -242,6 +242,7 @@ impl ChatWidget {
             collaboration_mode,
             reasoning_effort_override,
             agents_summary,
+            self.workflow_token_budget,
             refreshing_rate_limits,
         );
         if let Some(request_id) = request_id {

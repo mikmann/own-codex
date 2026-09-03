@@ -223,6 +223,7 @@ pub(crate) mod time_reminder;
 mod token_budget;
 pub(crate) mod turn;
 pub(crate) mod turn_context;
+mod workflow_type;
 mod world_state;
 use self::code_mode_warning::unsupported_code_mode_warning;
 use self::config_lock::export_config_lock_if_configured;
@@ -706,6 +707,8 @@ impl Session {
         );
         let service_tier =
             get_service_tier(config.service_tier.clone(), fast_mode_enabled, &model_info);
+        let (workflow_type, effective_request_class) =
+            workflow_type::initial_workflow_state(&config, &conversation_history);
         let session_configuration = SessionConfiguration {
             provider: create_model_provider(
                 config.model_provider.clone(),
@@ -716,6 +719,8 @@ impl Session {
             service_tier,
             developer_instructions: config.developer_instructions.clone(),
             personality: config.personality,
+            workflow_type,
+            effective_request_class,
             base_instructions,
             compact_prompt: config.compact_prompt.clone(),
             approval_policy: config.permissions.approval_policy.clone(),

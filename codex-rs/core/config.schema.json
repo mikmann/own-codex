@@ -987,7 +987,7 @@
           "$ref": "#/definitions/WorkflowProcessToml"
         },
         "max_result_bytes": {
-          "description": "Hard UTF-8 byte limit for one structured expert or reviewer result.",
+          "description": "Hard UTF-8 byte limit for one structured expert, reviewer, concept, or ticket result.",
           "format": "uint",
           "minimum": 0.0,
           "type": "integer"
@@ -1000,6 +1000,14 @@
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "workflow_type": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/WorkflowType"
+            }
+          ],
+          "description": "Selects automatic classification, bypass, concept, or work-order orchestration."
         }
       },
       "type": "object"
@@ -4947,6 +4955,14 @@
         "role": {
           "type": "string"
         },
+        "selection_keywords": {
+          "default": [],
+          "description": "Local deterministic selection hints. These strings are never injected as instructions.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "token_budget": {
           "description": "Advisory per-subagent token budget; exact provider enforcement is not implied.",
           "format": "uint64",
@@ -4964,6 +4980,13 @@
       "additionalProperties": false,
       "description": "Independent settings for either the expert or reviewer process.",
       "properties": {
+        "additional_profiles": {
+          "description": "Appends profiles to the built-in or explicitly replaced catalog.",
+          "items": {
+            "$ref": "#/definitions/WorkflowAgentProfileToml"
+          },
+          "type": "array"
+        },
         "enabled": {
           "type": "boolean"
         },
@@ -4978,6 +5001,7 @@
           "type": "integer"
         },
         "profiles": {
+          "description": "Replaces the built-in catalog when present.",
           "items": {
             "$ref": "#/definitions/WorkflowAgentProfileToml"
           },
@@ -4991,6 +5015,39 @@
         }
       },
       "type": "object"
+    },
+    "WorkflowType": {
+      "description": "Selects how the extended workflow classifies future root requests in a thread.",
+      "oneOf": [
+        {
+          "description": "Preserve automatic request classification.",
+          "enum": [
+            "auto"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Bypass extended-workflow orchestration for future root requests.",
+          "enum": [
+            "inactive"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Force the effective request class to `concept`.",
+          "enum": [
+            "concept"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Force the effective request class to `work_order`.",
+          "enum": [
+            "work-order"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "WorkspaceRootsToml": {
       "type": "object"

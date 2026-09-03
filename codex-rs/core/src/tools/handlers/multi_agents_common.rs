@@ -3,6 +3,7 @@ use crate::agent::role::apply_role_to_config_for_multi_agent_v2;
 use crate::config::Config;
 use crate::config::DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS;
 use crate::config::HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS;
+use crate::extended_workflow::WorkflowProcessPlan;
 use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -135,6 +136,7 @@ pub(crate) struct ThreadSpawnMetadata<'a> {
     pub(crate) workflow_turn_id: Option<&'a str>,
     pub(crate) assignment_sha256: Option<&'a str>,
     pub(crate) workflow_root_sha256: Option<&'a str>,
+    pub(crate) role_fingerprint_sha256: Option<&'a str>,
     pub(crate) context_budget: Option<u64>,
 }
 
@@ -165,6 +167,7 @@ pub(crate) fn thread_spawn_source(
             workflow_turn_id: metadata.workflow_turn_id,
             assignment_sha256: metadata.assignment_sha256,
             workflow_root_sha256: metadata.workflow_root_sha256,
+            role_fingerprint_sha256: metadata.role_fingerprint_sha256,
             context_budget: metadata.context_budget,
         },
     );
@@ -438,6 +441,40 @@ pub(crate) async fn apply_spawn_agent_role(
             .await
             .map_err(FunctionCallError::RespondToModel)?;
     }
+    validate_spawn_agent_role_model_settings(
+        session,
+        config,
+        previous_model,
+        previous_reasoning_effort,
+    )
+    .await
+}
+
+pub(crate) async fn apply_workflow_spawn_agent_role(
+    session: &Session,
+    config: &mut Config,
+    profile: &crate::extended_workflow::WorkflowAgentPlan,
+) -> Result<(), FunctionCallError> {
+    let previous_model = config.model.clone();
+    let previous_reasoning_effort = config.model_reasoning_effort.clone();
+    crate::extended_workflow::apply_profile_role_binding(profile, config)
+        .await
+        .map_err(FunctionCallError::RespondToModel)?;
+    validate_spawn_agent_role_model_settings(
+        session,
+        config,
+        previous_model,
+        previous_reasoning_effort,
+    )
+    .await
+}
+
+async fn validate_spawn_agent_role_model_settings(
+    session: &Session,
+    config: &Config,
+    previous_model: Option<String>,
+    previous_reasoning_effort: Option<ReasoningEffort>,
+) -> Result<(), FunctionCallError> {
     if config.model == previous_model && config.model_reasoning_effort == previous_reasoning_effort
     {
         return Ok(());
@@ -466,6 +503,66 @@ pub(crate) async fn apply_spawn_agent_role(
         &model_info.supported_reasoning_levels,
         &reasoning_effort,
     )
+}
+
+/// Resolves every selected workflow profile against the live role and model catalogs before the
+/// first child is started. This is intentionally the same role/model path used by `spawn_agent`.
+pub(crate) async fn preflight_workflow_process_profiles(
+    session: &Session,
+    turn: &TurnContext,
+    plan: &WorkflowProcessPlan,
+) -> Result<(), FunctionCallError> {
+    for profile in &plan.selected {
+        let mut config = turn.config.as_ref().clone();
+        apply_workflow_spawn_agent_role(session, &mut config, profile)
+            .await
+            .map_err(|error| profile_preflight_error(&profile.name, error))?;
+        apply_requested_spawn_agent_model_overrides(
+            session,
+            turn,
+            &mut config,
+            profile.model.as_deref(),
+            profile.reasoning_effort.clone(),
+        )
+        .await
+        .map_err(|error| profile_preflight_error(&profile.name, error))?;
+        config.apply_read_only_subagent_ceiling().map_err(|error| {
+            FunctionCallError::RespondToModel(format!(
+                "workflow profile `{}` failed read-only preflight: {error}",
+                profile.name
+            ))
+        })?;
+        if profile
+            .model
+            .as_deref()
+            .is_some_and(|model| config.model.as_deref() != Some(model))
+        {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "workflow profile `{}` resolved to model {:?}, not its configured model {:?}",
+                profile.name, config.model, profile.model
+            )));
+        }
+        if profile
+            .reasoning_effort
+            .as_ref()
+            .is_some_and(|effort| config.model_reasoning_effort.as_ref() != Some(effort))
+        {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "workflow profile `{}` resolved to reasoning effort {:?}, not its configured effort {:?}",
+                profile.name, config.model_reasoning_effort, profile.reasoning_effort
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn profile_preflight_error(profile_name: &str, error: FunctionCallError) -> FunctionCallError {
+    match error {
+        FunctionCallError::RespondToModel(message) => FunctionCallError::RespondToModel(format!(
+            "workflow profile `{profile_name}` failed runtime preflight: {message}"
+        )),
+        other => other,
+    }
 }
 
 fn find_spawn_agent_model_name(

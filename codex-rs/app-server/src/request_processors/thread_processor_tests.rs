@@ -775,6 +775,8 @@ mod thread_processor_behavior_tests {
             reasoning_effort: None,
             reasoning_summary: None,
             personality: None,
+            workflow_type: codex_protocol::config_types::WorkflowType::Auto,
+            effective_request_class: None,
             collaboration_mode: CollaborationMode {
                 mode: ModeKind::Default,
                 settings: Settings {

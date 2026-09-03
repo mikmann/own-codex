@@ -256,6 +256,8 @@ fn sample_thread_start_response(
         sandbox: AppServerSandboxPolicy::DangerFullAccess,
         active_permission_profile: None,
         reasoning_effort: None,
+        workflow_type: Default::default(),
+        effective_request_class: None,
         multi_agent_mode: Default::default(),
     })
 }
@@ -321,6 +323,8 @@ fn sample_thread_resume_response_with_source(
         sandbox: AppServerSandboxPolicy::DangerFullAccess,
         active_permission_profile: None,
         reasoning_effort: None,
+        workflow_type: Default::default(),
+        effective_request_class: None,
         multi_agent_mode: Default::default(),
         initial_turns_page: None,
         turns_backwards_cursor: None,

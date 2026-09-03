@@ -1933,6 +1933,10 @@ async fn thread_session_state_from_thread_start_response(
         response.runtime_workspace_roots.clone(),
         response.instruction_source_path_uris(),
         response.reasoning_effort.clone(),
+        response.workflow_type.to_core(),
+        response
+            .effective_request_class
+            .map(codex_app_server_protocol::WorkflowRequestClass::to_core),
         config,
     )
     .await
@@ -1974,6 +1978,10 @@ async fn thread_session_state_from_thread_resume_response(
         response.runtime_workspace_roots.clone(),
         response.instruction_source_path_uris(),
         response.reasoning_effort.clone(),
+        response.workflow_type.to_core(),
+        response
+            .effective_request_class
+            .map(codex_app_server_protocol::WorkflowRequestClass::to_core),
         config,
     )
     .await
@@ -2006,6 +2014,10 @@ async fn thread_session_state_from_thread_fork_response(
         response.runtime_workspace_roots.clone(),
         response.instruction_source_path_uris(),
         response.reasoning_effort.clone(),
+        response.workflow_type.to_core(),
+        response
+            .effective_request_class
+            .map(codex_app_server_protocol::WorkflowRequestClass::to_core),
         config,
     )
     .await
@@ -2045,6 +2057,8 @@ async fn thread_session_state_from_thread_response(
     runtime_workspace_roots: Vec<AbsolutePathBuf>,
     instruction_source_paths: Vec<PathUri>,
     reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
+    workflow_type: codex_protocol::config_types::WorkflowType,
+    effective_request_class: Option<codex_protocol::config_types::WorkflowRequestClass>,
     config: &Config,
 ) -> Result<ThreadSessionState, String> {
     let thread_id = ThreadId::from_string(thread_id)
@@ -2075,6 +2089,8 @@ async fn thread_session_state_from_thread_response(
         reasoning_effort,
         collaboration_mode: None,
         personality: config.personality,
+        workflow_type,
+        effective_request_class,
         message_history: Some(MessageHistoryMetadata {
             log_id,
             entry_count,
@@ -3147,6 +3163,10 @@ mod tests {
                 .into(),
             active_permission_profile: None,
             reasoning_effort: None,
+            workflow_type: codex_app_server_protocol::WorkflowType::WorkOrder,
+            effective_request_class: Some(
+                codex_app_server_protocol::WorkflowRequestClass::WorkOrder,
+            ),
             multi_agent_mode: Default::default(),
             initial_turns_page: None,
             turns_backwards_cursor: None,
@@ -3170,6 +3190,14 @@ mod tests {
             response.instruction_source_path_uris()
         );
         assert_eq!(started.session.permission_profile, read_only_profile);
+        assert_eq!(
+            started.session.workflow_type,
+            codex_protocol::config_types::WorkflowType::WorkOrder
+        );
+        assert_eq!(
+            started.session.effective_request_class,
+            Some(codex_protocol::config_types::WorkflowRequestClass::WorkOrder)
+        );
         assert_eq!(started.turns.len(), 1);
         assert_eq!(started.turns[0], response.thread.turns[0]);
         assert!(!started.blocks_direct_input);
@@ -3282,6 +3310,8 @@ mod tests {
             Vec::new(),
             Vec::new(),
             /*reasoning_effort*/ None,
+            codex_protocol::config_types::WorkflowType::Inactive,
+            /*effective_request_class*/ None,
             &config,
         )
         .await
@@ -3317,6 +3347,8 @@ mod tests {
             Vec::new(),
             Vec::new(),
             /*reasoning_effort*/ None,
+            codex_protocol::config_types::WorkflowType::Inactive,
+            /*effective_request_class*/ None,
             &config,
         )
         .await

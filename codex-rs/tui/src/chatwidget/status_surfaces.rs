@@ -695,24 +695,7 @@ impl ChatWidget {
                     format_workflow_tokens(status.session_tokens_used)
                 )
             }),
-            StatusLineItem::WorkflowTokens => Some(match self.workflow_token_budget {
-                Some(status) if status.active && status.effective_limit_tokens == 0 => format!(
-                    "Workflow: {} / ∞ Tokens",
-                    format_workflow_tokens(status.workflow_tokens_used)
-                ),
-                Some(status) if status.active => {
-                    let percent = status.workflow_tokens_used as f64
-                        / status.effective_limit_tokens.max(1) as f64
-                        * 100.0;
-                    let percent = format!("{percent:.1}").replace('.', ",");
-                    format!(
-                        "Workflow: {} / {} Tokens ({percent} %)",
-                        format_workflow_tokens(status.workflow_tokens_used),
-                        format_workflow_tokens(status.effective_limit_tokens)
-                    )
-                }
-                Some(_) | None => "Workflow: inaktiv".to_string(),
-            }),
+            StatusLineItem::WorkflowTokens => Some(self.workflow_status_line_text()),
             StatusLineItem::ContextRemaining => self
                 .status_line_context_remaining_percent()
                 .map(|remaining| format!("Context {remaining}% left")),

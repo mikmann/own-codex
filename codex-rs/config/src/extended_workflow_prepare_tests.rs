@@ -20,8 +20,11 @@ fn plans_and_applies_complete_empty_repository() {
     assert_eq!(report.created, vec![plan.config_path.clone()]);
     let contents = fs::read_to_string(&plan.config_path).expect("prepared config");
     assert!(contents.contains("[extended_workflow]"));
+    assert!(contents.contains("workflow_type = \"auto\""));
     assert!(contents.contains("workflow_budget_tokens = 0"));
     assert!(contents.contains("name = \"expert_1\""));
+    assert!(contents.contains("selection_keywords = [\"architecture\""));
+    assert!(contents.contains("extended_workflow.experts.additional_profiles"));
     assert!(contents.contains("model = \"gpt-5.6-terra\""));
     assert!(contents.contains("name = \"reviewer_4\""));
     assert!(contents.contains("reasoning_effort = \"max\""));

@@ -466,6 +466,11 @@ impl Session {
         per_turn_config.model_reasoning_summary = session_configuration.model_reasoning_summary;
         per_turn_config.service_tier = session_configuration.service_tier.clone();
         per_turn_config.personality = session_configuration.personality;
+        per_turn_config.extended_workflow.workflow_type = session_configuration.workflow_type;
+        per_turn_config.extended_workflow.effective_request_class =
+            session_configuration.effective_request_class;
+        per_turn_config.extended_workflow.enabled &= session_configuration.workflow_type
+            != codex_protocol::config_types::WorkflowType::Inactive;
         per_turn_config.approvals_reviewer = session_configuration.approvals_reviewer;
         session_configuration
             .apply_permission_profile_to_permissions(&mut per_turn_config.permissions);

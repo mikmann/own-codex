@@ -508,6 +508,9 @@ pub struct ThreadSettingsOverrides {
 
     /// Updated personality preference.
     pub personality: Option<Personality>,
+
+    /// Updated extended-workflow selection for future root requests.
+    pub workflow_type: Option<crate::config_types::WorkflowType>,
 }
 
 /// Source classification for client-supplied context.
@@ -2066,6 +2069,12 @@ pub struct ThreadSettingsSnapshot {
     pub reasoning_summary: Option<ReasoningSummaryConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub personality: Option<Personality>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workflow_type: Option<crate::config_types::WorkflowType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub effective_request_class: Option<crate::config_types::WorkflowRequestClass>,
     pub collaboration_mode: CollaborationMode,
 }
 
@@ -2911,6 +2920,8 @@ struct ExtendedThreadSpawnRole {
     #[serde(default)]
     workflow_root_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    role_fingerprint_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     context_budget: Option<u64>,
 }
 
@@ -2922,6 +2933,7 @@ pub struct ExtendedWorkflowAgentIdentity {
     pub workflow_turn_id: Option<String>,
     pub assignment_sha256: Option<String>,
     pub workflow_root_sha256: Option<String>,
+    pub role_fingerprint_sha256: Option<String>,
 }
 
 #[doc(hidden)]
@@ -2934,6 +2946,7 @@ pub struct ExtendedThreadSpawnRoleMetadata<'a> {
     pub workflow_turn_id: Option<&'a str>,
     pub assignment_sha256: Option<&'a str>,
     pub workflow_root_sha256: Option<&'a str>,
+    pub role_fingerprint_sha256: Option<&'a str>,
     pub context_budget: Option<u64>,
 }
 
@@ -2953,6 +2966,7 @@ pub fn encode_extended_thread_spawn_role(
         workflow_turn_id: None,
         assignment_sha256: None,
         workflow_root_sha256: None,
+        role_fingerprint_sha256: None,
         context_budget: None,
     })
 }
@@ -2968,6 +2982,7 @@ pub fn encode_extended_thread_spawn_role_metadata(
         && metadata.workflow_turn_id.is_none()
         && metadata.assignment_sha256.is_none()
         && metadata.workflow_root_sha256.is_none()
+        && metadata.role_fingerprint_sha256.is_none()
         && metadata.context_budget.is_none()
     {
         return metadata.config_role.map(str::to_string);
@@ -2981,6 +2996,7 @@ pub fn encode_extended_thread_spawn_role_metadata(
         workflow_turn_id: metadata.workflow_turn_id.map(str::to_string),
         assignment_sha256: metadata.assignment_sha256.map(str::to_string),
         workflow_root_sha256: metadata.workflow_root_sha256.map(str::to_string),
+        role_fingerprint_sha256: metadata.role_fingerprint_sha256.map(str::to_string),
         context_budget: metadata.context_budget,
     };
     serde_json::to_string(&encoded)
@@ -3111,7 +3127,19 @@ impl SessionSource {
             workflow_turn_id: metadata.workflow_turn_id,
             assignment_sha256: metadata.assignment_sha256,
             workflow_root_sha256: metadata.workflow_root_sha256,
+            role_fingerprint_sha256: metadata.role_fingerprint_sha256,
         })
+    }
+
+    pub fn get_extended_workflow_role_fingerprint(&self) -> Option<String> {
+        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            agent_role: Some(agent_role),
+            ..
+        }) = self
+        else {
+            return None;
+        };
+        decode_extended_thread_spawn_role(agent_role)?.role_fingerprint_sha256
     }
 
     pub fn get_extended_workflow_context_budget(&self) -> Option<u64> {
@@ -6672,6 +6700,9 @@ mod tests {
             workflow_turn_id: Some("turn-1"),
             assignment_sha256: Some("assignment"),
             workflow_root_sha256: Some("root"),
+            role_fingerprint_sha256: Some(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
             context_budget: Some(64_000),
         })
         .expect("encoded metadata");
@@ -6690,6 +6721,10 @@ mod tests {
         );
         assert!(source.is_read_only_subagent());
         assert_eq!(source.get_extended_workflow_context_budget(), Some(64_000));
+        assert_eq!(
+            source.get_extended_workflow_role_fingerprint().as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
         assert_eq!(
             serde_json::from_value::<SessionSource>(
                 serde_json::to_value(&source).expect("serialize source")

@@ -8,8 +8,12 @@ use app_test_support::write_models_cache;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SandboxPolicy;
+use codex_app_server_protocol::ThreadForkParams;
+use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
+use codex_app_server_protocol::ThreadResumeParams;
+use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadSettingsUpdateParams;
 use codex_app_server_protocol::ThreadSettingsUpdateResponse;
 use codex_app_server_protocol::ThreadSettingsUpdatedNotification;
@@ -18,6 +22,8 @@ use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput as V2UserInput;
+use codex_app_server_protocol::WorkflowRequestClass;
+use codex_app_server_protocol::WorkflowType;
 use codex_core::test_support::all_model_presets;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use core_test_support::responses;
@@ -44,7 +50,12 @@ async fn thread_settings_update_emits_notification_and_updates_future_turns() ->
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
-    let thread = start_thread(&mut mcp).await?.thread;
+    let started = start_thread(&mut mcp).await?;
+    assert_eq!(
+        (started.workflow_type, started.effective_request_class),
+        (WorkflowType::Inactive, None)
+    );
+    let thread = started.thread;
 
     send_thread_settings_update(
         &mut mcp,
@@ -88,6 +99,91 @@ async fn thread_settings_update_emits_notification_and_updates_future_turns() ->
                     == Some(service_tier_id.as_str())
         }),
         "future turn did not use updated model/service tier: {request_bodies:#?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_settings_update_persists_workflow_type_and_reports_effective_class() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(vec![
+        create_final_assistant_message_sse_response("done")?,
+    ])
+    .await;
+    let codex_home = TempDir::new()?;
+    create_extended_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+    let thread = start_thread(&mut mcp).await?.thread;
+
+    send_thread_settings_update(
+        &mut mcp,
+        ThreadSettingsUpdateParams {
+            thread_id: thread.id.clone(),
+            workflow_type: Some(WorkflowType::WorkOrder),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let selected = read_thread_settings_updated(&mut mcp).await?;
+    assert_eq!(
+        (
+            selected.thread_settings.workflow_type,
+            selected.thread_settings.effective_request_class,
+        ),
+        (WorkflowType::WorkOrder, None)
+    );
+
+    start_text_turn(&mut mcp, thread.id.clone()).await?;
+    let classified = read_thread_settings_updated(&mut mcp).await?;
+    assert_eq!(
+        (
+            classified.thread_settings.workflow_type,
+            classified.thread_settings.effective_request_class,
+        ),
+        (
+            WorkflowType::WorkOrder,
+            Some(WorkflowRequestClass::WorkOrder)
+        )
+    );
+    timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let resume_request_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread.id.clone(),
+            ..Default::default()
+        })
+        .await?;
+    let resumed: ThreadResumeResponse =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(resume_request_id)).await??;
+    assert_eq!(
+        (resumed.workflow_type, resumed.effective_request_class),
+        (
+            WorkflowType::WorkOrder,
+            Some(WorkflowRequestClass::WorkOrder)
+        )
+    );
+
+    let fork_request_id = mcp
+        .send_thread_fork_request(ThreadForkParams {
+            thread_id: thread.id,
+            ..Default::default()
+        })
+        .await?;
+    let forked: ThreadForkResponse =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(fork_request_id)).await??;
+    assert_eq!(
+        (forked.workflow_type, forked.effective_request_class),
+        (
+            WorkflowType::WorkOrder,
+            Some(WorkflowRequestClass::WorkOrder)
+        )
     );
     Ok(())
 }
@@ -447,5 +543,25 @@ fn create_config_toml(codex_home: &std::path::Path, server_uri: &str) -> std::io
     MockResponsesConfig::new(server_uri)
         .with_root_config("compact_prompt = \"compact\"\nmodel_auto_compact_token_limit = 200000")
         .with_provider_config("supports_websockets = false")
+        .write(codex_home)
+}
+
+fn create_extended_config_toml(
+    codex_home: &std::path::Path,
+    server_uri: &str,
+) -> std::io::Result<()> {
+    MockResponsesConfig::new(server_uri)
+        .with_root_config("compact_prompt = \"compact\"\nmodel_auto_compact_token_limit = 200000")
+        .with_provider_config("supports_websockets = false")
+        .with_extra_config(
+            r#"[extended_workflow]
+enabled = true
+
+[extended_workflow.experts]
+enabled = false
+
+[extended_workflow.reviewers]
+enabled = false"#,
+        )
         .write(codex_home)
 }

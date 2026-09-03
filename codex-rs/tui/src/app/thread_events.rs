@@ -415,6 +415,8 @@ mod tests {
             reasoning_effort: None,
             collaboration_mode: None,
             personality: None,
+            workflow_type: codex_protocol::config_types::WorkflowType::Auto,
+            effective_request_class: None,
             message_history: None,
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),

@@ -6,7 +6,7 @@ expression: sanitized
 
 ╭────────────────────────────────────────╮
 │  >_ codex-extended-workflow (v0.147.1- │
-│  alpha-8)                              │
+│  alpha-10)                             │
 │                                        │
 │ Visit                                  │
 │ https://chatgpt.com/codex/settings/usa │
@@ -17,6 +17,9 @@ expression: sanitized
 │  Directory: [[workspace]]              │
 │  Permissions:          Custom (workspa │
 │  Agents.md:            <none>          │
+│  Workflow type:             inactive   │
+│  Effective request class:   none       │
+│  Workflow budget:           inactive   │
 │  Account:              ｶﾞﾊﾟｶﾞﾊﾟｶﾞﾊﾟ@ex │
 │  Thread name:          ｶﾞﾊﾟｶﾞﾊﾟｶﾞﾊﾟｶﾞ  │
 │  Collaboration mode:   ｶﾞﾊﾟ collaborat │

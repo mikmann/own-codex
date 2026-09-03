@@ -375,8 +375,36 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
     }
 
     let (mut session, mut turn) = make_session_and_context().await;
-    let role_name = install_role_with_model_override(&mut turn).await;
+    let role_config_dir = turn.config.codex_home.as_path().join("agents");
+    tokio::fs::create_dir_all(&role_config_dir)
+        .await
+        .expect("trusted role directory should be created");
+    let role_config_path = role_config_dir.join("workflow-read-only-role.toml");
+    tokio::fs::write(
+        &role_config_path,
+        r#"developer_instructions = "Inspect only the assigned workflow role."
+approval_policy = "never"
+sandbox_mode = "read-only"
+web_search = "disabled"
+allow_login_shell = false
+include_apps_instructions = false
+include_collaboration_mode_instructions = false
+include_environment_context = false
+"#,
+    )
+    .await
+    .expect("workflow role config should be written");
+
+    let role_name = "workflow-read-only-role".to_string();
     let mut config = (*turn.config).clone();
+    config.agent_roles.insert(
+        role_name.clone(),
+        AgentRoleConfig {
+            description: Some("Restricted workflow role".to_string()),
+            config_file: Some(role_config_path),
+            nickname_candidates: None,
+        },
+    );
     config
         .features
         .enable(Feature::MultiAgentV2)
@@ -395,11 +423,18 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
     profile.reasoning_effort = Some(ReasoningEffort::High);
     profile.context_budget = Some(64_000);
     let root_request = "Implement the architecture and security validation.";
-    let workflow_plan = crate::extended_workflow::plan_turn(
+    let mut workflow_plan = crate::extended_workflow::plan_turn(
         root_request,
         &turn.sub_id,
         &config.extended_workflow,
     );
+    crate::extended_workflow::preflight_process_plan(
+        &mut workflow_plan.experts,
+        &config,
+        root_request,
+    )
+    .await
+    .expect("workflow role preflight should pass");
     let workflow_task_name = workflow_plan
         .experts
         .selected
@@ -586,6 +621,7 @@ fn multi_agent_v2_workflow_spawn_enforces_profile_and_read_only_ceiling() {
                 workflow_turn_id: Some(turn.sub_id.as_str()),
                 assignment_sha256: Some(validation_assignment_sha256.as_str()),
                 workflow_root_sha256: Some(workflow_plan.root_request_sha256.as_str()),
+                role_fingerprint_sha256: None,
                 context_budget: None,
             },
         ),

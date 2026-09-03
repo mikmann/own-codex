@@ -703,7 +703,9 @@ fn wait_complete_lines(
     entries.extend(extras);
 
     if entries.is_empty() {
-        vec![Line::from(Span::from("No agents completed yet"))]
+        vec![Line::from(Span::from(
+            "No agents completed in this wait; running agents continue",
+        ))]
     } else {
         entries
             .into_iter()

@@ -614,6 +614,8 @@ mod tests {
                     reasoning_effort: Some(ReasoningEffort::Ultra),
                     reasoning_summary: Some(ReasoningSummary::Auto),
                     personality: None,
+                    workflow_type: None,
+                    effective_request_class: None,
                     collaboration_mode: CollaborationMode {
                         mode: ModeKind::Default,
                         settings: Settings {

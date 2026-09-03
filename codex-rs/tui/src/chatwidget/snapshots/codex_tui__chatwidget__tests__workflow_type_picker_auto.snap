@@ -1,0 +1,13 @@
+---
+source: tui/src/chatwidget/tests/workflow_type.rs
+expression: "render_bottom_popup(&chat, 82)"
+---
+  Workflow-Typ auswählen
+  Die Auswahl gilt ab der nächsten Root-Anfrage.
+
+› 1. Auto (current)  Anfrage automatisch klassifizieren
+  2. Inaktiv         Extended Workflow für neue Anfragen umgehen
+  3. Konzept         Konzept-Workflow erzwingen
+  4. Arbeitsauftrag  Arbeitsauftrag-Workflow erzwingen
+
+  Press enter to confirm or esc to go back

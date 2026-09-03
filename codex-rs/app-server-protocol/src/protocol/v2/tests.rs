@@ -286,6 +286,8 @@ fn thread_resume_response_round_trips_initial_turns_page() {
         sandbox: SandboxPolicy::DangerFullAccess,
         active_permission_profile: None,
         reasoning_effort: None,
+        workflow_type: WorkflowType::WorkOrder,
+        effective_request_class: Some(WorkflowRequestClass::WorkOrder),
         multi_agent_mode: Default::default(),
         initial_turns_page: Some(TurnsPage {
             data: Vec::new(),
@@ -332,6 +334,11 @@ fn thread_resume_response_round_trips_initial_turns_page() {
     assert_eq!(
         value.get("itemsBackwardsCursor"),
         Some(&json!("items_head"))
+    );
+    assert_eq!(value.get("workflowType"), Some(&json!("workOrder")));
+    assert_eq!(
+        value.get("effectiveRequestClass"),
+        Some(&json!("workOrder"))
     );
     let decoded = serde_json::from_value::<ThreadResumeResponse>(value)
         .expect("deserialize thread resume response");
@@ -4482,6 +4489,22 @@ fn thread_lifecycle_responses_default_missing_optional_fields() {
     assert_eq!(fork.active_permission_profile, None);
     assert_eq!(
         (
+            start.workflow_type,
+            resume.workflow_type,
+            fork.workflow_type,
+        ),
+        (WorkflowType::Auto, WorkflowType::Auto, WorkflowType::Auto)
+    );
+    assert_eq!(
+        (
+            start.effective_request_class,
+            resume.effective_request_class,
+            fork.effective_request_class,
+        ),
+        (None, None, None)
+    );
+    assert_eq!(
+        (
             start.multi_agent_mode,
             resume.multi_agent_mode,
             fork.multi_agent_mode,
@@ -4520,6 +4543,26 @@ fn thread_lifecycle_responses_default_missing_optional_fields() {
         fork.instruction_source_path_uris(),
         vec![foreign_source_uri]
     );
+}
+
+#[test]
+fn thread_settings_default_missing_workflow_fields() {
+    let settings: ThreadSettings = serde_json::from_value(json!({
+        "cwd": absolute_path_string("tmp"),
+        "approvalPolicy": "on-request",
+        "approvalsReviewer": "user",
+        "sandboxPolicy": { "type": "dangerFullAccess" },
+        "model": "gpt-5",
+        "modelProvider": "openai",
+        "collaborationMode": {
+            "mode": "default",
+            "settings": { "model": "gpt-5" }
+        }
+    }))
+    .expect("legacy thread settings should deserialize");
+
+    assert_eq!(settings.workflow_type, WorkflowType::Auto);
+    assert_eq!(settings.effective_request_class, None);
 }
 
 #[test]
@@ -4640,6 +4683,19 @@ fn thread_settings_update_params_preserve_explicit_null_service_tier() {
     let serialized_without_override =
         serde_json::to_value(&without_override).expect("params should serialize");
     assert_eq!(serialized_without_override.get("serviceTier"), None);
+}
+
+#[test]
+fn thread_settings_update_params_use_camel_case_workflow_type() {
+    let params: ThreadSettingsUpdateParams = serde_json::from_value(json!({
+        "threadId": "thread_123",
+        "workflowType": "workOrder"
+    }))
+    .expect("params should deserialize");
+    assert_eq!(params.workflow_type, Some(WorkflowType::WorkOrder));
+
+    let serialized = serde_json::to_value(params).expect("params should serialize");
+    assert_eq!(serialized["workflowType"], "workOrder");
 }
 
 #[test]

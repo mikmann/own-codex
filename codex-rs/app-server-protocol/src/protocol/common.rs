@@ -2911,6 +2911,8 @@ mod tests {
                 sandbox: v2::SandboxPolicy::DangerFullAccess,
                 active_permission_profile: None,
                 reasoning_effort: None,
+                workflow_type: v2::WorkflowType::Auto,
+                effective_request_class: None,
                 multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
             },
         };
@@ -2965,6 +2967,8 @@ mod tests {
                     },
                     "activePermissionProfile": null,
                     "reasoningEffort": null,
+                    "workflowType": "auto",
+                    "effectiveRequestClass": null,
                     "multiAgentMode": "explicitRequestOnly"
                 }
             }),
@@ -4142,6 +4146,8 @@ mod tests {
                     },
                     multi_agent_mode: Default::default(),
                     personality: None,
+                    workflow_type: v2::WorkflowType::Auto,
+                    effective_request_class: None,
                 },
             });
 

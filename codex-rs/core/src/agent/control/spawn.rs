@@ -319,6 +319,12 @@ impl AgentControl {
         } else {
             resumed_source
         };
+        let persisted_role_fingerprint = session_source.get_extended_workflow_role_fingerprint();
+        if persisted_role_fingerprint.is_some() && session_source.get_agent_role().is_none() {
+            return Err(CodexErr::InvalidRequest(
+                "persisted workflow role fingerprint has no matching agent_type".to_string(),
+            ));
+        }
         if let Some(role_name) = session_source.get_agent_role() {
             let runtime_approval_policy = config.permissions.approval_policy.value();
             let runtime_approvals_reviewer = config.approvals_reviewer;
@@ -336,9 +342,19 @@ impl AgentControl {
                 ),
             };
 
-            apply_role_to_config_for_multi_agent_v2(&mut config, Some(&role_name))
+            if let Some(expected_fingerprint) = persisted_role_fingerprint.as_deref() {
+                crate::extended_workflow::apply_persisted_role_binding(
+                    &mut config,
+                    &role_name,
+                    expected_fingerprint,
+                )
                 .await
                 .map_err(CodexErr::InvalidRequest)?;
+            } else {
+                apply_role_to_config_for_multi_agent_v2(&mut config, Some(&role_name))
+                    .await
+                    .map_err(CodexErr::InvalidRequest)?;
+            }
             config
                 .permissions
                 .approval_policy

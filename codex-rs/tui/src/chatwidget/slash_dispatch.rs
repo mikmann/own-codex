@@ -346,6 +346,9 @@ impl ChatWidget {
             SlashCommand::PrepareExtendWorkflow => {
                 self.prepare_extended_workflow(/*apply*/ false, /*global*/ false);
             }
+            SlashCommand::WorkflowType => {
+                self.open_workflow_type_popup();
+            }
             SlashCommand::WorkflowResetBudget => {
                 self.app_event_tx
                     .send(AppEvent::CodexOp(AppCommand::ResetWorkflowTokenBudget));
@@ -1024,6 +1027,9 @@ impl ChatWidget {
                     _ => self.add_error_message(PREPARE_EXTENDED_WORKFLOW_USAGE.to_string()),
                 }
             }
+            SlashCommand::WorkflowType if !trimmed.is_empty() => {
+                self.select_workflow_type_from_arg(trimmed);
+            }
             SlashCommand::Pets
                 if matches!(
                     args.trim().to_ascii_lowercase().as_str(),
@@ -1204,6 +1210,7 @@ impl ChatWidget {
             | SlashCommand::App
             | SlashCommand::Rename
             | SlashCommand::WorkflowResetBudget
+            | SlashCommand::WorkflowType
             | SlashCommand::TestApproval => QueueDrain::Continue,
             SlashCommand::Feedback
             | SlashCommand::New

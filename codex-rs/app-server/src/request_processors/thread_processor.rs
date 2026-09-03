@@ -1436,6 +1436,8 @@ impl ThreadRequestProcessor {
             sandbox,
             active_permission_profile,
             reasoning_effort: config_snapshot.reasoning_effort,
+            workflow_type: config_snapshot.workflow_type.into(),
+            effective_request_class: config_snapshot.effective_request_class.map(Into::into),
             multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
         };
         let notif = thread_started_notification(thread);
@@ -3451,6 +3453,10 @@ impl ThreadRequestProcessor {
                     sandbox,
                     active_permission_profile,
                     reasoning_effort: session_configured.reasoning_effort,
+                    workflow_type: config_snapshot.workflow_type.into(),
+                    effective_request_class: config_snapshot
+                        .effective_request_class
+                        .map(Into::into),
                     multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
                     initial_turns_page,
                     turns_backwards_cursor,
@@ -4481,6 +4487,8 @@ impl ThreadRequestProcessor {
             sandbox,
             active_permission_profile,
             reasoning_effort: session_configured.reasoning_effort,
+            workflow_type: config_snapshot.workflow_type.into(),
+            effective_request_class: config_snapshot.effective_request_class.map(Into::into),
             multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
         };
 

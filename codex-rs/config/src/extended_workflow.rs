@@ -1,13 +1,18 @@
+use codex_protocol::config_types::WorkflowRequestClass;
+use codex_protocol::config_types::WorkflowType;
 use codex_protocol::openai_models::ReasoningEffort;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 pub const EXTENDED_WORKFLOW_MAX_AGENTS: usize = 6;
-pub const EXTENDED_WORKFLOW_MAX_PROFILES: usize = EXTENDED_WORKFLOW_MAX_AGENTS;
+pub const EXTENDED_WORKFLOW_MAX_PROFILES: usize = 16;
 pub const EXTENDED_WORKFLOW_MAX_PROFILE_FIELD_BYTES: usize = 256;
-pub const EXTENDED_WORKFLOW_MAX_PROCESS_PROFILE_BYTES: usize = 2_048;
+pub const EXTENDED_WORKFLOW_MAX_SELECTION_KEYWORDS: usize = 12;
+pub const EXTENDED_WORKFLOW_MAX_SELECTION_KEYWORD_BYTES: usize = 64;
+pub const EXTENDED_WORKFLOW_MAX_PROCESS_PROFILE_BYTES: usize = 16 * 1_024;
 pub const DEFAULT_WORKFLOW_MIN_AGENTS: usize = 2;
 pub const DEFAULT_WORKFLOW_MAX_AGENTS: usize = 4;
 pub const DEFAULT_MAX_RESULT_BYTES: usize = 8 * 1024;
@@ -23,6 +28,8 @@ pub struct ExtendedWorkflowToml {
     /// libraries and the compatibility launcher default to disabled unless configuration says
     /// otherwise.
     pub enabled: Option<bool>,
+    /// Selects automatic classification, bypass, concept, or work-order orchestration.
+    pub workflow_type: Option<WorkflowType>,
     /// Marks normal model-visible workflow diagnostics as audit-enabled. No files are written.
     pub audit_mode: Option<bool>,
     /// Enforced cumulative provider-token stop for the active workflow and all subagents.
@@ -30,7 +37,7 @@ pub struct ExtendedWorkflowToml {
     /// Enforcement happens after each provider response, so responses already in flight can cross
     /// the configured limit before later sampling is stopped.
     pub workflow_budget_tokens: Option<u64>,
-    /// Hard UTF-8 byte limit for one structured expert or reviewer result.
+    /// Hard UTF-8 byte limit for one structured expert, reviewer, concept, or ticket result.
     pub max_result_bytes: Option<usize>,
     pub experts: Option<WorkflowProcessToml>,
     pub reviewers: Option<WorkflowProcessToml>,
@@ -45,7 +52,10 @@ pub struct WorkflowProcessToml {
     pub max: Option<usize>,
     /// Advisory token budget for one complete expert or reviewer round.
     pub round_budget_tokens: Option<u64>,
+    /// Replaces the built-in catalog when present.
     pub profiles: Option<Vec<WorkflowAgentProfileToml>>,
+    /// Appends profiles to the built-in or explicitly replaced catalog.
+    pub additional_profiles: Option<Vec<WorkflowAgentProfileToml>>,
 }
 
 /// A selectable expert or reviewer profile.
@@ -56,6 +66,9 @@ pub struct WorkflowAgentProfileToml {
     pub role: String,
     /// Optional existing `[agents.<name>]` role to layer onto the child.
     pub agent_type: Option<String>,
+    /// Local deterministic selection hints. These strings are never injected as instructions.
+    #[serde(default)]
+    pub selection_keywords: Vec<String>,
     /// Resolved by the existing spawn-agent model catalog. Not an allowlist.
     pub model: Option<String>,
     /// Validated against the selected model by the existing spawn-agent resolver.
@@ -71,6 +84,11 @@ pub struct WorkflowAgentProfileToml {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtendedWorkflowConfig {
     pub enabled: bool,
+    pub workflow_type: WorkflowType,
+    /// True when the effective value came from current-process CLI/session flags.
+    pub workflow_type_from_session_flags: bool,
+    /// Latest effective class for runtime status surfaces; never loaded from TOML.
+    pub effective_request_class: Option<WorkflowRequestClass>,
     pub audit_mode: bool,
     pub workflow_budget_tokens: Option<u64>,
     pub max_result_bytes: usize,
@@ -92,16 +110,46 @@ pub struct WorkflowAgentProfileConfig {
     pub name: String,
     pub role: String,
     pub agent_type: Option<String>,
+    pub selection_keywords: Vec<String>,
+    pub source: WorkflowProfileSource,
     pub model: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub token_budget: Option<u64>,
     pub context_budget: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowProfileSource {
+    BuiltIn,
+    Profiles,
+    AdditionalProfiles,
+}
+
+impl WorkflowProfileSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::BuiltIn => "built-in",
+            Self::Profiles => "profiles",
+            Self::AdditionalProfiles => "additional_profiles",
+        }
+    }
+
+    fn toml_field(self) -> &'static str {
+        match self {
+            Self::BuiltIn => "built_in_profiles",
+            Self::Profiles => "profiles",
+            Self::AdditionalProfiles => "additional_profiles",
+        }
+    }
+}
+
 impl Default for ExtendedWorkflowConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            workflow_type: WorkflowType::Auto,
+            workflow_type_from_session_flags: false,
+            effective_request_class: None,
             audit_mode: false,
             workflow_budget_tokens: None,
             max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
@@ -144,6 +192,9 @@ impl ExtendedWorkflowConfig {
 
         Ok(Self {
             enabled: config.enabled.unwrap_or(enabled_by_default),
+            workflow_type: config.workflow_type.unwrap_or_default(),
+            workflow_type_from_session_flags: false,
+            effective_request_class: None,
             audit_mode: config.audit_mode.unwrap_or(false),
             workflow_budget_tokens: config.workflow_budget_tokens,
             max_result_bytes,
@@ -203,14 +254,32 @@ impl WorkflowProcessConfig {
             round_budget_tokens,
         )?;
 
-        let profiles = match config.and_then(|value| value.profiles.as_ref()) {
+        let mut profiles = match config.and_then(|value| value.profiles.as_ref()) {
             Some(profiles) => profiles
                 .iter()
                 .cloned()
-                .map(WorkflowAgentProfileConfig::from)
-                .collect(),
+                .map(|profile| {
+                    WorkflowAgentProfileConfig::from_toml(profile, WorkflowProfileSource::Profiles)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
             None => default_profiles(),
         };
+        if let Some(additional_profiles) =
+            config.and_then(|value| value.additional_profiles.as_ref())
+        {
+            profiles.extend(
+                additional_profiles
+                    .iter()
+                    .cloned()
+                    .map(|profile| {
+                        WorkflowAgentProfileConfig::from_toml(
+                            profile,
+                            WorkflowProfileSource::AdditionalProfiles,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+        }
         validate_profiles(process_name, &profiles)?;
         if enabled && max > profiles.len() {
             return Err(format!(
@@ -229,17 +298,27 @@ impl WorkflowProcessConfig {
     }
 }
 
-impl From<WorkflowAgentProfileToml> for WorkflowAgentProfileConfig {
-    fn from(value: WorkflowAgentProfileToml) -> Self {
-        Self {
+impl WorkflowAgentProfileConfig {
+    fn from_toml(
+        value: WorkflowAgentProfileToml,
+        source: WorkflowProfileSource,
+    ) -> Result<Self, String> {
+        let selection_keywords = value
+            .selection_keywords
+            .into_iter()
+            .map(|keyword| normalize_selection_keyword(&keyword))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
             name: value.name,
             role: value.role,
             agent_type: value.agent_type,
+            selection_keywords,
+            source,
             model: value.model,
             reasoning_effort: value.reasoning_effort,
             token_budget: value.token_budget,
             context_budget: value.context_budget,
-        }
+        })
     }
 }
 
@@ -253,44 +332,78 @@ fn validate_profiles(
             profiles.len()
         ));
     }
-    let mut names = HashSet::new();
-    let mut roles = HashSet::new();
+    let mut names = HashMap::new();
+    let mut roles = HashMap::new();
     let mut aggregate_bytes = 0_usize;
     for (index, profile) in profiles.iter().enumerate() {
-        let path = format!("extended_workflow.{process_name}.profiles[{index}]");
+        let source_index = profiles[..index]
+            .iter()
+            .filter(|earlier| earlier.source == profile.source)
+            .count();
+        let path = format!(
+            "extended_workflow.{process_name}.{}[{source_index}]",
+            profile.source.toml_field()
+        );
         let name = profile.name.trim();
         let role = profile.role.trim();
         if name.is_empty() {
             return Err(format!("{path}.name must not be empty"));
         }
-        validate_profile_field_length(&format!("{path}.name"), name)?;
+        validate_profile_field_length(&format!("{path}.name"), &profile.name)?;
         if role.is_empty() {
             return Err(format!("{path}.role must not be empty"));
         }
-        validate_profile_field_length(&format!("{path}.role"), role)?;
-        if !names.insert(name.to_ascii_lowercase()) {
+        validate_profile_field_length(&format!("{path}.role"), &profile.role)?;
+        if let Some(first_path) = names.insert(name.to_lowercase(), path.clone()) {
             return Err(format!(
-                "extended_workflow.{process_name} profile names must be unique; duplicate `{name}`"
+                "extended_workflow.{process_name} profile names must be unique; duplicate `{name}` appears in {first_path} and {path}"
             ));
         }
-        if !roles.insert(role.to_ascii_lowercase()) {
+        if let Some(first_path) = roles.insert(role.to_lowercase(), path.clone()) {
             return Err(format!(
-                "extended_workflow.{process_name} profile roles must be unique; duplicate `{role}`"
+                "extended_workflow.{process_name} profile roles must be unique; duplicate `{role}` appears in {first_path} and {path}"
             ));
         }
         validate_non_empty_optional(&format!("{path}.agent_type"), profile.agent_type.as_deref())?;
         validate_non_empty_optional(&format!("{path}.model"), profile.model.as_deref())?;
         if let Some(agent_type) = profile.agent_type.as_deref() {
-            validate_profile_field_length(&format!("{path}.agent_type"), agent_type.trim())?;
+            validate_profile_field_length(&format!("{path}.agent_type"), agent_type)?;
         }
         if let Some(model) = profile.model.as_deref() {
-            validate_profile_field_length(&format!("{path}.model"), model.trim())?;
+            validate_profile_field_length(&format!("{path}.model"), model)?;
+        }
+        if profile.selection_keywords.len() > EXTENDED_WORKFLOW_MAX_SELECTION_KEYWORDS {
+            return Err(format!(
+                "{path}.selection_keywords must contain at most {EXTENDED_WORKFLOW_MAX_SELECTION_KEYWORDS} entries; got {}",
+                profile.selection_keywords.len()
+            ));
+        }
+        let mut keywords = HashSet::new();
+        for (keyword_index, keyword) in profile.selection_keywords.iter().enumerate() {
+            if keyword.len() > EXTENDED_WORKFLOW_MAX_SELECTION_KEYWORD_BYTES {
+                return Err(format!(
+                    "{path}.selection_keywords[{keyword_index}] must be at most {EXTENDED_WORKFLOW_MAX_SELECTION_KEYWORD_BYTES} UTF-8 bytes; got {}",
+                    keyword.len()
+                ));
+            }
+            if !keywords.insert(keyword) {
+                return Err(format!(
+                    "{path}.selection_keywords must be unique after normalization; duplicate `{keyword}`"
+                ));
+            }
         }
         aggregate_bytes = aggregate_bytes
-            .saturating_add(name.len())
-            .saturating_add(role.len())
+            .saturating_add(profile.name.len())
+            .saturating_add(profile.role.len())
             .saturating_add(profile.agent_type.as_deref().map_or(0, str::len))
-            .saturating_add(profile.model.as_deref().map_or(0, str::len));
+            .saturating_add(profile.model.as_deref().map_or(0, str::len))
+            .saturating_add(
+                profile
+                    .selection_keywords
+                    .iter()
+                    .map(String::len)
+                    .sum::<usize>(),
+            );
         validate_positive_optional(&format!("{path}.token_budget"), profile.token_budget)?;
         validate_positive_optional(&format!("{path}.context_budget"), profile.context_budget)?;
         if profile
@@ -305,10 +418,35 @@ fn validate_profiles(
     }
     if aggregate_bytes > EXTENDED_WORKFLOW_MAX_PROCESS_PROFILE_BYTES {
         return Err(format!(
-            "extended_workflow.{process_name}.profiles contain {aggregate_bytes} UTF-8 bytes of model-visible identity data; the hard aggregate limit is {EXTENDED_WORKFLOW_MAX_PROCESS_PROFILE_BYTES}"
+            "extended_workflow.{process_name}.profiles contain {aggregate_bytes} UTF-8 bytes of profile metadata; the hard aggregate limit is {EXTENDED_WORKFLOW_MAX_PROCESS_PROFILE_BYTES}"
         ));
     }
     Ok(())
+}
+
+fn normalize_selection_keyword(keyword: &str) -> Result<String, String> {
+    if keyword.len() > EXTENDED_WORKFLOW_MAX_SELECTION_KEYWORD_BYTES {
+        return Err(format!(
+            "selection_keywords entries must be at most {EXTENDED_WORKFLOW_MAX_SELECTION_KEYWORD_BYTES} UTF-8 bytes; got {}",
+            keyword.len()
+        ));
+    }
+    let normalized = keyword
+        .to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if normalized.is_empty() {
+        return Err("selection_keywords entries must not be empty".to_string());
+    }
+    if normalized.len() > EXTENDED_WORKFLOW_MAX_SELECTION_KEYWORD_BYTES {
+        return Err(format!(
+            "selection_keywords entries must be at most {EXTENDED_WORKFLOW_MAX_SELECTION_KEYWORD_BYTES} UTF-8 bytes; got {}",
+            normalized.len()
+        ));
+    }
+    Ok(normalized)
 }
 
 fn validate_profile_field_length(path: &str, value: &str) -> Result<(), String> {
@@ -343,6 +481,8 @@ fn profile(name: &str, role: &str) -> WorkflowAgentProfileConfig {
         name: name.to_string(),
         role: role.to_string(),
         agent_type: None,
+        selection_keywords: Vec::new(),
+        source: WorkflowProfileSource::BuiltIn,
         model: None,
         reasoning_effort: None,
         token_budget: None,

@@ -5076,6 +5076,17 @@
         "cwd": {
           "$ref": "#/definitions/AbsolutePathBuf"
         },
+        "effectiveRequestClass": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WorkflowRequestClass"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "effort": {
           "anyOf": [
             {
@@ -5120,6 +5131,14 @@
               "type": "null"
             }
           ]
+        },
+        "workflowType": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/WorkflowType"
+            }
+          ],
+          "default": "auto"
         }
       },
       "required": [
@@ -6112,6 +6131,15 @@
       ],
       "type": "string"
     },
+    "WorkflowRequestClass": {
+      "description": "Effective request class used by the latest classified root turn.",
+      "enum": [
+        "simpleAnswer",
+        "workOrder",
+        "concept"
+      ],
+      "type": "string"
+    },
     "WorkflowReviewerVerdict": {
       "enum": [
         "pass",
@@ -6150,6 +6178,16 @@
         "workflowTokensUsed"
       ],
       "type": "object"
+    },
+    "WorkflowType": {
+      "description": "Extended-workflow selection applied to future root requests in a thread.",
+      "enum": [
+        "auto",
+        "inactive",
+        "concept",
+        "workOrder"
+      ],
+      "type": "string"
     },
     "WorkflowValidationErrorCode": {
       "enum": [

@@ -170,6 +170,19 @@ impl ToolExecutor<ToolInvocation> for PlanWorkflowReviewersHandler {
                 &invocation.turn.sub_id,
                 &invocation.turn.config.extended_workflow,
             );
+            crate::extended_workflow::preflight_process_plan(
+                &mut plan,
+                &invocation.turn.config,
+                &planning_input,
+            )
+            .await
+            .map_err(FunctionCallError::RespondToModel)?;
+            crate::tools::handlers::multi_agents_common::preflight_workflow_process_profiles(
+                &invocation.session,
+                &invocation.turn,
+                &plan,
+            )
+            .await?;
             plan.change_digest_sha256 = Some(change_digest_sha256.clone());
             runtime
                 .install_reviewers(&plan, &args.change_summary, &change_digest_sha256)

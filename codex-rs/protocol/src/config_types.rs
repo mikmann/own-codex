@@ -21,6 +21,72 @@ use wildmatch::WildMatchPattern;
 
 use crate::openai_models::ReasoningEffort;
 
+/// Selects how the extended workflow classifies future root requests in a thread.
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Display,
+    EnumIter,
+    JsonSchema,
+    TS,
+)]
+#[serde(rename_all = "kebab-case")]
+#[ts(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum WorkflowType {
+    /// Preserve automatic request classification.
+    #[default]
+    Auto,
+    /// Bypass extended-workflow orchestration for future root requests.
+    Inactive,
+    /// Force the effective request class to `concept`.
+    Concept,
+    /// Force the effective request class to `work_order`.
+    WorkOrder,
+}
+
+/// Effective request class selected for one extended-workflow root turn.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Display, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum WorkflowRequestClass {
+    SimpleAnswer,
+    WorkOrder,
+    Concept,
+}
+
+impl WorkflowType {
+    pub const VALUES: [&'static str; 4] = ["auto", "inactive", "concept", "work-order"];
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "inactive" => Ok(Self::Inactive),
+            "concept" => Ok(Self::Concept),
+            "work-order" => Ok(Self::WorkOrder),
+            _ => Err(format!(
+                "invalid workflow type `{value}`; expected one of: {}",
+                Self::VALUES.join(", ")
+            )),
+        }
+    }
+}
+
+impl FromStr for WorkflowType {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
 /// Selects which part of the active context is charged against
 /// `model_auto_compact_token_limit`.
 #[derive(

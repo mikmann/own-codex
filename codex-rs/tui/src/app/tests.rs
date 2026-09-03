@@ -4627,6 +4627,8 @@ async fn render_clear_ui_header_after_long_transcript_for_snapshot() -> String {
             reasoning_effort: Some(ReasoningEffortConfig::High),
             collaboration_mode: None,
             personality: None,
+            workflow_type: codex_protocol::config_types::WorkflowType::Auto,
+            effective_request_class: None,
             message_history: None,
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
@@ -5112,6 +5114,8 @@ fn test_thread_session(thread_id: ThreadId, cwd: PathBuf) -> ThreadSessionState 
         reasoning_effort: None,
         collaboration_mode: None,
         personality: None,
+        workflow_type: codex_protocol::config_types::WorkflowType::Auto,
+        effective_request_class: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(PathBuf::new()),
@@ -5903,6 +5907,8 @@ async fn backtrack_selection_preserves_selected_prompt_and_requests_branch() {
             reasoning_effort: None,
             collaboration_mode: None,
             personality: None,
+            workflow_type: codex_protocol::config_types::WorkflowType::Auto,
+            effective_request_class: None,
             message_history: None,
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
@@ -5974,6 +5980,8 @@ async fn backtrack_selection_preserves_selected_prompt_and_requests_branch() {
             reasoning_effort: None,
             collaboration_mode: None,
             personality: None,
+            workflow_type: codex_protocol::config_types::WorkflowType::Auto,
+            effective_request_class: None,
             message_history: None,
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
@@ -6991,6 +6999,8 @@ async fn new_session_requests_shutdown_for_previous_conversation() {
             reasoning_effort: None,
             collaboration_mode: None,
             personality: None,
+            workflow_type: codex_protocol::config_types::WorkflowType::Auto,
+            effective_request_class: None,
             message_history: None,
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
@@ -7623,6 +7633,10 @@ async fn inactive_thread_settings_notification_updates_cached_collaboration_mode
             collaboration_mode: collaboration_mode.clone(),
             multi_agent_mode: Default::default(),
             personality: Some(Personality::Pragmatic),
+            workflow_type: codex_app_server_protocol::WorkflowType::WorkOrder,
+            effective_request_class: Some(
+                codex_app_server_protocol::WorkflowRequestClass::WorkOrder,
+            ),
         },
     };
     app.enqueue_thread_notification(
@@ -7645,6 +7659,14 @@ async fn inactive_thread_settings_notification_updates_cached_collaboration_mode
     assert_eq!(cached_session.model, "gpt-test");
     assert_eq!(cached_session.personality, Some(Personality::Pragmatic));
     assert_eq!(
+        cached_session.workflow_type,
+        codex_protocol::config_types::WorkflowType::WorkOrder
+    );
+    assert_eq!(
+        cached_session.effective_request_class,
+        Some(codex_protocol::config_types::WorkflowRequestClass::WorkOrder)
+    );
+    assert_eq!(
         cached_session.collaboration_mode.as_deref(),
         Some(&collaboration_mode)
     );
@@ -7666,6 +7688,17 @@ async fn inactive_thread_settings_notification_updates_cached_collaboration_mode
     assert_eq!(
         app.chat_widget.config_ref().personality,
         Some(Personality::Pragmatic)
+    );
+    assert_eq!(
+        app.chat_widget.config_ref().extended_workflow.workflow_type,
+        codex_protocol::config_types::WorkflowType::WorkOrder
+    );
+    assert_eq!(
+        app.chat_widget
+            .config_ref()
+            .extended_workflow
+            .effective_request_class,
+        Some(codex_protocol::config_types::WorkflowRequestClass::WorkOrder)
     );
 }
 
@@ -7692,6 +7725,8 @@ async fn clear_only_ui_reset_preserves_chat_session_state() {
             reasoning_effort: None,
             collaboration_mode: None,
             personality: None,
+            workflow_type: codex_protocol::config_types::WorkflowType::Auto,
+            effective_request_class: None,
             message_history: None,
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),

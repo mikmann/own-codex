@@ -16,6 +16,8 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::config_types::WorkflowRequestClass;
+use codex_protocol::config_types::WorkflowType;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::mcp::CallToolResult;
@@ -79,6 +81,8 @@ pub struct ThreadConfigSnapshot {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub reasoning_summary: Option<ReasoningSummary>,
     pub personality: Option<Personality>,
+    pub workflow_type: WorkflowType,
+    pub effective_request_class: Option<WorkflowRequestClass>,
     pub collaboration_mode: CollaborationMode,
     pub session_source: SessionSource,
     pub history_mode: ThreadHistoryMode,
@@ -158,6 +162,8 @@ impl ThreadConfigSnapshot {
             reasoning_effort: self.reasoning_effort,
             reasoning_summary: self.reasoning_summary,
             personality: self.personality,
+            workflow_type: Some(self.workflow_type),
+            effective_request_class: self.effective_request_class,
             collaboration_mode: self.collaboration_mode,
         }
     }
@@ -180,6 +186,7 @@ pub struct CodexThreadSettingsOverrides {
     pub service_tier: Option<Option<String>>,
     pub collaboration_mode: Option<CollaborationMode>,
     pub personality: Option<Personality>,
+    pub workflow_type: Option<WorkflowType>,
 }
 
 pub struct CodexThread {
@@ -438,6 +445,7 @@ impl CodexThread {
             service_tier,
             collaboration_mode,
             personality,
+            workflow_type,
         } = overrides;
         let collaboration_mode = if let Some(collaboration_mode) = collaboration_mode {
             collaboration_mode
@@ -461,6 +469,7 @@ impl CodexThread {
             reasoning_summary: summary,
             service_tier,
             personality,
+            workflow_type,
             ..Default::default()
         }
     }
@@ -505,6 +514,23 @@ impl CodexThread {
     /// Returns the persisted workflow and session token counters for this root-agent tree.
     pub async fn workflow_token_budget_status(&self) -> Option<WorkflowTokenBudgetStatus> {
         self.session.workflow_token_budget_status().await
+    }
+
+    pub async fn workflow_type_update_blocker(&self) -> Option<&'static str> {
+        if self.session.active_turn.lock().await.is_some() {
+            return Some("workflow type cannot be changed while a turn is running");
+        }
+        if self
+            .session
+            .workflow_token_budget_status()
+            .await
+            .is_some_and(|status| status.active)
+        {
+            return Some(
+                "workflow type cannot be changed while a workflow generation is active; finish it or reset the workflow budget first",
+            );
+        }
+        None
     }
 
     /// Records a user-role session-prefix message without creating a new user turn boundary.

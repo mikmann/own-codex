@@ -930,15 +930,75 @@ async fn build_skills_and_plugins(
             .collect::<Vec<_>>()
             .join("\n");
         let history = sess.clone_history().await;
-        let plan = crate::extended_workflow::plan_turn_with_history(
+        let mut plan = crate::extended_workflow::plan_turn_with_history(
             &request_text,
             history.raw_items(),
             &turn_context.sub_id,
             &turn_context.config.extended_workflow,
         );
-        turn_context.extension_data.insert(
-            crate::extended_workflow::WorkflowTurnRuntimeState::new(&plan, &request_text),
-        );
+        let preflight_input = plan.effective_root_request.clone();
+        if let Err(message) = crate::extended_workflow::preflight_process_plan(
+            &mut plan.experts,
+            &turn_context.config,
+            &preflight_input,
+        )
+        .await
+        {
+            sess.send_event(
+                turn_context,
+                EventMsg::Error(ErrorEvent {
+                    message: format!(
+                        "Extended workflow role preflight failed before any expert was started: {message}"
+                    ),
+                    codex_error_info: None,
+                }),
+            )
+            .await;
+            return None;
+        }
+        if let Err(error) =
+            crate::tools::handlers::multi_agents_common::preflight_workflow_process_profiles(
+                sess,
+                turn_context,
+                &plan.experts,
+            )
+            .await
+        {
+            sess.send_event(
+                turn_context,
+                EventMsg::Error(ErrorEvent {
+                    message: format!(
+                        "Extended workflow runtime preflight failed before any expert was started: {error}"
+                    ),
+                    codex_error_info: None,
+                }),
+            )
+            .await;
+            return None;
+        }
+        sess.set_effective_workflow_request_class(plan.classification.class)
+            .await;
+        sess.send_event(
+            turn_context,
+            super::handlers::thread_settings_applied_event(sess).await,
+        )
+        .await;
+        let workflow_runtime =
+            crate::extended_workflow::WorkflowTurnRuntimeState::new(&plan, &request_text);
+        if let Err(message) = workflow_runtime.preflight_expert_spawn_directives() {
+            sess.send_event(
+                turn_context,
+                EventMsg::Error(ErrorEvent {
+                    message: format!(
+                        "Extended workflow task-contract preflight failed before any expert was started: {message}"
+                    ),
+                    codex_error_info: None,
+                }),
+            )
+            .await;
+            return None;
+        }
+        turn_context.extension_data.insert(workflow_runtime);
         let turn_context_fragment =
             match crate::context::ExtendedWorkflowTurnContext::try_new(&plan) {
                 Ok(fragment) => fragment,

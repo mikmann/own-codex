@@ -103,6 +103,7 @@ pub(super) fn workflow_agent_validation_details(
             Some(WorkflowFindingSeverity::Medium) => Span::from("Medium").cyan().bold(),
             Some(WorkflowFindingSeverity::High) => Span::from("High").red().bold(),
             Some(WorkflowFindingSeverity::Critical) => Span::from("Critical").red().bold(),
+            None if validation.reviewer_verdict.is_none() => Span::from("not applicable").dim(),
             None => Span::from("unknown").dim(),
         };
         details.push(

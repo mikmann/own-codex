@@ -691,6 +691,8 @@ pub(super) async fn handle_pending_thread_resume_request(
         active_permission_profile,
         workspace_roots,
         reasoning_effort,
+        workflow_type,
+        effective_request_class,
         originator,
         ..
     } = config_snapshot;
@@ -713,6 +715,8 @@ pub(super) async fn handle_pending_thread_resume_request(
         sandbox,
         active_permission_profile,
         reasoning_effort,
+        workflow_type: workflow_type.into(),
+        effective_request_class: effective_request_class.map(Into::into),
         multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
         initial_turns_page,
         turns_backwards_cursor,

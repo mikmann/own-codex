@@ -694,6 +694,7 @@ fn ensure_v2_agent_loaded_reloads_registered_read_only_workflow_agent() {
                         workflow_turn_id: Some("turn-context-budget"),
                         assignment_sha256: Some("assignment"),
                         workflow_root_sha256: Some("root"),
+                        role_fingerprint_sha256: None,
                         context_budget: Some(64_000),
                     },
                 ),
@@ -1158,6 +1159,8 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
                         reasoning_effort: None,
                         reasoning_summary: None,
                         personality: None,
+                        workflow_type: Some(codex_protocol::config_types::WorkflowType::Auto),
+                        effective_request_class: None,
                         collaboration_mode: CollaborationMode {
                             mode: ModeKind::Default,
                             settings: Settings {

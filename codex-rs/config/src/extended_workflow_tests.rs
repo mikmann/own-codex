@@ -4,10 +4,35 @@ use super::*;
 fn defaults_are_independent_and_bounded() {
     let config = ExtendedWorkflowConfig::default();
     assert!(!config.enabled);
+    assert_eq!(
+        config.workflow_type,
+        codex_protocol::config_types::WorkflowType::Auto
+    );
     assert_eq!((config.experts.min, config.experts.max), (2, 4));
     assert_eq!((config.reviewers.min, config.reviewers.max), (2, 4));
     assert!(config.experts.enabled);
     assert!(config.reviewers.enabled);
+}
+
+#[test]
+fn workflow_type_defaults_to_auto_and_accepts_all_documented_values() {
+    use codex_protocol::config_types::WorkflowType;
+
+    for (value, expected) in [
+        ("auto", WorkflowType::Auto),
+        ("inactive", WorkflowType::Inactive),
+        ("concept", WorkflowType::Concept),
+        ("work-order", WorkflowType::WorkOrder),
+    ] {
+        let parsed: ExtendedWorkflowToml = toml::from_str(&format!("workflow_type = \"{value}\""))
+            .expect("documented workflow type");
+        let resolved = ExtendedWorkflowConfig::resolve(Some(&parsed)).expect("valid config");
+        assert_eq!(resolved.workflow_type, expected);
+    }
+
+    let error = toml::from_str::<ExtendedWorkflowToml>("workflow_type = \"work_order\"")
+        .expect_err("non-canonical workflow type");
+    assert!(error.to_string().contains("unknown variant"));
 }
 
 #[test]
@@ -260,8 +285,8 @@ fn context_budget_must_fit_the_runtime_token_counter() {
 }
 
 #[test]
-fn rejects_more_than_six_profiles_even_when_the_process_is_disabled() {
-    let profiles = (0..7)
+fn separates_the_six_agent_limit_from_the_sixteen_profile_catalog_limit() {
+    let profiles = (0..17)
         .map(|index| WorkflowAgentProfileToml {
             name: format!("expert-{index}"),
             role: format!("Role {index}"),
@@ -278,18 +303,72 @@ fn rejects_more_than_six_profiles_even_when_the_process_is_disabled() {
     };
 
     let error = ExtendedWorkflowConfig::resolve(Some(&config)).expect_err("too many profiles");
-    assert!(error.contains("must contain at most 6 profiles"));
+    assert!(error.contains("must contain at most 16 profiles"));
 }
 
 #[test]
-fn rejects_oversized_profile_fields_with_the_config_path() {
+fn additional_profiles_append_to_built_ins_without_changing_profiles_replacement() {
+    let additional = WorkflowAgentProfileToml {
+        name: "database_migration".to_string(),
+        role: "Database migration".to_string(),
+        selection_keywords: vec![" Schema   Migration ".to_string(), "Datenbank".to_string()],
+        ..Default::default()
+    };
+    let config = ExtendedWorkflowToml {
+        experts: Some(WorkflowProcessToml {
+            additional_profiles: Some(vec![additional.clone()]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let resolved = ExtendedWorkflowConfig::resolve(Some(&config)).expect("additive catalog");
+    assert_eq!(resolved.experts.profiles.len(), 7);
+    let appended = resolved.experts.profiles.last().expect("appended profile");
+    assert_eq!(appended.name, "database_migration");
+    assert_eq!(
+        appended.selection_keywords,
+        vec!["schema migration".to_string(), "datenbank".to_string()]
+    );
+    assert_eq!(appended.source, WorkflowProfileSource::AdditionalProfiles);
+
+    let replacement = WorkflowAgentProfileToml {
+        name: "replacement".to_string(),
+        role: "Replacement".to_string(),
+        ..Default::default()
+    };
     let config = ExtendedWorkflowToml {
         experts: Some(WorkflowProcessToml {
             min: Some(1),
-            max: Some(1),
-            profiles: Some(vec![WorkflowAgentProfileToml {
-                name: "x".repeat(EXTENDED_WORKFLOW_MAX_PROFILE_FIELD_BYTES + 1),
-                role: "Architecture".to_string(),
+            max: Some(2),
+            profiles: Some(vec![replacement]),
+            additional_profiles: Some(vec![additional]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let resolved = ExtendedWorkflowConfig::resolve(Some(&config)).expect("replacement plus add-on");
+    assert_eq!(
+        resolved
+            .experts
+            .profiles
+            .iter()
+            .map(|profile| profile.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["replacement", "database_migration"]
+    );
+    assert_eq!(
+        resolved.experts.profiles[0].source,
+        WorkflowProfileSource::Profiles
+    );
+}
+
+#[test]
+fn additional_profiles_participate_in_duplicate_validation() {
+    let config = ExtendedWorkflowToml {
+        experts: Some(WorkflowProcessToml {
+            additional_profiles: Some(vec![WorkflowAgentProfileToml {
+                name: "EXPERT_1".to_string(),
+                role: "Different role".to_string(),
                 ..Default::default()
             }]),
             ..Default::default()
@@ -297,7 +376,84 @@ fn rejects_oversized_profile_fields_with_the_config_path() {
         ..Default::default()
     };
 
-    let error = ExtendedWorkflowConfig::resolve(Some(&config)).expect_err("oversized name");
-    assert!(error.contains("extended_workflow.experts.profiles[0].name"));
-    assert!(error.contains("at most 256 UTF-8 bytes"));
+    let error = ExtendedWorkflowConfig::resolve(Some(&config)).expect_err("duplicate name");
+    assert!(error.contains("profile names must be unique"));
+}
+
+#[test]
+fn selection_keywords_have_hard_count_size_and_normalized_uniqueness_limits() {
+    for (keywords, expected) in [
+        (
+            vec!["keyword".to_string(); EXTENDED_WORKFLOW_MAX_SELECTION_KEYWORDS + 1],
+            "at most 12 entries",
+        ),
+        (
+            vec!["x".repeat(EXTENDED_WORKFLOW_MAX_SELECTION_KEYWORD_BYTES + 1)],
+            "at most 64 UTF-8 bytes",
+        ),
+        (
+            vec![format!(
+                "{}a",
+                "-".repeat(EXTENDED_WORKFLOW_MAX_SELECTION_KEYWORD_BYTES)
+            )],
+            "at most 64 UTF-8 bytes",
+        ),
+        (
+            vec![
+                "Schema   Migration".to_string(),
+                "schema migration".to_string(),
+            ],
+            "unique after normalization",
+        ),
+        (
+            vec![
+                "schema-migration".to_string(),
+                "schema migration".to_string(),
+            ],
+            "unique after normalization",
+        ),
+    ] {
+        let config = ExtendedWorkflowToml {
+            experts: Some(WorkflowProcessToml {
+                min: Some(1),
+                max: Some(1),
+                profiles: Some(vec![WorkflowAgentProfileToml {
+                    name: "bounded".to_string(),
+                    role: "Bounded".to_string(),
+                    selection_keywords: keywords,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let error = ExtendedWorkflowConfig::resolve(Some(&config)).expect_err(expected);
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn rejects_oversized_profile_fields_with_the_config_path() {
+    for name in [
+        "x".repeat(EXTENDED_WORKFLOW_MAX_PROFILE_FIELD_BYTES + 1),
+        format!("{}x", " ".repeat(EXTENDED_WORKFLOW_MAX_PROFILE_FIELD_BYTES)),
+    ] {
+        let config = ExtendedWorkflowToml {
+            experts: Some(WorkflowProcessToml {
+                min: Some(1),
+                max: Some(1),
+                profiles: Some(vec![WorkflowAgentProfileToml {
+                    name,
+                    role: "Architecture".to_string(),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let error = ExtendedWorkflowConfig::resolve(Some(&config)).expect_err("oversized name");
+        assert!(error.contains("extended_workflow.experts.profiles[0].name"));
+        assert!(error.contains("at most 256 UTF-8 bytes"));
+    }
 }

@@ -269,6 +269,8 @@ mod tests {
             },
             multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
             personality: None,
+            workflow_type: codex_app_server_protocol::WorkflowType::Auto,
+            effective_request_class: None,
         }
     }
 }

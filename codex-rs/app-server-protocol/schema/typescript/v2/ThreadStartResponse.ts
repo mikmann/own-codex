@@ -8,6 +8,8 @@ import type { ApprovalsReviewer } from "./ApprovalsReviewer";
 import type { AskForApproval } from "./AskForApproval";
 import type { SandboxPolicy } from "./SandboxPolicy";
 import type { Thread } from "./Thread";
+import type { WorkflowRequestClass } from "./WorkflowRequestClass";
+import type { WorkflowType } from "./WorkflowType";
 
 export type ThreadStartResponse = {thread: Thread, model: string, modelProvider: string, serviceTier: string | null, cwd: AbsolutePathBuf, /**
  * Environment-native paths to instruction source files currently loaded for this thread.
@@ -19,4 +21,10 @@ approvalsReviewer: ApprovalsReviewer, /**
  * Legacy sandbox policy retained for compatibility. Experimental clients
  * should prefer `activePermissionProfile` for profile provenance.
  */
-sandbox: SandboxPolicy, reasoningEffort: ReasoningEffort | null};
+sandbox: SandboxPolicy, reasoningEffort: ReasoningEffort | null, /**
+ * Extended-workflow selection restored for this thread.
+ */
+workflowType: WorkflowType, /**
+ * Effective request class from the latest classified root turn, if any.
+ */
+effectiveRequestClass: WorkflowRequestClass | null};

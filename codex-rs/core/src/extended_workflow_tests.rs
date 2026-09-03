@@ -1,4 +1,5 @@
 use super::*;
+use codex_protocol::config_types::WorkflowType;
 
 const TEST_TURN_ID: &str = "turn-test-1";
 const TEST_CHANGE_DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -69,6 +70,36 @@ fn concept_with_explicit_implementation_is_a_work_order() {
     let classification =
         classify_request("Erstelle ein Konzept und implementiere danach die ausgewählte Lösung.");
     assert_eq!(classification.class, RequestClass::WorkOrder);
+}
+
+#[test]
+fn forced_workflow_type_overrides_only_the_request_class() {
+    let input = "Erkläre die Security- und Architekturfolgen einer unbekannten Permission.";
+    let automatic = classify_request(input);
+    assert_eq!(
+        plan_turn(input, TEST_TURN_ID, &ExtendedWorkflowConfig::default()).classification,
+        automatic
+    );
+    let mut config = ExtendedWorkflowConfig {
+        workflow_type: WorkflowType::Concept,
+        ..ExtendedWorkflowConfig::default()
+    };
+    let concept = plan_turn(input, TEST_TURN_ID, &config).classification;
+    let mut expected_concept = automatic.clone();
+    expected_concept.class = RequestClass::Concept;
+    expected_concept
+        .reasons
+        .push("request class forced by workflow type `concept`".to_string());
+    assert_eq!(concept, expected_concept);
+
+    config.workflow_type = WorkflowType::WorkOrder;
+    let work_order = plan_turn(input, TEST_TURN_ID, &config).classification;
+    let mut expected_work_order = automatic;
+    expected_work_order.class = RequestClass::WorkOrder;
+    expected_work_order
+        .reasons
+        .push("request class forced by workflow type `work-order`".to_string());
+    assert_eq!(work_order, expected_work_order);
 }
 
 #[test]
@@ -569,6 +600,12 @@ fn workflow_spawn_task_is_root_bound_and_context_budgeted() {
         .expect("selected constrained expert");
     assert!(
         constrained_runtime
+            .preflight_expert_spawn_directives()
+            .expect_err("complete expert contracts must be preflighted together")
+            .contains("no agent was started")
+    );
+    assert!(
+        constrained_runtime
             .spawn_directive_for_task(&constrained.task_name)
             .expect_err("task must exceed one token")
             .contains("no agent was started")
@@ -630,23 +667,14 @@ fn maximum_bounded_reviewer_task_is_spawnable_and_context_budget_counts_contract
     let constrained_turn_plan = plan_turn(&root_request, TEST_TURN_ID, &config);
     let constrained_runtime = WorkflowTurnRuntimeState::new(&constrained_turn_plan, &root_request);
     let constrained_reviewer_plan = plan_reviewers(&change_summary, TEST_TURN_ID, &config);
-    constrained_runtime
+    let error = constrained_runtime
         .install_reviewers(
             &constrained_reviewer_plan,
             &change_summary,
             TEST_CHANGE_DIGEST,
         )
-        .expect("constrained reviewer round should install");
-    let constrained_reviewer = constrained_reviewer_plan
-        .selected
-        .first()
-        .expect("selected constrained reviewer");
-    assert!(
-        constrained_runtime
-            .spawn_directive_for_task(&constrained_reviewer.task_name)
-            .expect_err("complete task contract must exceed the assignment-only ceiling")
-            .contains("complete server-bound task contract")
-    );
+        .expect_err("complete reviewer contracts must be preflighted before installation");
+    assert!(error.contains("complete server-bound task contract"));
 }
 
 #[test]

@@ -23,7 +23,7 @@ fn primary_and_compatibility_launchers_report_the_distribution_version() -> Resu
             .assert()
             .success()
             .stdout(predicate::str::contains(
-                "codex-extended-workflow v0.147.1-alpha-9",
+                "codex-extended-workflow v0.147.1-alpha-10",
             ));
     }
     Ok(())
@@ -39,6 +39,7 @@ fn help_resume_and_completion_use_the_primary_name() -> Result<()> {
             "codex-extended-workflow [OPTIONS]",
         ))
         .stdout(predicate::str::contains("--workflow-token-limit <TOKENS>"))
+        .stdout(predicate::str::contains("--workflow-type <TYPE>"))
         .stdout(predicate::str::contains("--expert-min <COUNT>"))
         .stdout(predicate::str::contains("--expert-max <COUNT>"))
         .stdout(predicate::str::contains("--reviewer-min <COUNT>"))
@@ -82,6 +83,24 @@ fn workflow_token_limit_is_available_to_runtime_commands() -> Result<()> {
         ])
         .assert()
         .success();
+    Ok(())
+}
+
+#[test]
+fn workflow_type_accepts_documented_values_and_rejects_other_spellings() -> Result<()> {
+    for value in ["auto", "inactive", "concept", "work-order"] {
+        command("codex-extended-workflow")?
+            .args(["--workflow-type", value, "completion", "powershell"])
+            .assert()
+            .success();
+    }
+    command("codex-extended-workflow")?
+        .args(["--workflow-type", "work_order"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "expected one of: auto, inactive, concept, work-order",
+        ));
     Ok(())
 }
 

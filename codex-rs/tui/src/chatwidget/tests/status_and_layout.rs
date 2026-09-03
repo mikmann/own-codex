@@ -18,6 +18,7 @@ fn enable_test_ambient_pet(chat: &mut ChatWidget) {
 #[tokio::test]
 async fn workflow_status_line_uses_persisted_tree_totals_and_effective_limit() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.extended_workflow.enabled = true;
     chat.workflow_token_budget = Some(codex_app_server_protocol::WorkflowTokenBudgetStatus {
         session_tokens_used: 243_510,
         workflow_tokens_used: 92_400,
@@ -32,7 +33,7 @@ async fn workflow_status_line_uses_persisted_tree_totals_and_effective_limit() {
     );
     assert_eq!(
         chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::WorkflowTokens),
-        Some("Workflow: 92.400 / 150.000 Tokens (61,6 %)".to_string())
+        Some("Workflow: auto · 92.400 / 150.000 Tokens (61,6 %)".to_string())
     );
 
     chat.workflow_token_budget = Some(codex_app_server_protocol::WorkflowTokenBudgetStatus {
@@ -41,8 +42,88 @@ async fn workflow_status_line_uses_persisted_tree_totals_and_effective_limit() {
     });
     assert_eq!(
         chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::WorkflowTokens),
-        Some("Workflow: 92.400 / ∞ Tokens".to_string())
+        Some("Workflow: auto · 92.400 / ∞ Tokens".to_string())
     );
+
+    chat.config.extended_workflow.workflow_type =
+        codex_protocol::config_types::WorkflowType::Concept;
+    assert_eq!(
+        chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::WorkflowTokens),
+        Some("Workflow: concept · 92.400 / ∞ Tokens".to_string())
+    );
+    chat.workflow_token_budget = None;
+    assert_eq!(
+        chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::WorkflowTokens),
+        Some("Workflow: concept".to_string())
+    );
+    chat.config.extended_workflow.workflow_type =
+        codex_protocol::config_types::WorkflowType::WorkOrder;
+    assert_eq!(
+        chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::WorkflowTokens),
+        Some("Workflow: work-order".to_string())
+    );
+    chat.config.extended_workflow.workflow_type =
+        codex_protocol::config_types::WorkflowType::Inactive;
+    assert_eq!(
+        chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::WorkflowTokens),
+        Some("Workflow: inaktiv".to_string())
+    );
+
+    let mut forms = Vec::new();
+    for (workflow_type, workflow_budget) in [
+        (codex_protocol::config_types::WorkflowType::Inactive, None),
+        (codex_protocol::config_types::WorkflowType::Auto, None),
+        (
+            codex_protocol::config_types::WorkflowType::Auto,
+            Some(codex_app_server_protocol::WorkflowTokenBudgetStatus {
+                session_tokens_used: 304_285,
+                workflow_tokens_used: 304_285,
+                base_limit_tokens: 0,
+                effective_limit_tokens: 0,
+                active: true,
+            }),
+        ),
+        (
+            codex_protocol::config_types::WorkflowType::Auto,
+            Some(codex_app_server_protocol::WorkflowTokenBudgetStatus {
+                session_tokens_used: 304_285,
+                workflow_tokens_used: 304_285,
+                base_limit_tokens: 400_000,
+                effective_limit_tokens: 400_000,
+                active: true,
+            }),
+        ),
+        (codex_protocol::config_types::WorkflowType::Concept, None),
+        (
+            codex_protocol::config_types::WorkflowType::Concept,
+            Some(codex_app_server_protocol::WorkflowTokenBudgetStatus {
+                session_tokens_used: 304_285,
+                workflow_tokens_used: 304_285,
+                base_limit_tokens: 0,
+                effective_limit_tokens: 0,
+                active: true,
+            }),
+        ),
+        (codex_protocol::config_types::WorkflowType::WorkOrder, None),
+        (
+            codex_protocol::config_types::WorkflowType::WorkOrder,
+            Some(codex_app_server_protocol::WorkflowTokenBudgetStatus {
+                session_tokens_used: 304_285,
+                workflow_tokens_used: 304_285,
+                base_limit_tokens: 0,
+                effective_limit_tokens: 0,
+                active: true,
+            }),
+        ),
+    ] {
+        chat.config.extended_workflow.workflow_type = workflow_type;
+        chat.workflow_token_budget = workflow_budget;
+        forms.push(
+            chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::WorkflowTokens)
+                .expect("workflow status line"),
+        );
+    }
+    insta::assert_snapshot!("workflow_type_status_line_forms", forms.join("\n"));
 }
 
 #[tokio::test]
@@ -3554,6 +3635,8 @@ async fn session_configured_clears_goal_status_footer() {
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
         personality: None,
+        workflow_type: codex_protocol::config_types::WorkflowType::Auto,
+        effective_request_class: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),

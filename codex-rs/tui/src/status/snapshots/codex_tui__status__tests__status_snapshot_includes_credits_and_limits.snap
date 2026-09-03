@@ -5,7 +5,7 @@ expression: sanitized
 /status
 
 ╭─────────────────────────────────────────────────────────────────────────────╮
-│  >_ codex-extended-workflow (v0.147.1-alpha-9)                              │
+│  >_ codex-extended-workflow (v0.147.1-alpha-10)                             │
 │                                                                             │
 │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
 │ information on rate limits and credits                                      │
@@ -14,6 +14,9 @@ expression: sanitized
 │  Directory: [[workspace]]                                                   │
 │  Permissions:      Custom (workspace with network access, Ask for approval) │
 │  Agents.md:        <none>                                                   │
+│  Workflow type:             inactive                                        │
+│  Effective request class:   none                                            │
+│  Workflow budget:           inactive                                        │
 │                                                                             │
 │  Token usage:      2K total  (1.4K input + 600 output)                      │
 │  Context window:   100% left (2.2K used / 272K)                             │

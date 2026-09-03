@@ -1,0 +1,12 @@
+---
+source: tui/src/chatwidget/tests/status_and_layout.rs
+expression: "forms.join(\"\\n\")"
+---
+Workflow: inaktiv
+Workflow: auto
+Workflow: auto · 304.285 / ∞ Tokens
+Workflow: auto · 304.285 / 400.000 Tokens (76,1 %)
+Workflow: concept
+Workflow: concept · 304.285 / ∞ Tokens
+Workflow: work-order
+Workflow: work-order · 304.285 / ∞ Tokens

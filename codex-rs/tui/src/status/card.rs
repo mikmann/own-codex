@@ -12,6 +12,7 @@ use crate::width::display_width;
 use chrono::DateTime;
 use chrono::Local;
 use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::WorkflowTokenBudgetStatus;
 use codex_model_provider_info::WireApi;
 use codex_protocol::ThreadId;
 use codex_protocol::account::PlanType;
@@ -47,6 +48,7 @@ use super::rate_limits::compose_rate_limit_data_many;
 use super::rate_limits::format_status_limit_summary;
 use super::rate_limits::render_status_limit_progress_bar;
 use super::remote_connection::RemoteConnectionStatus;
+use super::workflow::WorkflowStatus;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_lines;
 use crate::wrapping::word_wrap_lines;
@@ -118,6 +120,7 @@ struct StatusHistoryCell {
     session_id: Option<String>,
     forked_from: Option<String>,
     token_usage: StatusTokenUsageData,
+    workflow: WorkflowStatus,
     rate_limit_state: Arc<RwLock<StatusRateLimitState>>,
 }
 
@@ -192,6 +195,7 @@ pub(crate) fn new_status_output_with_rate_limits(
         collaboration_mode,
         reasoning_effort_override,
         "<none>".to_string(),
+        /*workflow_budget*/ None,
         refreshing_rate_limits,
     )
     .0
@@ -215,6 +219,7 @@ pub(crate) fn new_status_output_with_rate_limits_handle(
     collaboration_mode: Option<&str>,
     reasoning_effort_override: Option<Option<ReasoningEffort>>,
     agents_summary: String,
+    workflow_budget: Option<WorkflowTokenBudgetStatus>,
     refreshing_rate_limits: bool,
 ) -> (CompositeHistoryCell, StatusHistoryHandle) {
     let command = PlainHistoryCell::new(vec!["/status".magenta().into()]);
@@ -235,6 +240,7 @@ pub(crate) fn new_status_output_with_rate_limits_handle(
         collaboration_mode,
         reasoning_effort_override,
         agents_summary,
+        workflow_budget,
         refreshing_rate_limits,
     );
 
@@ -263,6 +269,7 @@ impl StatusHistoryCell {
         collaboration_mode: Option<&str>,
         reasoning_effort_override: Option<Option<ReasoningEffort>>,
         agents_summary: String,
+        workflow_budget: Option<WorkflowTokenBudgetStatus>,
         refreshing_rate_limits: bool,
     ) -> (Self, StatusHistoryHandle) {
         let approval_policy = AskForApproval::from(config.permissions.approval_policy.value());
@@ -366,6 +373,7 @@ impl StatusHistoryCell {
                 session_id,
                 forked_from,
                 token_usage,
+                workflow: WorkflowStatus::new(config, workflow_budget),
                 agents_summary,
                 rate_limit_state: rate_limit_state.clone(),
             },
@@ -776,6 +784,11 @@ impl HistoryCell for StatusHistoryCell {
         self.collect_rate_limit_labels(&rate_limit_state, &mut seen, &mut labels);
 
         let formatter = FieldFormatter::from_labels(labels.iter().map(String::as_str));
+        let workflow_formatter = FieldFormatter::from_labels([
+            "Workflow type",
+            "Effective request class",
+            "Workflow budget",
+        ]);
         let value_width = formatter.value_width(available_inner_width);
 
         let note_first_line = Line::from(vec![
@@ -831,6 +844,18 @@ impl HistoryCell for StatusHistoryCell {
         lines.push(formatter.line("Directory", vec![Span::from(directory_value)]));
         lines.push(formatter.line("Permissions", vec![Span::from(self.permissions.clone())]));
         lines.push(formatter.line("Agents.md", vec![Span::from(agents_summary)]));
+        lines.push(workflow_formatter.line(
+            "Workflow type",
+            vec![Span::from(self.workflow.workflow_type_display())],
+        ));
+        lines.push(workflow_formatter.line(
+            "Effective request class",
+            vec![Span::from(self.workflow.effective_request_class_display())],
+        ));
+        lines.push(workflow_formatter.line(
+            "Workflow budget",
+            vec![Span::from(self.workflow.budget_display())],
+        ));
 
         if let Some(account_value) = account_value {
             lines.push(formatter.line("Account", vec![Span::from(account_value)]));

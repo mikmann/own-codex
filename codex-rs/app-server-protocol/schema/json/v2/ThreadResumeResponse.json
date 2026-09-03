@@ -2733,11 +2733,30 @@
       ],
       "type": "string"
     },
+    "WorkflowRequestClass": {
+      "description": "Effective request class used by the latest classified root turn.",
+      "enum": [
+        "simpleAnswer",
+        "workOrder",
+        "concept"
+      ],
+      "type": "string"
+    },
     "WorkflowReviewerVerdict": {
       "enum": [
         "pass",
         "needsChanges",
         "blocked"
+      ],
+      "type": "string"
+    },
+    "WorkflowType": {
+      "description": "Extended-workflow selection applied to future root requests in a thread.",
+      "enum": [
+        "auto",
+        "inactive",
+        "concept",
+        "workOrder"
       ],
       "type": "string"
     },
@@ -2787,6 +2806,18 @@
     "cwd": {
       "$ref": "#/definitions/AbsolutePathBuf"
     },
+    "effectiveRequestClass": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/WorkflowRequestClass"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Effective request class from the latest classified root turn, if any."
+    },
     "instructionSources": {
       "default": [],
       "description": "Environment-native paths to instruction source files currently loaded for this thread.",
@@ -2827,6 +2858,15 @@
     },
     "thread": {
       "$ref": "#/definitions/Thread"
+    },
+    "workflowType": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/WorkflowType"
+        }
+      ],
+      "default": "auto",
+      "description": "Extended-workflow selection restored for this thread."
     }
   },
   "required": [

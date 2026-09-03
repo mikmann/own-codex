@@ -80,6 +80,7 @@ use codex_network_proxy::NetworkMode;
 use codex_protocol::config_types::ModelProviderAuthInfo;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::config_types::WorkflowType;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY;
@@ -6139,6 +6140,9 @@ async fn extended_workflow_uses_cli_then_repository_then_global_precedence() -> 
         codex_home.path().join(CONFIG_TOML_FILE),
         format!(
             r#"
+[extended_workflow]
+workflow_type = "concept"
+
 [extended_workflow.experts]
 min = 1
 max = 1
@@ -6153,6 +6157,9 @@ trust_level = "trusted"
     std::fs::write(
         project_config_dir.join(CONFIG_TOML_FILE),
         r#"
+[extended_workflow]
+workflow_type = "work-order"
+
 [extended_workflow.experts]
 min = 2
 max = 2
@@ -6174,6 +6181,15 @@ max = 2
         ),
         (2, 2)
     );
+    assert_eq!(
+        (
+            repository_config.extended_workflow.workflow_type,
+            repository_config
+                .extended_workflow
+                .workflow_type_from_session_flags,
+        ),
+        (WorkflowType::WorkOrder, false)
+    );
 
     let cli_config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
@@ -6185,6 +6201,10 @@ max = 2
             (
                 "extended_workflow.experts.max".to_string(),
                 toml::Value::Integer(3),
+            ),
+            (
+                "extended_workflow.workflow_type".to_string(),
+                toml::Value::String("inactive".to_string()),
             ),
         ])
         .harness_overrides(ConfigOverrides {
@@ -6199,6 +6219,15 @@ max = 2
             cli_config.extended_workflow.experts.max,
         ),
         (3, 3)
+    );
+    assert_eq!(
+        (
+            cli_config.extended_workflow.workflow_type,
+            cli_config
+                .extended_workflow
+                .workflow_type_from_session_flags,
+        ),
+        (WorkflowType::Inactive, true)
     );
     Ok(())
 }

@@ -18,6 +18,8 @@ use codex_protocol::SessionId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::config_types::WorkflowRequestClass;
+use codex_protocol::config_types::WorkflowType;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSpecialPath;
@@ -79,6 +81,12 @@ pub(crate) struct SessionConfiguration {
 
     /// Personality preference for the model.
     pub(super) personality: Option<Personality>,
+
+    /// Extended-workflow selection persisted for future root requests.
+    pub(super) workflow_type: WorkflowType,
+
+    /// Request class used by the latest classified root turn.
+    pub(super) effective_request_class: Option<WorkflowRequestClass>,
 
     /// Base instructions for the session.
     pub(super) base_instructions: String,
@@ -241,6 +249,8 @@ impl SessionConfiguration {
             reasoning_effort: self.collaboration_mode.reasoning_effort(),
             reasoning_summary: self.model_reasoning_summary,
             personality: self.personality,
+            workflow_type: self.workflow_type,
+            effective_request_class: self.effective_request_class,
             collaboration_mode: self.collaboration_mode.clone(),
             session_source: self.session_source.clone(),
             history_mode: self.history_mode,
@@ -298,6 +308,14 @@ impl SessionConfiguration {
         }
         if let Some(personality) = updates.personality {
             next_configuration.personality = Some(personality);
+        }
+        if let Some(workflow_type) = updates.workflow_type {
+            super::workflow_type::validate_update(
+                &next_configuration.original_config_do_not_use,
+                workflow_type,
+            )?;
+            next_configuration.workflow_type = workflow_type;
+            next_configuration.effective_request_class = None;
         }
         if let Some(approval_policy) = updates.approval_policy {
             next_configuration.approval_policy.set(approval_policy)?;
@@ -460,6 +478,7 @@ pub(crate) struct SessionSettingsUpdate {
     pub(crate) service_tier: Option<Option<String>>,
     pub(crate) final_output_json_schema: Option<Option<Value>>,
     pub(crate) personality: Option<Personality>,
+    pub(crate) workflow_type: Option<WorkflowType>,
     pub(crate) app_server_client_name: Option<String>,
     pub(crate) app_server_client_version: Option<String>,
 }

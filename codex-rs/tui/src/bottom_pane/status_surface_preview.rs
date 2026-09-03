@@ -62,7 +62,7 @@ impl StatusSurfacePreviewItem {
             StatusSurfacePreviewItem::UsedTokens => "0 used",
             StatusSurfacePreviewItem::SessionTokens => "Session: 243.510 Tokens",
             StatusSurfacePreviewItem::WorkflowTokens => {
-                "Workflow: 92.400 / 150.000 Tokens (61,6 %)"
+                "Workflow: auto · 92.400 / 150.000 Tokens (61,6 %)"
             }
             StatusSurfacePreviewItem::TotalInputTokens => "0 in",
             StatusSurfacePreviewItem::TotalOutputTokens => "0 out",

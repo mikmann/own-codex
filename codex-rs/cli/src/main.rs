@@ -90,6 +90,7 @@ use codex_login::read_codex_access_token_from_env;
 use codex_memories_write::clear_memory_roots_contents;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::manager::RefreshStrategy;
+use codex_protocol::config_types::WorkflowType;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::user_input::UserInput;
 use codex_terminal_detection::TerminalName;
@@ -101,7 +102,7 @@ use codex_terminal_detection::TerminalName;
 #[clap(
     name = "codex-extended-workflow",
     author,
-    version = "v0.147.1-alpha-9",
+    version = "v0.147.1-alpha-10",
     // If a sub‑command is given, ignore requirements of the default args.
     subcommand_negates_reqs = true,
     // The executable is sometimes invoked via a platform‑specific name like
@@ -140,7 +141,18 @@ struct MultitoolCli {
 
 #[derive(Debug, Args, Default)]
 struct ExtendedWorkflowProcessOverrides {
-    /// Token limit for one complete workflow including experts, reviewers, and compactions.
+    /// Select automatic classification, bypass, concept, or work-order orchestration.
+    #[arg(
+        long = "workflow-type",
+        global = true,
+        help_heading = "Extended workflow options",
+        value_name = "TYPE",
+        value_parser = WorkflowType::parse
+    )]
+    workflow_type: Option<WorkflowType>,
+
+    /// Token limit for one complete workflow including the main agent, experts, reviewers, and
+    /// compactions.
     /// Use 0 for unlimited. At the limit, interactive sessions can add 25/50/75/100% of the
     /// original limit; non-interactive exec stops safely.
     #[arg(
@@ -220,6 +232,11 @@ impl ExtendedWorkflowProcessOverrides {
         .into_iter()
         .filter_map(|(key, value)| value.map(|value| format!("{key}={value}")))
         .collect::<Vec<_>>();
+        if let Some(workflow_type) = self.workflow_type {
+            overrides.push(format!(
+                "extended_workflow.workflow_type=\"{workflow_type}\""
+            ));
+        }
         overrides.extend(
             [
                 ("extended_workflow.experts.min", self.expert_min),
@@ -3013,6 +3030,8 @@ mod tests {
             "--last",
             "--workflow-token-limit",
             "12000",
+            "--workflow-type",
+            "work-order",
             "--expert-min",
             "2",
             "--expert-max",
@@ -3037,6 +3056,7 @@ mod tests {
             vec![
                 "extended_workflow.experts.min=1",
                 "extended_workflow.workflow_budget_tokens=12000",
+                "extended_workflow.workflow_type=\"work-order\"",
                 "extended_workflow.experts.min=2",
                 "extended_workflow.experts.max=6",
                 "extended_workflow.reviewers.min=3",

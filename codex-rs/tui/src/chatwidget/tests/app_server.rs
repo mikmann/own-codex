@@ -35,6 +35,10 @@ fn thread_settings_for_test(
             },
             multi_agent_mode: Default::default(),
             personality: Some(Personality::Pragmatic),
+            workflow_type: codex_app_server_protocol::WorkflowType::WorkOrder,
+            effective_request_class: Some(
+                codex_app_server_protocol::WorkflowRequestClass::WorkOrder,
+            ),
         },
     }
 }
@@ -58,6 +62,8 @@ fn configured_thread_session(thread_id: ThreadId) -> crate::session_state::Threa
         reasoning_effort: None,
         collaboration_mode: None,
         personality: None,
+        workflow_type: codex_protocol::config_types::WorkflowType::Auto,
+        effective_request_class: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -378,6 +384,14 @@ async fn thread_settings_updated_updates_visible_state_without_transcript() {
         codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY
     );
     assert_eq!(chat.config_ref().personality, Some(Personality::Pragmatic));
+    assert_eq!(
+        chat.config_ref().extended_workflow.workflow_type,
+        codex_protocol::config_types::WorkflowType::WorkOrder
+    );
+    assert_eq!(
+        chat.config_ref().extended_workflow.effective_request_class,
+        Some(codex_protocol::config_types::WorkflowRequestClass::WorkOrder)
+    );
     assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Plan);
     assert!(
         drain_insert_history(&mut rx).is_empty(),

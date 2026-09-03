@@ -87,6 +87,7 @@ fn workflow_source(name: &str, workflow_turn_id: &str) -> SessionSource {
             workflow_turn_id: Some(workflow_turn_id),
             assignment_sha256: Some("assignment"),
             workflow_root_sha256: Some("root"),
+            role_fingerprint_sha256: None,
             context_budget: None,
         }),
     })
