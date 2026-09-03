@@ -10,20 +10,22 @@ Der Workflow trennt Beratung, Umsetzung und Prüfung in klar erkennbare Phasen:
   Änderungen umsetzt.
 - **Reviewer** prüfen die tatsächliche Änderung unabhängig und ausschließlich
   lesend.
-- **Der Validator** prüft zusätzlich, ob die strukturierten Antworten formal,
-  inhaltlich und zur gebundenen Aufgabe passend sind.
+- **Der Validator** prüft zusätzlich Schema, Pflichtfelder, Evidenz,
+  Größenlimit, Agentenidentität sowie Aufgaben- und gegebenenfalls
+  Digest-Bindung. Diese Prüfung garantiert nicht die Wahrheit jeder
+  fachlichen Aussage.
 
 Die Anfrage wird lokal und deterministisch klassifiziert. Dafür wird kein
 zusätzlicher Modellaufruf verbraucht.
 
 ## Ablaufdiagramme in Mermaid und ASCII
 
-Der Gesamtprozess ist bewusst auf zwei inhaltliche Diagramme verteilt. Ein einzelner Graph
+Der Gesamtprozess ist bewusst auf drei inhaltliche Diagramme verteilt. Ein einzelner Graph
 mit allen drei Klassen, Korrekturschleifen und Rücksprüngen erzeugt bei Mermaid
 ein sehr hohes, schlecht lesbares Layout. Das erste Diagramm zeigt die
-Klassifizierung; das zweite zeigt den vollständigen Arbeitsauftrag einschließlich
-Same-Digest-Abschluss. Jede Sicht steht zuerst als Mermaid-Diagramm und direkt
-darunter mit derselben Logik als reine ASCII-Fassung.
+Klassifizierung, das zweite den eigenständigen Konzeptpfad und das dritte den
+vollständigen Arbeitsauftrag einschließlich Same-Digest-Abschluss. Jede Sicht
+steht in Mermaid und mit derselben Logik als reine ASCII-Fassung zur Verfügung.
 
 ### Klassifizierung und Hauptpfade
 
@@ -35,28 +37,15 @@ flowchart TD
     S0 -->|"Ja"| S2["Optionale passende Experten"]
     S2 --> S1
 
-    B -->|"concept"| C1["2 bis 4 passende Experten"]
+    B -->|"concept"| C1["Passende Experten gemäß min und max"]
     C1 --> C2["Validiertes Konzept"]
     C2 --> C3["Konzept-Turn abgeschlossen"]
 
-    B -->|"work_order"| W1["2 bis 4 passende Experten"]
+    B -->|"work_order"| W1["Passende Experten gemäß min und max"]
     W1 --> W2["Validiertes Ticket oder Ticket-Serie"]
     W2 --> W3["Hauptagent implementiert und testet"]
     W3 --> W4["Reviewer prüfen den gebundenen Diff"]
     W4 --> W5["Same-Digest-Gate oder Benutzerentscheidung"]
-
-    classDef step fill:#e0f2fe,stroke:#0369a1,color:#0f172a,stroke-width:2px;
-    classDef gate fill:#fef3c7,stroke:#b45309,color:#0f172a,stroke-width:2px;
-    classDef answer fill:#dcfce7,stroke:#15803d,color:#052e16,stroke-width:2px;
-    classDef concept fill:#f3e8ff,stroke:#7e22ce,color:#2e1065,stroke-width:2px;
-    classDef work fill:#ffedd5,stroke:#c2410c,color:#431407,stroke-width:2px;
-
-    class A,S2,C1,W1 step;
-    class B,S0 gate;
-    class S1 answer;
-    class C2,C3 concept;
-    class W2,W3,W4,W5 work;
-    linkStyle default stroke:#64748b,stroke-width:2px;
 ```
 
 ### Klassifizierung und Hauptpfade als ASCII
@@ -76,7 +65,7 @@ flowchart TD
         |                                          v
         |                                   [DIREKTE ANTWORT]
         |
-        +-- concept --------> [2 BIS 4 PASSENDE EXPERTEN]
+        +-- concept --------> [PASSENDE EXPERTEN GEMÄSS MIN/MAX]
         |                           |
         |                           v
         |                    [VALIDIERTES KONZEPT]
@@ -84,7 +73,7 @@ flowchart TD
         |                           v
         |                    [KONZEPT-TURN FERTIG]
         |
-        +-- work_order -----> [2 BIS 4 PASSENDE EXPERTEN]
+        +-- work_order -----> [PASSENDE EXPERTEN GEMÄSS MIN/MAX]
                                     |
                                     v
                              [VALIDIERTES TICKET
@@ -103,60 +92,123 @@ flowchart TD
                               BENUTZERENTSCHEIDUNG]
 ```
 
+### Konzept als eigenständiger Workflow
+
+#### ASCII
+
+```text
+[KONZEPTANFRAGE ODER WORKFLOW-TYP concept]
+                    |
+                    v
+        [Root-Aufgabe eindeutig binden]
+                    |
+                    v
+       [passende Experten gemäß min/max]
+                    |
+                    v
+         {Berichte vom Validator akzeptiert?}
+              |                    |
+            Nein                   Ja
+              |                    |
+ [genau ein Korrekturversuch]      v
+              |          [Findings auswerten und auflösen]
+              v                    |
+ {Korrektur akzeptiert?}           v
+       |          |        [Hauptagent erstellt Konzept]
+     Nein         Ja               |
+       |          +----------------+
+    [STOP]                         v
+                       {Konzeptvertrag validiert?}
+                           |               |
+                         Nein              Ja
+                           |               |
+             [genau ein Korrekturversuch]  |
+                           |               |
+                           v               |
+                  {Korrektur gültig?}      |
+                     |           |         |
+                   Nein          Ja -------+
+                     |                     |
+                  [STOP]                    v
+                                  [Konzept abgeschlossen]
+                                            |
+                                            v
+                                    optional: Tickets ableiten
+```
+
+#### Mermaid
+
+```mermaid
+flowchart TD
+    A[Konzeptanfrage oder Workflow-Typ concept] --> B[Root-Aufgabe eindeutig binden]
+    B --> C[Passende Experten gemäß min und max]
+    C --> D{Berichte vom Validator akzeptiert?}
+    D -->|Nein| E[Genau ein Korrekturversuch]
+    E --> F{Korrektur akzeptiert?}
+    F -->|Nein| G[STOP]
+    F -->|Ja| H[Findings auswerten und auflösen]
+    D -->|Ja| H
+    H --> I[Hauptagent erstellt Konzept]
+    I --> J{Konzeptvertrag validiert?}
+    J -->|Nein| K[Genau ein Korrekturversuch]
+    K --> K2{Korrektur gültig?}
+    K2 -->|Nein| G
+    K2 -->|Ja| L
+    J -->|Ja| L[Konzept abgeschlossen]
+    L --> M[Optional Tickets ableiten]
+```
+
+Beide Diagramme zeigen denselben Konzeptablauf. Ein Konzept-Turn verändert
+keine Dateien allein aufgrund seiner Klasse. Eine spätere Umsetzung benötigt
+einen ausdrücklichen Arbeitsauftrag oder den Workflow-Typ `work-order`.
+
 ### Arbeitsauftrag mit Reviewer- und Same-Digest-Gate
 
 ```mermaid
 flowchart TD
-    A["1 · Arbeitsauftrag"] --> B["2 · Zwei bis vier passende Experten<br/>beraten read-only"]
-    B --> C{"Expertenberichte<br/>formal und inhaltlich gültig?"}
-    C --> C1["Gültig:<br/>Experten-Gate erfüllt"]
-    C --> C2["Ungültig:<br/>genau ein Korrekturversuch"]
+    A["1 · Arbeitsauftrag"] --> B["2 · Passende Experten gemäß min und max beraten read-only"]
+    B --> C{"Akzeptiert der Validator Schema, Bindung und Evidenz?"}
+    C -->|Ja| C1["Gültig: Beiträge und Findings auswerten"]
+    C -->|Nein| C2["Ungültig:<br/>genau ein Korrekturversuch"]
     C2 --> C3{"Korrigierter Bericht gültig?"}
-    C3 --> C1
-    C3 --> Z1["Weiterhin ungültig:<br/>Workflow stoppt"]
+    C3 -->|Ja| C1
+    C3 -->|Nein| Z1["Weiterhin ungültig:<br/>Workflow stoppt"]
 
-    C1 --> D["3 · Konzept, falls verlangt, und<br/>aktuelles Ticket validieren"]
-    D --> E["4 · Nur der Hauptagent<br/>implementiert und testet"]
+    C1 --> D["3 · Konzept, falls verlangt, und<br/>aktuelles Ticket erstellen"]
+    D --> D1{"Artefaktvertrag gültig?"}
+    D1 -->|Ja| E["4 · Nur der Hauptagent<br/>implementiert und testet"]
+    D1 -->|Nein| D2["Genau ein Artefakt-Korrekturversuch"]
+    D2 --> D3{"Korrigiertes Artefakt gültig?"}
+    D3 -->|Ja| E
+    D3 -->|Nein| Z1
     E --> F["5 · Finalen Working-Tree-Diff<br/>binärsensitiv hashen"]
-    F --> G["6 · Zwei bis vier passende Reviewer<br/>prüfen exakt diesen Digest read-only"]
+    F --> G["6 · Passende Reviewer gemäß min und max prüfen exakt diesen Digest read-only"]
     G --> H{"Reviewerberichte formal gültig?"}
-    H --> H1["Gültig:<br/>inhaltliches Review auswerten"]
-    H --> H2["Ungültig:<br/>genau ein Format-Korrekturversuch"]
+    H -->|Ja| H1["Gültig:<br/>inhaltliches Review auswerten"]
+    H -->|Nein| H2["Ungültig:<br/>genau ein gezielter Berichtskorrekturversuch"]
     H2 --> H3{"Korrigierter Bericht gültig?"}
-    H3 --> H1
-    H3 --> Z1
+    H3 -->|Ja| H1
+    H3 -->|Nein| Z1
 
     H1 --> I{"PASS und leere Befundliste?"}
-    I --> I1["PASS:<br/>Reviewer-Nachweis ist zulässig"]
-    I --> J["Befunde vorhanden:<br/>Auflösung nach Schweregrad"]
+    I -->|Ja| I1["PASS:<br/>Reviewer-Nachweis ist zulässig"]
+    I -->|Nein| J["Befunde vorhanden:<br/>Auflösung nach Schweregrad"]
     J --> J1["High oder Critical:<br/>zwingend beheben"]
     J --> J2["Low oder Medium:<br/>beheben oder konkret disponieren"]
     J1 --> K["Code korrigieren<br/>und Tests erneut ausführen"]
-    J2 --> K
-    J2 --> L["Konkrete Disposition<br/>ohne Diff-Änderung"]
+    J2 -->|beheben| K
+    J2 -->|disponieren| L["Konkrete Disposition<br/>ohne Diff-Änderung"]
     K --> M["Diff geändert:<br/>neuer Digest und neue Reviewrunde"]
+    M --> G
     L --> N["Derselbe Reviewer liefert<br/>genau eine Re-Review-Ausgabe"]
     N --> O{"Befunde geschlossen?"}
-    O --> I1
-    O --> Z2["Weiterhin offen:<br/>Benutzerentscheidung erforderlich"]
+    O -->|Ja| I1
+    O -->|Nein| Z2["Weiterhin offen:<br/>Benutzerentscheidung erforderlich"]
 
     I1 --> P["7 · Aktuellen Working-Tree-Digest<br/>beim Abschluss erneut berechnen"]
     P --> Q{"Alle benötigten Rollen PASS<br/>auf demselben aktuellen Digest?"}
-    Q --> X["Workflow erfolgreich abgeschlossen"]
-    Q --> Y["Nachweis fehlt oder ist veraltet:<br/>neue Reviewrunde oder Benutzerentscheidung"]
-
-    classDef step fill:#e0f2fe,stroke:#0369a1,color:#0f172a,stroke-width:2px;
-    classDef gate fill:#fef3c7,stroke:#b45309,color:#0f172a,stroke-width:2px;
-    classDef good fill:#dcfce7,stroke:#15803d,color:#052e16,stroke-width:2px;
-    classDef warn fill:#ffedd5,stroke:#c2410c,color:#431407,stroke-width:2px;
-    classDef stop fill:#fee2e2,stroke:#b91c1c,color:#450a0a,stroke-width:2px;
-
-    class A,B,D,E,F,G,K,L,M,N,P step;
-    class C,C3,H,H3,I,O,Q gate;
-    class C1,H1,I1,X good;
-    class C2,H2,J,J1,J2,Y warn;
-    class Z1,Z2 stop;
-    linkStyle default stroke:#64748b,stroke-width:2px;
+    Q -->|Ja| X["Workflow erfolgreich abgeschlossen"]
+    Q -->|Nein| Y["Nachweis fehlt oder ist veraltet:<br/>neue Reviewrunde oder Benutzerentscheidung"]
 ```
 
 ### Arbeitsauftrag mit Reviewer- und Same-Digest-Gate als ASCII
@@ -165,10 +217,10 @@ flowchart TD
 [1. ARBEITSAUFTRAG]
           |
           v
-[2. 2 BIS 4 PASSENDE EXPERTEN BERATEN READ-ONLY]
+[2. PASSENDE EXPERTEN GEMÄSS MIN/MAX BERATEN READ-ONLY]
           |
           v
-{SIND ALLE EXPERTENBERICHTE VOLLSTÄNDIG GÜLTIG?}
+{AKZEPTIERT DER VALIDATOR SCHEMA, BINDUNG UND EVIDENZ?}
           |
           +-- Nein --> [genau ein gezielter Korrekturversuch]
           |                         |
@@ -182,21 +234,35 @@ flowchart TD
           +-- Ja --------------------------------+
                                                  |
                                                  v
-[3. KONZEPT, FALLS VERLANGT, UND AKTUELLES TICKET VALIDIEREN]
+[3. KONZEPT, FALLS VERLANGT, UND AKTUELLES TICKET ERSTELLEN]
           |
           v
+{IST DER ARTEFAKTVERTRAG GÜLTIG?}
+          |
+          +-- Nein --> [genau ein Artefakt-Korrekturversuch]
+          |                         |
+          |                         v
+          |             {KORRIGIERTES ARTEFAKT GÜLTIG?}
+          |                         |
+          |                         +-- Nein --> [STOP]
+          |                         |
+          |                         +-- Ja ------+
+          |                                      |
+          +-- Ja --------------------------------+
+                                                 |
+                                                 v
 [4. NUR DER HAUPTAGENT IMPLEMENTIERT UND TESTET]
           |
           v
 [5. FINALEN WORKING-TREE-DIFF BINÄRSENSITIV HASHEN]
           |
           v
-[6. 2 BIS 4 REVIEWER PRÜFEN EXAKT DIESEN DIGEST READ-ONLY]
+[6. PASSENDE REVIEWER GEMÄSS MIN/MAX PRÜFEN EXAKT DIESEN DIGEST READ-ONLY]
           |
           v
 {SIND ALLE REVIEWERBERICHTE FORMAL GÜLTIG?}
           |
-          +-- Nein --> [genau ein Format-Korrekturversuch]
+          +-- Nein --> [genau ein gezielter Berichtskorrekturversuch]
           |                         |
           |                         v
           |             {KORRIGIERTER BERICHT GÜLTIG?}
@@ -261,16 +327,19 @@ oder geschlossen stoppen.
 Die Klassen haben folgende Wirkung:
 
 | Klasse | Typischer Ablauf |
-|---|---|
+| --- | --- |
 | Einfache Antwort (`simple_answer`) | Hauptagent antwortet direkt; Experten nur bei echter zusätzlicher Komplexität |
 | Konzept (`concept`) | Experten beraten; Hauptagent erstellt ein validiertes Konzept, optional danach Tickets |
 | Arbeitsauftrag (`work_order`) | Experten beraten; Hauptagent erstellt ein oder mehrere umsetzbare Tickets |
 
-## Konkrete Alpha‑9-Beispiele für die drei Klassen
+## Konkrete Alpha‑10-Beispiele für die drei Klassen
 
 Die Klassifizierung folgt dem Inhalt und der gewünschten Aktion, nicht nur
 einzelnen Schlüsselwörtern. Die folgenden Beispiele zeigen den erwarteten
-Ablauf von `v0.147.1-alpha-9` bei aktivierter Standardkonfiguration.
+Ablauf des Alpha‑10-Quellkandidaten bei aktivierter Standardkonfiguration.
+`auto` wählt die Klasse lokal; `concept` und `work-order` können sie über
+`--workflow-type` oder `/workflow-type` ausdrücklich erzwingen. `inactive`
+umgeht die Extended-Workflow-Orchestrierung für neue Root-Anfragen.
 
 ### Beispiel 1: Einfache Antwort (`simple_answer`)
 
@@ -309,7 +378,7 @@ Noch nichts implementieren und noch keine Dateien ändern.
 Erwarteter Ablauf:
 
 1. Die lokale Klassifizierung ergibt `concept`.
-2. Standardmäßig werden zwei bis vier passende Experten ausgewählt, zum
+2. Gemäß Standardkonfiguration werden zwei bis vier passende Experten ausgewählt, zum
    Beispiel Architektur, Sicherheit sowie Testing und Kompatibilität.
 3. Jeder Experte liefert einen vollständigen strukturierten Bericht. Ungültige
    Berichte erhalten höchstens einen gezielten Korrekturversuch.
@@ -335,15 +404,16 @@ ergänze passende Tests und prüfe die fertige Änderung vollständig.
 Erwarteter Ablauf:
 
 1. Die lokale Klassifizierung ergibt `work_order`.
-2. Zwei bis vier zur Änderung passende Experten beraten den Hauptagenten.
+2. Gemäß Standardkonfiguration beraten zwei bis vier zur Änderung passende
+   Experten den Hauptagenten.
 3. Der Hauptagent erstellt mindestens ein validiertes Ticket mit
    Akzeptanzkriterien und Prüfschritten. Bei mehreren Tickets wird genau ein
    aktuelles Ticket ausgewählt.
 4. Nur der Hauptagent verändert den Working Tree und führt die relevanten Tests
    aus.
 5. Aus dem finalen binärsensitiven Working-Tree-Diff wird ein Digest gebildet.
-6. Zwei bis vier fachlich unterschiedliche Read-only-Reviewer prüfen exakt
-   diesen Digest.
+6. Gemäß Standardkonfiguration prüfen zwei bis vier fachlich unterschiedliche
+   Read-only-Reviewer exakt diesen Digest.
 7. Low- und Medium-Befunde werden behoben oder konkret disponiert und erneut
    geprüft. High- und Critical-Befunde müssen behoben werden.
 8. Ändert eine Korrektur den Diff, wird eine neue Reviewrunde an den neuen
@@ -356,6 +426,12 @@ Erwarteter Ablauf:
 Der Hauptagent wählt abhängig von den betroffenen Fachgebieten zwischen dem
 konfigurierten Minimum und Maximum passende Expertenprofile aus. Standardmäßig
 sind das mindestens zwei und höchstens vier.
+
+Alpha‑10 berücksichtigt dabei optionale `selection_keywords`, anschließend den
+bestehenden Domänen-/Risikoscore und zuletzt die Deklarationsreihenfolge. Vor
+dem ersten Spawn werden alle ausgewählten Rollen, Modelle, Reasoning-Stufen,
+Kontextgrenzen und Rollenfingerabdrücke gemeinsam geprüft. Scheitert ein
+Profil, startet die gesamte Runde nicht teilweise.
 
 Ein Expertenbeitrag muss:
 
@@ -394,6 +470,34 @@ Ein Reviewer-PASS ist nur gültig, wenn:
 3. `verdict` auf `pass` steht,
 4. die Liste der Befunde leer ist.
 
+### Warum nur ein gezielter Berichtskorrekturversuch?
+
+Die Begrenzung bedeutet nicht, dass insgesamt nur ein Bericht erlaubt ist. Der
+Reviewer liefert zunächst seinen ursprünglichen Bericht. Lehnt der Validator
+diesen formal ab, nennt er die konkreten Fehler. Danach darf derselbe Reviewer
+genau eine neue, gezielt korrigierte Ausgaberevision einreichen. Es sind somit
+höchstens zwei Einreichungen für denselben gebundenen Auftrag zulässig.
+
+Eine formale Ablehnung kann mehr als einen reinen Darstellungsfehler betreffen.
+Mögliche Ursachen sind ein ungültiges Schema, fehlende Pflichtfelder oder
+Evidenz, eine falsche Aufgaben- beziehungsweise Digest-Bindung oder ein
+überschrittenes Ergebnislimit. Deshalb verwendet die Anleitung den genaueren
+Begriff **Berichtskorrekturversuch** statt **Format-Korrekturversuch**.
+
+Die feste Grenze verhindert unbegrenzte automatische Schleifen, hält Laufzeit
+und Tokenverbrauch berechenbar und bewahrt einen eindeutigen Auditpfad. Bleibt
+auch die korrigierte Revision formal ungültig, wird sie mit
+`correction_exhausted` ausgeschlossen. Der Workflow senkt den Prüfstandard
+nicht stillschweigend ab, sondern stoppt für eine Benutzerentscheidung.
+
+Davon zu unterscheiden sind fachliche Re-Reviews:
+
+| Situation | Folge |
+| --- | --- |
+| Bericht ist formal ungültig | ursprünglicher Bericht plus höchstens ein gezielter Berichtskorrekturversuch |
+| Bericht ist formal gültig, enthält aber Befunde | Befunde beheben oder disponieren und begrenzte Re-Review durch denselben Reviewer |
+| Eine Behebung verändert den Working Tree | neuer Digest und vollständig neu gebundene Reviewrunde |
+
 Ändert sich der Arbeitsbaum nach einem Review, ist der alte PASS nicht mehr der
 Abschlussnachweis. Für den neuen Digest ist eine neue gebundene Reviewrunde
 erforderlich.
@@ -404,7 +508,7 @@ Reviewer beschreiben Befunde anhand von Auswirkung, Eintrittswahrscheinlichkeit
 und Wiederherstellbarkeit. Daraus wird der Schweregrad konsistent abgeleitet:
 
 | Punkte | Schweregrad | Bedeutung für den Workflow |
-|---:|---|---|
+| ---: | --- | --- |
 | 0–2 | Low | muss behoben oder ausdrücklich disponiert und erneut geprüft werden |
 | 3–4 | Medium | muss behoben oder ausdrücklich disponiert und erneut geprüft werden |
 | 5–6 | High | releasekritisch; muss behoben und erneut geprüft werden |
@@ -434,10 +538,20 @@ Farbfähigkeit.
 
 Typische Statusinformationen sind:
 
-- `Validated` oder `PASS`: formal gültig und verwertbar
+- `Validated`: ein Konzept oder Ticket erfüllt den strukturellen Vertrag; es
+  ist dadurch noch nicht genehmigt, implementiert oder getestet
+- Reviewer-`PASS`: ein formal gültiger, korrekt digest-gebundener Bericht
+  enthält keine Befunde; das Gesamtquorum kann trotzdem noch offen sein
+- `ELIGIBLE`: der einzelne Beitrag darf im nächsten Prozessschritt verwendet
+  oder für das Quorum gezählt werden
 - `Needs resolution`: Befund muss bearbeitet oder disponiert werden
 - `Rejected` oder `Invalid`: Bericht hat den Daten- oder Bindungsvertrag nicht erfüllt
 - `Low`, `Medium`, `High`, `Critical`: maximaler Schweregrad eines Befunds
+
+Die vier Ebenen Agentenlaufzeit, formale Validierung, Einzel-Gate und
+Gesamtquorum werden mit Beispielen unter
+[Workflow-Ausgaben richtig lesen](06-bedienung-und-fehlerbehebung.md#workflow-ausgaben-richtig-lesen)
+erklärt.
 
 ## Abschluss-Gate
 

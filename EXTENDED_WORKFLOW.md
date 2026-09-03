@@ -5,7 +5,10 @@ second agent runtime or a repository-specific ticket format. The fork is based
 on the official `rust-v0.147.0` tag at
 `be6e8eac029b183056b7e4402879f15d2c85f61b`. The requested upstream spelling
 `v0.147.0` was absent and the use of `rust-v0.147.0` was explicitly approved.
-The distribution and local release tag use `v0.147.1-alpha-9`.
+The workflow-type and configurable-role extensions described below are
+implemented in the source tree for `v0.147.1-alpha-10`. Installed binaries
+provide them only when the matching tag has passed the gated Alpha-10 release
+workflow; Alpha-9 installations do not contain them.
 
 ## Architecture
 
@@ -19,6 +22,13 @@ model capability resolver:
   `plan_reviewers` provide deterministic, unit-tested classification and
   dynamic role selection. This is local planning; it does not spend model
   tokens on a separate classifier call.
+- `codex-rs/core/src/extended_workflow/roles.rs` combines optional local
+  `selection_keywords` with the existing domain/risk score, resolves every
+  selected `agent_type` before the first spawn, enforces bounded role context,
+  and binds the plan to a SHA-256 role fingerprint.
+- `codex-rs/core/src/agent/role.rs` restricts configured workflow role files to
+  their trusted configuration boundary and rejects settings that could replace
+  profile-owned model behavior or widen child permissions.
 - `codex-rs/core/src/context/extended_workflow.rs` emits one bounded policy
   fragment and a compact per-turn JSON plan through the existing contextual
   user-message/world-state pipeline. The policy tells the main agent to use the
@@ -56,11 +66,11 @@ model capability resolver:
   the root thread. With the built-in profiles this means five total threads and
   four simultaneous child slots. An explicit user limit remains authoritative;
   `close_agent` releases occupied child slots for subsequent spawns.
-- `codex-rs/protocol/src/protocol.rs` persists the workflow identity and
-  read-only flag plus an optional profile context ceiling in backward-compatible
-  thread-spawn metadata. This keeps UI identity, security constraints, and the
-  context ceiling available across resume without adding a second persistence
-  system.
+- `codex-rs/protocol/src/protocol.rs` persists the workflow identity,
+  read-only flag, optional profile context ceiling, and optional full role
+  fingerprint in backward-compatible thread-spawn metadata. This keeps UI
+  identity, security constraints, role binding, and the context ceiling
+  available across resume without adding a second persistence system.
 - `codex-rs/tui/src/multi_agents.rs` renders name, type, role, model, reasoning,
   and textual status. Color is supplementary and follows terminal capability
   and `NO_COLOR` through `supports_color`.
@@ -96,6 +106,19 @@ Implementation/change signals win over concept wording; concept-only requests
 remain concepts. Risk, material uncertainty, detected domains, scope signals,
 and request size produce an inspectable complexity score and reasons.
 
+The selected workflow type is independent from the effective request class:
+
+- `auto` keeps the classifier decision unchanged;
+- `inactive` bypasses automatic extended-workflow planning for new requests;
+- `concept` forces only the effective class to `concept`;
+- `work-order` forces only the effective class to `work_order`.
+
+Forced types preserve the classifier's risk, domains, uncertainty, complexity,
+and reasons. The selected type and latest effective class are persisted in
+thread settings so resume and fork are deterministic. `/new` uses the loaded
+startup default. `/workflow-type` changes the selection for the next root
+request but is rejected while a turn or workflow generation is active.
+
 - A routine `simple_answer` selects no experts.
 - A simple answer can select experts when it crosses domains, contains material
   uncertainty, or has elevated/high risk.
@@ -111,6 +134,21 @@ The turn plan, selected profiles, count, estimates, budget decision, and
 classifier reasons are visible to the main model as structured JSON and are
 covered by tests in `codex-rs/core/src/extended_workflow.rs` and
 `codex-rs/core/tests/suite/extended_workflow.rs`.
+
+Each process can append `additional_profiles` after its built-in or explicitly
+replaced `profiles` catalog. Optional normalized `selection_keywords` rank
+before the existing domain/risk score and declaration order. If no profile has
+keywords, Alpha-9 ordering remains unchanged. Selection hints are local
+metadata and are never injected as instructions. Matched terms may still appear
+in the bounded model-visible selection diagnostics.
+
+Before a round starts, every selected role path, TOML document, model,
+reasoning effort, permission ceiling, instruction size, and context budget is
+validated. The role is fingerprinted from its identity, provenance, canonical
+path, bytes, and security binding. Spawn resolves and verifies the fingerprint
+immediately before applying exactly that validated material without a second
+path-based read; cold resume validates the persisted full fingerprint again.
+Drift fails closed and requires a new plan.
 
 ## Configuration
 
@@ -133,6 +171,7 @@ Example:
 ```toml
 [extended_workflow]
 enabled = true
+workflow_type = "auto"
 audit_mode = false
 workflow_budget_tokens = 16000
 max_result_bytes = 8192
@@ -193,12 +232,16 @@ token_budget = 2200
 context_budget = 12000
 ```
 
-For a one-off invocation, the four dedicated global arguments override the
+For a one-off invocation, the dedicated global arguments override the
 repository values without changing the file:
 
 ```shell
-codex-extended-workflow --workflow-token-limit 16000 --expert-min 2 --expert-max 4 --reviewer-min 2 --reviewer-max 4
+codex-extended-workflow --workflow-type work-order --workflow-token-limit 16000 --expert-min 2 --expert-max 4 --reviewer-min 2 --reviewer-max 4
 ```
+
+`--workflow-type` accepts `auto`, `inactive`, `concept`, and `work-order`.
+`enabled = false` is a hard disable and always resolves to `inactive`, even if
+a CLI, restored thread, or slash-command value requests another type.
 
 Either process, or both processes together, can be disabled for one invocation:
 
@@ -237,8 +280,10 @@ error used by native `spawn_agent`.
 Defaults for experts and reviewers are independently `enabled = true`,
 `min = 2`, `max = 4`. Each process enforces
 `0 <= min <= max <= 6`; equal bounds, including `0/0` and `6/6`, are valid.
-Each process accepts at most six profiles, and profile string fields are
-bounded to 256 UTF-8 bytes so the model-visible plan remains predictably small.
+Each process accepts a catalog of at most sixteen profiles while selecting at
+most six concurrently. Profile string fields remain bounded to 256 UTF-8
+bytes, each profile accepts at most twelve selection keywords of at most 64
+UTF-8 bytes, and aggregate process metadata is capped at 16 KiB.
 `enabled = true, min = 0, max = 0` means that classification and workflow
 guidance remain active but that process starts no automatic subagents.
 `enabled = false` starts none regardless of its bounds. Both processes may be
@@ -334,10 +379,10 @@ provider-side hard output-token cap when the API/runtime cannot do so.
   runtime applies the smaller of this value, an existing global override, and
   the selected model's provider/catalog maximum. The ceiling is persisted with
   workflow identity and restored after resume or residency reload. Before a
-  selected subagent starts, the runtime also compares the ceiling with a
-  conservative byte-based estimate of the canonical assignment alone. An
-  assignment that cannot fit is rejected visibly; the estimate is not
-  presented as an exact provider token count.
+  selected subagent starts, the runtime compares the ceiling with a
+  conservative byte-based estimate of the complete server-bound task contract
+  plus resolved role instructions. A contract that cannot fit is rejected
+  visibly; the estimate is not presented as an exact provider token count.
 - `workflow_budget_tokens` is an enforced cumulative provider-token stop shared
   by the main agent, experts, reviewers, and compactions in one workflow.
   Provider `total_tokens` are counted literally, including cached input and
@@ -353,6 +398,11 @@ provider-side hard output-token cap when the API/runtime cannot do so.
   closes the workflow and starts the next independent request at zero while the
   session total continues. `/workflow-reset-budget` explicitly abandons the
   current workflow and resets only its counter.
+- The `workflow-tokens` status-line component prefixes an active budget with
+  the selected type, for example `Workflow: concept · 12.000 / 16.000 Tokens`.
+  Without an active budget it shows only the type; `inactive` never exposes a
+  stale workflow counter. `/status` also reports the latest effective request
+  class.
 - At a non-zero ceiling the TUI offers another 100%, 75%, 50%, or 25% of the
   original base limit, or Stop. An extension raises the ceiling and never
   clears already used tokens. Non-interactive `exec` cannot ask and stops. Since
@@ -369,7 +419,8 @@ provider-side hard output-token cap when the API/runtime cannot do so.
   instead of silently reducing quality.
 - Input tokens, output tokens, and the main-agent share are reported as not
   independently hard-enforced by this layer.
-- `max_result_bytes` defaults to 8 KiB and has a hard configurable ceiling of
+- `max_result_bytes` limits each structured expert, reviewer, concept, or
+  ticket result. It defaults to 8 KiB and has a hard configurable ceiling of
   9,000 UTF-8 bytes. The same 9,000-byte ceiling applies to each individual
   model-visible workflow context fragment; the one-retry rule is also locally
   hard-enforced.
@@ -476,9 +527,10 @@ and on stale previews it fails without replacing user content.
 
 For an empty target the generated, commented configuration includes the
 explicit expert and reviewer profiles, 2..4 process ranges, audit and result
-limits, `workflow_budget_tokens = 0`, and the `session-tokens` and
-`workflow-tokens` status-line items. Existing files are still a manual-merge
-boundary and are never overwritten.
+limits, `workflow_type = "auto"`, `workflow_budget_tokens = 0`, local
+`selection_keywords`, and the `session-tokens` and `workflow-tokens`
+status-line items. Existing files are still a manual-merge boundary and are
+never overwritten.
 
 ## CLI compatibility and versioning
 
@@ -492,10 +544,12 @@ the extended defaults while `bin/codex.js` remains the disabled-by-default
 compatibility entry point. Rust crate names and other public interfaces remain
 stable. App-server, foreground remote control, MCP tool sessions, and the
 TypeScript SDK propagate the same one-shot product default; an explicit
-configuration value still wins. Both launchers report `v0.147.1-alpha-9`.
+configuration value still wins. Launchers built from the Alpha-10 source tree
+report `v0.147.1-alpha-10`.
 
 The official app-server updater and update prompt are hard-disabled when the
 extended product mode is active, preventing a managed daemon from replacing
 this fork with an upstream binary. The compatibility `codex` launcher retains
-the upstream updater behavior. Installation and publishing are intentionally
-local-only until an explicit release process is requested.
+the upstream updater behavior. A source checkout alone is not an Alpha-10
+release: installability requires an exact reviewed commit, the matching tag,
+and the gated Windows archive, SHA-256 manifest, and PowerShell installer.

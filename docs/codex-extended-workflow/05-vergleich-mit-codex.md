@@ -16,49 +16,50 @@ Artefakten, Digest-Bindung und Reviewer-Abschluss-Gate.
 ## Vergleich als ASCII-Diagramm
 
 ```text
-NORMALER CODEX                         CODEX-EXTENDED-WORKFLOW
-────────────────────────────          ────────────────────────────────────
+NORMALER CODEX                    CODEX-EXTENDED-WORKFLOW
+----------------------------      -----------------------------------
 
-┌──────────────────────┐               ┌──────────────────────┐
-│ Benutzeranfrage      │               │ Benutzeranfrage      │
-└──────────┬───────────┘               └──────────┬───────────┘
-           v                                      v
-┌──────────────────────┐               ┌──────────────────────┐
-│ Hauptagent plant und │               │ Anfrage lokal als    │
-│ arbeitet flexibel    │               │ Antwort/Konzept/     │
-└──────────┬───────────┘               │ Auftrag klassifizieren│
-           │                           └──────────┬───────────┘
-           ├── Tools                             v
-           ├── Subagents optional     ┌──────────────────────┐
-           └── Review auf Wunsch      │ Expertenprozess nach │
-           │                           │ Klasse und Fachgebiet │
-           v                           └──────────┬───────────┘
-┌──────────────────────┐                          v
-│ Antwort oder         │               ┌──────────────────────┐
-│ implementierte       │               │ Konzept/Ticket samt │
-│ Änderung             │               │ Akzeptanzkriterien   │
-└──────────────────────┘               └──────────┬───────────┘
-                                                  v
-                                       ┌──────────────────────┐
-                                       │ Nur Hauptagent setzt │
-                                       │ um und testet        │
-                                       └──────────┬───────────┘
-                                                  v
-                                       ┌──────────────────────┐
-                                       │ Reviewer prüfen den  │
-                                       │ gebundenen Diff      │
-                                       └──────────┬───────────┘
-                                                  v
-                                       ┌──────────────────────┐
-                                       │ Same-Digest-Gate:    │
-                                       │ PASS ohne Befunde?   │
-                                       └──────┬────────┬──────┘
-                                            Ja        Nein
-                                             v          v
-                                       ┌──────────┐ ┌──────────┐
-                                       │ Fertig   │ │ Korrektur│
-                                       └──────────┘ │ oder Stopp│
-                                                    └──────────┘
+[Benutzeranfrage]                 [Benutzeranfrage]
+       |                                  |
+       v                                  v
+[Hauptagent plant und             [lokale Klassifizierung]
+ arbeitet flexibel]                       |
+       |                                  +-- simple_answer --> [direkte Antwort] --> [Fertig]
+       v                                  |
+[Tools und optionale Subagents]           +-- concept --> [passende Experten]
+       |                                  |                       |
+       v                                  |                       v
+<Review gewünscht?>                       |              [validiertes Konzept]
+    |          |                          |                       |
+   Nein        Ja                         |                       v
+    |          v                          |                    [Fertig]
+    |    [optionaler Review]               |
+    |          |                          +-- work_order --> [passende Experten]
+    +----------+                                                 |
+               |                                                 v
+               v                                        [validiertes Ticket]
+[Antwort oder Änderung]                                          |
+                                                                  v
+                                                    [Hauptagent implementiert/testet]
+                                                                  |
+                                                                  v
+                                                    [Reviewer prüfen gebundenen Diff]
+                                                                  |
+                                                                  v
+                                                    <alle PASS, keine Findings,
+                                                     aktueller Digest?>
+                                                         |             |
+                                                        Ja            Nein
+                                                         |             |
+                                                      [Fertig]         v
+                                                       <Auflösung und Re-Review möglich?>
+                                                               |              |
+                                                              Ja             Nein
+                                                               |              |
+                                              [Korrektur oder Disposition]  [BLOCKED:
+                                                               |            Benutzerentscheidung]
+                                                               |
+                                                               +----> Reviewer
 ```
 
 ## Vergleich als Mermaid-Diagramm
@@ -69,21 +70,30 @@ flowchart LR
         direction TB
         N1["Benutzeranfrage"] --> N2["Hauptagent plant und arbeitet flexibel"]
         N2 --> N3["Tools und optional Subagents"]
-        N3 --> N4["Optionaler Review auf Anforderung"]
-        N4 --> N5["Antwort oder Änderung"]
+        N3 --> N4{"Review gewünscht?"}
+        N4 -->|"Nein"| N6["Antwort oder Änderung"]
+        N4 -->|"Ja"| N5["Optionaler Review auf Anforderung"]
+        N5 --> N6
     end
 
     subgraph E["codex-extended-workflow"]
         direction TB
         E1["Benutzeranfrage"] --> E2["Lokale Klassifizierung"]
-        E2 --> E3["Passende Experten bei Konzept oder Auftrag"]
-        E3 --> E4["Validiertes Konzept oder Ticket"]
-        E4 --> E5["Hauptagent implementiert und testet"]
-        E5 --> E6["Reviewer prüfen gebundenen Diff"]
-        E6 --> E7{"Alle PASS ohne Befunde auf aktuellem Digest?"}
-        E7 -->|"Ja"| E8["Abschluss"]
-        E7 -->|"Nein"| E9["Korrektur, Disposition oder Benutzerentscheidung"]
-        E9 --> E6
+        E2 -->|"simple_answer"| E3["Direkte Antwort"]
+        E3 --> E10["Abschluss"]
+        E2 -->|"concept"| E4["Passende Experten"]
+        E4 --> E5["Validiertes Konzept"]
+        E5 --> E10
+        E2 -->|"work_order"| E6["Passende Experten"]
+        E6 --> E7["Validiertes Ticket"]
+        E7 --> E8["Hauptagent implementiert und testet"]
+        E8 --> E9["Reviewer prüfen gebundenen Diff"]
+        E9 --> E11{"Alle PASS ohne Befunde auf aktuellem Digest?"}
+        E11 -->|"Ja"| E10
+        E11 -->|"Nein"| E12{"Auflösung und Re-Review möglich?"}
+        E12 -->|"Ja"| E13["Korrektur oder Disposition"]
+        E13 --> E9
+        E12 -->|"Nein"| E14["BLOCKED: Benutzerentscheidung erforderlich"]
     end
 
     N1 ~~~ E1
@@ -92,7 +102,7 @@ flowchart LR
 ## Funktionsvergleich
 
 | Bereich | Normaler `codex`-Ablauf | `codex-extended-workflow` |
-|---|---|---|
+| --- | --- | --- |
 | Startbefehl | `codex` | `codex-extended-workflow` |
 | Laufzeit | Codex | dieselbe Codex-Laufzeit plus Workflow-Schicht |
 | Anfragebehandlung | flexibel durch Hauptagent | lokale Klasse `simple_answer`, `concept` oder `work_order` |
@@ -100,6 +110,9 @@ flowchart LR
 | Expertenanzahl | kein spezielles Experten-Min/Max-Gate | unabhängig konfigurierbar, Standard `2..4`, maximal `6` |
 | Revieweranzahl | kein spezielles Reviewer-Min/Max-Gate | unabhängig konfigurierbar, Standard `2..4`, maximal `6` |
 | Rollen und Modelle | über normale Agentenkonfiguration bzw. Aufruf | je Experten-/Reviewerprofil sichtbar konfiguriert |
+| Rollenkatalog | normale Agentenrollen | bis zu 16 Profile je Prozess, davon höchstens 6 ausgewählt; `additional_profiles` ergänzt Standards |
+| Rollenauswahl | frei durch Agent/Auftrag | lokale `selection_keywords`, Domänen-/Risikoscore und stabile Reihenfolge |
+| Rollenintegrität | abhängig vom jeweiligen Auftrag | Preflight und SHA‑256-Rollenfingerabdruck bei Spawn und Resume |
 | Konzept/Ticket | bei Bedarf frei erstellt | strukturierter und validierter Pflichtschritt für passende Klassen |
 | Schreibrechte | abhängig von Agent und Sandbox | Workflow-Experten und -Reviewer read-only; nur Hauptagent schreibt |
 | Reviewstart | auf Anforderung oder durch Anweisung | automatisch nach Implementierung eines Arbeitsauftrags |
@@ -107,7 +120,7 @@ flowchart LR
 | Reviewer-PASS | Ergebnis des gewählten Reviews | formal gültig, `verdict=pass`, keine Befunde, aktuelle Digest-Bindung |
 | Low/Medium | abhängig vom gewählten Prozess | müssen korrigiert oder akzeptiert disponiert und erneut geprüft werden |
 | High/Critical | abhängig vom gewählten Prozess | releasekritisch und zwingend zu beheben |
-| Korrekturversuche | nicht durch diesen Fork-Vertrag begrenzt | ein Format-Korrekturversuch und eine begrenzte Re-Review-Schleife |
+| Korrekturversuche | nicht durch diesen Fork-Vertrag begrenzt | ein gezielter Berichtskorrekturversuch und eine begrenzte Re-Review-Schleife |
 | Tokensteuerung | normale Codex-Nutzung und Kontextgrenzen | zusätzlich hartes kumulatives Workflowlimit und Profil-Kontextlimits |
 | Standard-State | `~/.codex` | isoliert unter `~/.codex-extended-workflow` |
 | Resume-Ausgabe | `codex resume ...` | `codex-extended-workflow resume ...` |
@@ -166,7 +179,7 @@ flowchart LR
 ## Entscheidungshilfe
 
 | Situation | Sinnvolle Wahl |
-|---|---|
+| --- | --- |
 | kurze Erklärung, Übersetzung oder kleine Recherche | normaler Codex-Ablauf |
 | kleine, risikoarme Ein-Datei-Änderung | normaler Codex oder Extended mit deaktivierten Prozessen |
 | Konzept mit mehreren Fachgebieten | `codex-extended-workflow` mit Experten |

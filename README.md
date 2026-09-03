@@ -22,8 +22,9 @@ The primary executable is `codex-extended-workflow`; the `codex` executable is
 retained as a compatibility entry point. The primary launcher enables the
 extended workflow only when no CLI, repository, or global setting explicitly
 sets `extended_workflow.enabled`; the compatibility launcher preserves the
-upstream disabled default. The visible distribution version is
-`v0.147.1-alpha-9`. Automatic app-server updates are disabled in the extended
+upstream disabled default. This source tree targets `v0.147.1-alpha-10`.
+Installed availability requires the matching tag to pass the Alpha-10 release
+workflow. Automatic app-server updates are disabled in the extended
 product mode so this fork cannot silently replace itself with an official Codex
 package; the compatibility `codex` launcher retains upstream behavior.
 
@@ -75,11 +76,13 @@ rules, repository preparation, and implementation references.
 
 ### Installing codex-extended-workflow on Windows
 
-Starting with releases produced by `extended-workflow-release.yml`, download
-the installer from the matching GitHub release and run it with the exact tag:
+For releases produced by `extended-workflow-release.yml`, download the installer
+from the matching GitHub release and run it with the exact tag. The following
+command succeeds only when the Alpha-10 assets are published; otherwise the
+download returns HTTP 404:
 
 ```powershell
-$tag = "v0.147.1-alpha-9"
+$tag = "v0.147.1-alpha-10"
 $installer = Join-Path $env:TEMP "install-extended-workflow.ps1"
 Invoke-WebRequest "https://github.com/mikmann/own-codex/releases/download/$tag/install-extended-workflow.ps1" -OutFile $installer
 & $installer -Release $tag

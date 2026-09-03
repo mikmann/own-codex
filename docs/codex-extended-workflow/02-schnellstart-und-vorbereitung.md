@@ -11,9 +11,11 @@ Für den erweiterten Workflow genügt grundsätzlich diese projektlokale Datei:
 ```
 
 Eine zusätzliche `AGENTS.md` oder ein Verzeichnis `.codex/agents` ist für den
-Standard-Workflow nicht erforderlich. Solche Dateien können weiterhin für
-projektspezifische Anweisungen oder eigene Codex-Agenten verwendet werden, sind
-aber kein Installationsbestandteil dieser CLI.
+Standard-Workflow nicht erforderlich. Eigene Workflow-Rollen benötigen dagegen
+eine `[agents.<name>]`-Definition und bei dateibasierten Anweisungen eine
+vertrauenswürdige Rollendatei, typischerweise unter `.codex/agents`. Diese
+Dateien entstehen nicht automatisch, weil ihre fachlichen Inhalte
+projektspezifisch sind.
 
 Projektlokale Konfiguration wird nur in einem von Codex als vertrauenswürdig
 behandelten Repository geladen. Sicherheitsrelevante oder nicht unterstützte
@@ -22,7 +24,7 @@ Benutzerkonfiguration.
 
 ## Sichere Vorbereitung in zwei Schritten
 
-Wechsle in den Git-Worktree:
+Zunächst wird in den Git-Worktree gewechselt:
 
 ```powershell
 Set-Location D:\Pfad\zum\Repository
@@ -34,14 +36,17 @@ Zuerst nur die geplante Aktion anzeigen:
 codex-extended-workflow prepare-extend-workflow
 ```
 
-Wenn die Vorschau korrekt ist, anwenden:
+Nach Prüfung der Vorschau wird derselbe Plan angewendet:
 
 ```powershell
 codex-extended-workflow prepare-extend-workflow --apply
 ```
 
 Ohne `--apply` werden keine Dateien verändert. Beim Anwenden wird eine fehlende
-`.codex/config.toml` vollständig erstellt.
+`.codex/config.toml` vollständig erstellt. Die Alpha‑10-Vorlage setzt
+`extended_workflow.workflow_type = "auto"`, benennt Experten- und
+Reviewerprofile samt Modell und Reasoning-Stufe und fügt lokale
+`selection_keywords` hinzu.
 
 ## Vorbereitung aus einem beliebigen Ordner
 
@@ -63,7 +68,7 @@ not inside a Git worktree; run this command from a repository or pass --cd <DIR>
 `prepare-extend-workflow` überschreibt keine vorhandene Konfiguration:
 
 | Ausgangslage | Ergebnis |
-|---|---|
+| --- | --- |
 | `.codex/config.toml` fehlt | vollständige Vorlage wird geplant bzw. erstellt |
 | gültiger `[extended_workflow]`-Abschnitt vorhanden | Datei wird unverändert wiederverwendet |
 | Datei vorhanden, aber Abschnitt fehlt | Konflikt; Abschnitt muss manuell ergänzt werden |
@@ -76,7 +81,7 @@ neu gestartet werden.
 
 ## Globale Standardkonfiguration
 
-Soll die Konfiguration für alle Repositories gelten, kann sie im isolierten
+Wenn die Konfiguration für alle Repositories gelten soll, kann sie im isolierten
 Benutzerbereich der erweiterten CLI vorbereitet werden:
 
 ```powershell
@@ -108,6 +113,12 @@ Im vorbereiteten Projekt:
 codex-extended-workflow
 ```
 
+Mit Alpha‑10 kann ein Arbeitsauftrag ausdrücklich erzwungen werden:
+
+```powershell
+codex-extended-workflow --workflow-type work-order
+```
+
 Beispielauftrag:
 
 ```text
@@ -122,17 +133,85 @@ anschließend den Reviewer-Prozess.
 ## Sitzung fortsetzen
 
 ```powershell
-codex-extended-workflow resume <SITZUNGS-ID>
+$sessionId = "<SITZUNGS-ID>"
+codex-extended-workflow resume $sessionId
 ```
 
 Wurde die Sitzung ausdrücklich mit normalem Codex-State gestartet:
 
 ```powershell
-codex-extended-workflow --shared-state resume <SITZUNGS-ID>
+$sessionId = "<SITZUNGS-ID>"
+codex-extended-workflow --shared-state resume $sessionId
 ```
 
 Das Produktpräfix bleibt damit auch im angezeigten Resume-Befehl eindeutig.
 
+## Vorbereitungsworkflow
+
+### ASCII
+
+```text
+[Start: aktuelles Verzeichnis oder --cd]
+                  |
+                  v
+          <Git-Worktree vorhanden?>
+             |                |
+           Nein               Ja
+             |                |
+   [STOP: Ziel korrigieren]    v
+                       [.codex/config.toml prüfen]
+                              |
+          +-------------------+-------------------+
+          |                   |                   |
+       fehlt          gültiger Workflow      Konflikt/ungültig
+          |                   |                   |
+ [CREATE-Vorschau]   [UNCHANGED-Vorschau]   [STOP: manuell lösen]
+          |                   |
+          +---------+---------+
+                    |
+             <-- ohne --apply --> [ENDE: keine Änderung]
+                    |
+              mit --apply
+                    |
+                    v
+           <Dateistand unverändert?>
+              |               |
+            Nein              Ja
+              |               |
+       [STOP: neu planen]      v
+                         [atomar erstellen
+                          oder unverändert lassen]
+                                  |
+                                  v
+                                [PASS]
+```
+
+### Mermaid
+
+```mermaid
+flowchart TD
+    A[Start: aktuelles Verzeichnis oder --cd] --> B{Git-Worktree vorhanden?}
+    B -->|Nein| C[STOP: Ziel korrigieren]
+    B -->|Ja| D[.codex/config.toml prüfen]
+    D -->|fehlt| E[CREATE-Vorschau]
+    D -->|gültiger Workflow| F[UNCHANGED-Vorschau]
+    D -->|Konflikt oder ungültig| G[STOP: manuell lösen]
+    E --> H{--apply gesetzt?}
+    F --> H
+    H -->|Nein| I[Ende ohne Änderung]
+    H -->|Ja| J{Dateistand unverändert?}
+    J -->|Nein| K[STOP: neu planen]
+    J -->|Ja| L[Atomar erstellen oder unverändert lassen]
+    L --> M[PASS]
+```
+
+Beide Diagramme bilden dieselben Fail-closed-Grenzen ab: Ohne Git-Worktree,
+bei Konflikten oder nach einer Änderung zwischen Vorschau und Anwendung wird
+nichts geschrieben.
+
 ## Nächster Schritt
 
 Der vollständige Ablauf ist in [03 – Workflow](03-workflow.md) dargestellt.
+Eigene Rollen werden in
+[08 – Konfigurierbare Workflow-Rollen](08-konfigurierbare-workflow-rollen.md)
+beschrieben.
